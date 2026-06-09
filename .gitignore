@@ -31,3 +31,4 @@ Icon
 # Built Visual Studio Code Extensions
 *.vsix
 docs/plans/
+planet-express_*.zip
