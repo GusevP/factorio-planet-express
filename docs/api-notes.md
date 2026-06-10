@@ -406,6 +406,19 @@ ships), but correctness rests on the signature compare, not the event.
 > `pairs`-order serialization would produce false "player edited it" positives
 > across save/load and across clients.
 
+> **What we sign (Task 5).** Per record: `station`, the record-level
+> `allows_unloading`, and each wait condition. Per wait condition: `type`,
+> `ticks`, `compare_type`, and — for an `item_count` condition that carries a
+> `condition` (CircuitCondition) payload — the payload's `comparator`,
+> `first_signal.name`, `first_signal.quality`, and `constant`. So a player
+> editing a wait QUANTITY (`constant`) or the record's `allows_unloading` flag is
+> now DETECTED instead of silently overwritten by the next `resync_conditions`.
+> `first_signal.type` is **deliberately EXCLUDED** (item signals round-trip it
+> inconsistently as omitted vs `"item"`, a first-tick false-positive risk). The
+> engine fields themselves are already `[confirmed]` in §1 (the 2.0
+> `ScheduleRecord` + `WaitCondition` shapes), so this adds NO new seam entry —
+> only widens what the existing signature serializes.
+
 > **Caveat (engine default normalization):** the signature must canonicalize a
 > `WaitCondition` written without a `compare_type` to the engine default
 > **`"and"`** (`watchdog.schedule_signature` does `c.compare_type or "and"`). The
@@ -413,6 +426,11 @@ ships), but correctness rests on the signature compare, not the event.
 > engine stores AND reads it back as `"and"`, so a `compare_type or ""`
 > serialization would make the commit-time signature mismatch its own live
 > readback and falsely withdraw every fresh assignment on the first watchdog tick.
+> The SAME rule extends to the Task 5 payload fields the signature now covers
+> (each default the engine materializes on readback must serialize identically to
+> the commit-time form): `allows_unloading` absent → `false`, an `item_count`
+> condition's `first_signal.quality` absent → `"normal"`, and its `constant`
+> absent → `0`.
 > (The pure builder still emits the ABSTRACT `full`/`empty` tokens; when the
 > wrapper maps those to the real 2.0 `WaitConditionType`s in-engine, sign over the
 > mapped records so the readback compare stays apples-to-apples.)

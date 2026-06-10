@@ -1750,6 +1750,191 @@ describe("schedule.build_records -- empty return manifest stays a 2-stop route",
   assert_eq(built.return_manifest, nil, "no return manifest exposed")
 end)
 
+describe("schedule.engine_records -- engine shape is {station, wait_conditions, allows_unloading} only", function()
+  -- Production signs `schedule_signature(engine_records(build_records(...).records))`
+  -- at commit, and the watchdog re-signs the LIVE read-back schedule. The two MUST
+  -- serialize identically, so engine_records must reproduce exactly the fields the
+  -- engine round-trips: station, wait_conditions, allows_unloading -- and nothing
+  -- else (the per-stop `requests` / `import_from` bookkeeping is NOT a 2.0
+  -- ScheduleRecord field and must be stripped).
+  local built = schedule.build_records({
+    source = "nauvis", dest = "vulcanus", capacity = 1000, timeout = 3600,
+    items = {
+      { item = "iron-plate", surplus = 500, unmet = 800 },
+      { item = "copper-plate", surplus = 300, unmet = 200 },
+    },
+  })
+  local eng = schedule.engine_records(built.records)
+
+  assert_eq(#eng, 2, "engine records mirror the route stop count")
+  -- shape: exactly station + wait_conditions + allows_unloading, requests stripped
+  for i, rec in ipairs(eng) do
+    local keys = {}
+    for k in pairs(rec) do keys[#keys + 1] = k end
+    table.sort(keys)
+    assert_eq(keys, { "allows_unloading", "station", "wait_conditions" },
+      "engine record " .. i .. " carries ONLY station/wait_conditions/allows_unloading")
+  end
+  assert_eq(eng[1].station, "nauvis", "engine record keeps the station")
+  assert_eq(eng[1].allows_unloading, false, "engine record keeps allows_unloading (load stop false)")
+  assert_eq(eng[2].allows_unloading, true, "engine record keeps allows_unloading (drop stop true)")
+  assert_eq(eng[1].requests, nil, "engine record strips the requests bookkeeping field")
+  assert_eq(eng[1].import_from, nil, "engine record strips the import_from bookkeeping field")
+  -- wait_conditions carry through untouched (same table content)
+  assert_eq(eng[1].wait_conditions, built.records[1].wait_conditions,
+    "engine record preserves the source wait conditions verbatim")
+
+  -- nil / empty input -> empty engine list (defensive)
+  assert_eq(schedule.engine_records(nil), {}, "nil records -> empty engine list")
+end)
+
+describe("schedule.engine_records -- apples-to-apples signature compare with a readback fixture", function()
+  -- The exact production invariant: the commit-time signature of
+  -- engine_records(build_records(...).records) must EQUAL the signature the
+  -- watchdog recomputes from the live read-back schedule. We model the read-back as
+  -- a hand-rolled engine-shape fixture (the engine materializes defaults: an
+  -- item_count's first_signal.type round-trips, compare_type fills to "and", and
+  -- allows_unloading/quality/constant are present). If these don't serialize
+  -- identically, every freshly written schedule is falsely flagged a player edit on
+  -- the first watchdog tick.
+  local built = schedule.build_records({
+    source = "nauvis", dest = "vulcanus", capacity = 1000, timeout = 3600,
+    items = { { item = "iron-plate", surplus = 500, unmet = 800 } },
+  })
+  local commit_sig = watchdog.schedule_signature(schedule.engine_records(built.records))
+
+  -- Hand-rolled readback: same stations, wait conditions, allows_unloading; the
+  -- engine has filled compare_type="and" on the leading item_count and carries the
+  -- item_count payload (comparator / first_signal.name+quality / constant).
+  local readback = {
+    {
+      station = "nauvis",
+      allows_unloading = false,
+      wait_conditions = {
+        { type = "item_count", compare_type = "and",
+          condition = { comparator = ">=",
+            first_signal = { type = "item", name = "iron-plate", quality = "normal" }, constant = 500 } },
+        { type = "time", ticks = 3600, compare_type = "or" },
+      },
+    },
+    {
+      station = "vulcanus",
+      allows_unloading = true,
+      wait_conditions = {
+        { type = "item_count", compare_type = "and",
+          condition = { comparator = "=",
+            first_signal = { type = "item", name = "iron-plate", quality = "normal" }, constant = 0 } },
+        { type = "inactivity", ticks = 300, compare_type = "or" },
+        { type = "time", ticks = 3600, compare_type = "or" },
+      },
+    },
+  }
+  assert_eq(commit_sig, watchdog.schedule_signature(readback),
+    "commit-time engine_records signature == hand-rolled readback signature (no first-tick false positive)")
+end)
+
+describe("watchdog.schedule_signature -- wait payload + allows_unloading sensitivity", function()
+  -- Engine-shape records (station + wait_conditions + allows_unloading), an
+  -- item_count condition carrying a CircuitCondition payload.
+  local function recs(constant, allows)
+    return {
+      {
+        station = "nauvis",
+        allows_unloading = allows,
+        wait_conditions = {
+          { type = "item_count", compare_type = "and",
+            condition = { comparator = ">=",
+              first_signal = { type = "item", name = "iron-plate", quality = "normal" }, constant = constant } },
+          { type = "time", ticks = 3600, compare_type = "or" },
+        },
+      },
+    }
+  end
+
+  -- changed wait constant -> signature differs (player edited the load quantity)
+  check(watchdog.schedule_signature(recs(500, false)) ~= watchdog.schedule_signature(recs(400, false)),
+    "changed item_count constant -> signature differs")
+
+  -- toggled allows_unloading -> signature differs (player flipped the unload flag)
+  check(watchdog.schedule_signature(recs(500, false)) ~= watchdog.schedule_signature(recs(500, true)),
+    "toggled allows_unloading -> signature differs")
+
+  -- changed comparator -> signature differs (>= vs =)
+  local ge = recs(500, false)
+  local eq = recs(500, false)
+  eq[1].wait_conditions[1].condition.comparator = "="
+  check(watchdog.schedule_signature(ge) ~= watchdog.schedule_signature(eq),
+    "changed comparator -> signature differs")
+
+  -- changed first_signal.name -> signature differs
+  local renamed = recs(500, false)
+  renamed[1].wait_conditions[1].condition.first_signal.name = "copper-plate"
+  check(watchdog.schedule_signature(recs(500, false)) ~= watchdog.schedule_signature(renamed),
+    "changed first_signal.name -> signature differs")
+
+  -- changed first_signal.quality -> signature differs
+  local requality = recs(500, false)
+  requality[1].wait_conditions[1].condition.first_signal.quality = "uncommon"
+  check(watchdog.schedule_signature(recs(500, false)) ~= watchdog.schedule_signature(requality),
+    "changed first_signal.quality -> signature differs")
+end)
+
+describe("watchdog.schedule_signature -- explicit-vs-absent defaults serialize identically", function()
+  -- The engine MATERIALIZES defaults on readback; the commit-time form may OMIT
+  -- them. Both must sign identically or every fresh schedule is a false player edit
+  -- on the first watchdog tick. Covers: allows_unloading absent vs false,
+  -- first_signal.quality absent vs "normal", constant absent vs 0,
+  -- first_signal.type excluded (omitted vs "item" must NOT diverge).
+  local explicit = {
+    {
+      station = "nauvis",
+      allows_unloading = false,
+      wait_conditions = {
+        { type = "item_count", compare_type = "and",
+          condition = { comparator = "=",
+            first_signal = { type = "item", name = "iron-plate", quality = "normal" }, constant = 0 } },
+      },
+    },
+  }
+  local absent = {
+    {
+      station = "nauvis",
+      -- allows_unloading absent (engine default false)
+      wait_conditions = {
+        { type = "item_count", compare_type = "and",
+          -- first_signal.type absent (excluded), quality absent (-> normal),
+          -- constant absent (-> 0)
+          condition = { comparator = "=", first_signal = { name = "iron-plate" } } },
+      },
+    },
+  }
+  assert_eq(watchdog.schedule_signature(explicit), watchdog.schedule_signature(absent),
+    "explicit defaults (allows_unloading=false, quality=normal, constant=0, type=item) == absent")
+
+  -- first_signal.type alone must NOT change the signature (excluded from signing).
+  local typed = {
+    { station = "nauvis",
+      wait_conditions = { { type = "item_count", compare_type = "and",
+        condition = { comparator = "=", first_signal = { type = "item", name = "iron-plate" } } } } },
+  }
+  local untyped = {
+    { station = "nauvis",
+      wait_conditions = { { type = "item_count", compare_type = "and",
+        condition = { comparator = "=", first_signal = { name = "iron-plate" } } } } },
+  }
+  assert_eq(watchdog.schedule_signature(typed), watchdog.schedule_signature(untyped),
+    "first_signal.type present vs absent -> signature identical (deliberately excluded)")
+
+  -- a payload-less condition (time/inactivity) serializes its payload slot empty,
+  -- identically whether `condition` is absent (it always is for time/inactivity).
+  local time_only = {
+    { station = "nauvis",
+      wait_conditions = { { type = "time", ticks = 3600, compare_type = "or" } } },
+  }
+  assert_eq(watchdog.schedule_signature(time_only), watchdog.schedule_signature(time_only),
+    "time/inactivity (no condition payload) signs stably with an empty payload slot")
+end)
+
 describe("dispatcher.plan -- two-way gate (setting off vs on)", function()
   local function snap()
     return {

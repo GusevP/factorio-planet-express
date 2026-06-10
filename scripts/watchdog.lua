@@ -238,10 +238,27 @@ end
 --   * iterate wait-conditions in their fixed array order.
 -- A `pairs`-order serialization would produce false "player edited it" positives.
 -- Pure over plain record tables (the §1 agnostic shape from schedule.lua).
+--
+-- CANONICALIZATION RULE (load-bearing -- mirrors the existing `compare_type or
+-- "and"` pattern): every field the engine MATERIALIZES a default for on readback
+-- must serialize identically to the commit-time form, or every freshly written
+-- schedule mismatches its own live readback on the first watchdog tick and is
+-- falsely withdrawn as a player edit. So:
+--   * `compare_type` absent -> "and" (the engine default),
+--   * `allows_unloading` absent -> false (the engine default),
+--   * an `item_count` condition's `first_signal.quality` absent -> "normal",
+--   * its `constant` absent -> 0.
+-- `first_signal.type` is DELIBERATELY EXCLUDED: item signals round-trip it
+-- inconsistently (omitted vs "item"), which would be a first-tick false positive.
+-- Conditions WITHOUT a `condition` payload (time / inactivity are only
+-- {type, ticks, compare_type}) serialize the payload slot as EMPTY, identically
+-- on commit and readback -- the `if c.condition then` guard descends only when a
+-- payload is present so the empty slot is byte-identical on both sides.
 function watchdog.schedule_signature(records)
   local parts = {}
   for _, rec in ipairs(records or {}) do
     parts[#parts + 1] = "@" .. tostring(rec.station)
+    parts[#parts + 1] = "u=" .. tostring(rec.allows_unloading == true)
     local reqs = {}
     for item, qty in state.sorted_pairs(rec.requests or {}) do
       reqs[#reqs + 1] = item .. "=" .. tostring(qty)
@@ -249,16 +266,25 @@ function watchdog.schedule_signature(records)
     parts[#parts + 1] = "r[" .. table.concat(reqs, ",") .. "]"
     local conds = {}
     for _, c in ipairs(rec.wait_conditions or {}) do
-      -- Normalize `compare_type` to the engine default ("and"). A WaitCondition
-      -- written without a compare_type is stored AND read back as "and" by the
-      -- engine, so the commit-time signature (which omits it on the leading
-      -- full/empty condition) must canonicalize the same way -- otherwise every
-      -- freshly written schedule mismatches its own live readback on the first
-      -- watchdog tick and is falsely withdrawn as a player edit.
+      -- Serialize the CircuitCondition payload (item_count conditions carry one;
+      -- time/inactivity do not) so a player editing a wait quantity or unload flag
+      -- IS detected instead of silently overwritten by the next resync_conditions.
+      local payload = ""
+      if c.condition then
+        local cond = c.condition
+        local fs = cond.first_signal or {}
+        payload = table.concat({
+          tostring(cond.comparator or ""),
+          tostring(fs.name or ""),
+          tostring(fs.quality or "normal"),
+          tostring(cond.constant or 0),
+        }, "/")
+      end
       conds[#conds + 1] = table.concat({
         tostring(c.type),
         tostring(c.ticks or ""),
         tostring(c.compare_type or "and"),
+        payload,
       }, ":")
     end
     parts[#parts + 1] = "w[" .. table.concat(conds, ",") .. "]"
