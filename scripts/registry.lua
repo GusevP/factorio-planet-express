@@ -147,10 +147,29 @@ function registry.add_platform(platform)
   return entry
 end
 
+-- Clear any node's "Preferred ship" pin (Task 9) that referenced a now-gone fleet
+-- key, so a dangling pin can never persist and silently steer dispatch toward a
+-- ship that no longer exists. `dispatcher.pick_ship` already falls back to
+-- auto-pick when a pinned ship isn't free + eligible, but a stale pin would
+-- mislead the Trade-tab readout and could match a re-used key, so we null it out
+-- at the source. Build-then-write by node key is order-independent (a keyed
+-- write, not a decision over the set), so plain `pairs` is fine.
+function registry.clear_pin(fleet_key)
+  if fleet_key == nil then
+    return
+  end
+  for _, node in pairs(storage.nodes or {}) do
+    if node.pin_ship == fleet_key then
+      node.pin_ship = nil
+    end
+  end
+end
+
 -- Drop a fleet platform entry by its (force-qualified) fleet key.
 function registry.remove_platform(fleet_key)
   if fleet_key and storage.fleet[fleet_key] then
     storage.fleet[fleet_key] = nil
+    registry.clear_pin(fleet_key)
     state.debug_log("registry: platform removed " .. tostring(fleet_key))
   end
 end
@@ -273,6 +292,9 @@ function registry.rebuild()
   end
   for _, key in ipairs(dead_ships) do
     storage.fleet[key] = nil
+    -- a pruned ghost can still be referenced by a node's pin (Task 9) -- clear it
+    -- so the dangling pin doesn't outlive the ship it pointed at.
+    registry.clear_pin(key)
   end
 
   -- pads live on planet surfaces

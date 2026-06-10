@@ -87,6 +87,35 @@ function fleet.allowed_from_selection(all_planets, allowed_set)
   return list
 end
 
+-- The enrolled, same-force ships offered as "Preferred ship" pins on the Trade
+-- tab (Task 9). Returns a SORTED list of `{ id, caption }` (sorted by the fleet
+-- key id -- a stable string, so the dropdown renders identically on every client
+-- and the GUI can map a `selected_index` back to the key deterministically).
+-- Only entries that are enrolled AND belong to `force_key` are offered; an
+-- un-enrolled or foreign-force ship is skipped (it can't fly the route anyway).
+-- The caption is the live platform name when a valid handle exists, else the
+-- fleet key id itself -- the `entry.platform and entry.platform.valid` guard makes
+-- it degrade cleanly under the pure-Lua test runner (no engine handle present).
+-- Pure over the plain `fleet_tbl` (a `{ [key]=entry }` map) so it is unit-tested.
+function fleet.enrolled_for_force(fleet_tbl, force_key)
+  local ids = {}
+  for id in pairs(fleet_tbl or {}) do
+    local entry = fleet_tbl[id]
+    if entry and entry.enrolled == true and entry.force == force_key then
+      ids[#ids + 1] = id
+    end
+  end
+  table.sort(ids)
+  local out = {}
+  for _, id in ipairs(ids) do
+    local entry = fleet_tbl[id]
+    local platform = entry.platform
+    local caption = (platform and platform.valid and platform.name) or id
+    out[#out + 1] = { id = id, caption = caption }
+  end
+  return out
+end
+
 -- Is this ship free AND permitted to fly the route `source` -> `dest`? True only
 -- when the entry is enrolled, idle, unassigned, and its allow-list covers BOTH
 -- planets. Pure over the entry table -- the dispatcher passes a live

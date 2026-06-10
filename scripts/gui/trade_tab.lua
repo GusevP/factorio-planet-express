@@ -27,6 +27,7 @@ local reserves = require("scripts.reserves")
 local demand = require("scripts.demand")
 local viewmodel = require("scripts.viewmodel")
 local qkey = require("scripts.qkey")
+local fleet = require("scripts.fleet")
 local common = require("scripts.gui.common")
 
 local trade_tab = {}
@@ -51,6 +52,7 @@ local RESERVE_CLEAR_PREFIX = "planet-express-trade-reserve-clear-"
 local RESERVE_ADD_ITEM = "planet-express-trade-reserve-add-item"
 local RESERVE_ADD_AMOUNT = "planet-express-trade-reserve-add-amount"
 local RESERVE_ADD_BTN = "planet-express-trade-reserve-add-btn"
+local PIN_DROPDOWN = "planet-express-trade-pin-ship"
 
 -- ---------------------------------------------------------------------------
 -- tech gate
@@ -183,6 +185,39 @@ local function render_imports(body, node)
   end
 end
 
+-- The enrolled, same-force ships offered as Preferred-ship pins for this node, in
+-- the SAME sorted order render and the selection handler both use. Built from the
+-- pure `fleet.enrolled_for_force` over the live `storage.fleet`, filtered to the
+-- node's force. Returning the list (not just rendering it) lets the selection
+-- handler map `selected_index` back to a fleet key deterministically (it rebuilds
+-- this exact list and offsets by 1 for the "(auto)" row at index 1).
+local function pin_options(node)
+  return fleet.enrolled_for_force(storage.fleet, common.force_key(node.force))
+end
+
+-- "Preferred ship" drop-down: index 1 is always "(auto)" (no pin); the rest are
+-- the enrolled same-force ships in sorted order. The currently-pinned ship (if
+-- still enrolled) is pre-selected; a pin to a ship that no longer qualifies falls
+-- back to "(auto)" (the registry also clears such a dangling pin on removal).
+local function render_pin(body, node)
+  section_header(body, { "planet-express.trade-pin-ship" })
+  local options = pin_options(node)
+  local items = { { "planet-express.trade-pin-auto" } }
+  local selected = 1
+  for i, opt in ipairs(options) do
+    items[#items + 1] = opt.caption
+    if node.pin_ship == opt.id then
+      selected = i + 1  -- +1: "(auto)" occupies index 1
+    end
+  end
+  body.add({
+    type = "drop-down",
+    name = PIN_DROPDOWN,
+    items = items,
+    selected_index = selected,
+  })
+end
+
 local function render_reserves(body, node)
   section_header(body, { "planet-express.trade-reserves" })
 
@@ -264,6 +299,7 @@ end
 local function render_body(body, node)
   body.clear()
   render_imports(body, node)
+  render_pin(body, node)
   render_reserves(body, node)
   render_readout(body, node)
 end
@@ -460,6 +496,31 @@ function trade_tab.on_gui_click(event)
       refresh_frame(frame)
     end
   end
+end
+
+-- Drop-down: the "Preferred ship" pin. Index 1 is "(auto)" (clears the pin);
+-- every later index maps to an enrolled same-force ship in the SAME sorted order
+-- render used, so we rebuild that list and read `selected_index - 1` back to its
+-- fleet key. A stale selection (the ship un-enrolled or left the force between
+-- render and pick) is treated as "(auto)" -- the pin is only set to a key that is
+-- still in the live option list.
+function trade_tab.on_gui_selection_state_changed(event)
+  local el = event.element
+  if not (el and el.valid and el.name == PIN_DROPDOWN) then
+    return
+  end
+  local node = context(el)
+  if not node then
+    return
+  end
+  local idx = el.selected_index or 1
+  if idx <= 1 then
+    node.pin_ship = nil
+    return
+  end
+  local options = pin_options(node)
+  local opt = options[idx - 1]  -- -1: "(auto)" occupies dropdown index 1
+  node.pin_ship = opt and opt.id or nil
 end
 
 return trade_tab

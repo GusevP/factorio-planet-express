@@ -178,7 +178,10 @@ script.on_event(defines.events.on_gui_text_changed, function(event)
   trade_tab.on_gui_text_changed(event)
 end)
 
-script.on_event(defines.events.on_gui_selection_state_changed, monitor.on_gui_selection_state_changed)
+script.on_event(defines.events.on_gui_selection_state_changed, function(event)
+  monitor.on_gui_selection_state_changed(event)
+  trade_tab.on_gui_selection_state_changed(event)
+end)
 
 -- On-demand diagnostics: `/pe-status` prints the dispatcher's view of the world
 -- (settings, trade nodes + open demand, the fleet, in-flight assignments, and why

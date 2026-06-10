@@ -284,10 +284,11 @@ end
 -- ---------------------------------------------------------------------------
 
 -- Choose an idle eligible ship for the route source_planet -> dest_planet. A
--- manual `pin` (a platform id) overrides auto-pick when that ship is free and
--- eligible; otherwise the lowest-id eligible, not-yet-used ship is taken
--- (deterministic). Returns the ship entry from `ships` or nil (caller then lets
--- the demand wait for the next tick). Pure over plain ship tables.
+-- manual `pin` (a fleet key set on the Trade tab, Task 9) overrides auto-pick
+-- when that ship is free and eligible; otherwise the lowest-id eligible,
+-- not-yet-used ship is taken (deterministic). Returns the ship entry from `ships`
+-- or nil (caller then lets the demand wait for the next tick). Pure over plain
+-- ship tables.
 --
 -- `ships` is a list of { id, entry, capacity }; `used` is a set of ship ids
 -- already committed this tick.
@@ -377,7 +378,7 @@ end
 --   nodes = { [node_id] = { id, planet, demand = {{item,unmet,priority,stack_size},...},
 --                           surplus = { [qkey]=qty },        -- working (mutated)
 --                           unmet_by_item = { [qkey]=qty },  -- guard input
---                           pin = <platform id>|nil } },
+--                           pin = <fleet key>|nil } },       -- Trade-tab "Preferred ship"
 --   ships = { { id, entry, capacity }, ... },
 -- }
 --
@@ -667,6 +668,12 @@ function dispatcher.build_snapshot(_tick)
         demand = open,
         unmet_by_item = unmet_by_item,
         surplus = {},
+        -- The "Preferred ship" pin set on the Trade tab (Task 9): a fleet key
+        -- string | nil. This is the PRODUCER for the `dest.pin` consumers in
+        -- `pick_ship` / `plan` / `unserved_reason` -- copied straight through so
+        -- the pure planner can prefer that ship when it is free + eligible and
+        -- fall through to auto-pick otherwise.
+        pin = node.pin_ship,
       }
     end
   end

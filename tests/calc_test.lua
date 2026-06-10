@@ -412,6 +412,36 @@ describe("fleet.idle_eligible", function()
   assert_eq(fleet.idle_eligible(restricted, "gleba", "nauvis"), false, "source not in allow-list -> not eligible")
 end)
 
+describe("fleet.enrolled_for_force -- Trade-tab Preferred-ship options", function()
+  -- a mixed fleet: two forces, enrolled + un-enrolled, with and without a live
+  -- platform name handle. Keys are the force-qualified fleet keys (Task 7 shape).
+  local tbl = {
+    ["1/3"] = { enrolled = true, force = 1, platform = { valid = true, name = "Aurora" } },
+    ["1/1"] = { enrolled = true, force = 1 },                         -- no platform handle -> caption = id
+    ["1/2"] = { enrolled = false, force = 1, platform = { valid = true, name = "Idle" } }, -- un-enrolled
+    ["2/9"] = { enrolled = true, force = 2, platform = { valid = true, name = "Foreign" } }, -- other force
+  }
+
+  local out = fleet.enrolled_for_force(tbl, 1)
+  -- only enrolled, force==1 entries survive; sorted by fleet key id
+  assert_eq(#out, 2, "force filter + un-enrolled skipped -> two options")
+  assert_eq(out[1].id, "1/1", "sorted by id: 1/1 first")
+  assert_eq(out[2].id, "1/3", "sorted by id: 1/3 second")
+  -- caption: live platform name when valid, else the id itself
+  assert_eq(out[1].caption, "1/1", "no live handle -> caption falls back to id")
+  assert_eq(out[2].caption, "Aurora", "valid platform -> caption is the live name")
+
+  -- a force with no enrolled ships yields an empty list
+  assert_eq(#fleet.enrolled_for_force(tbl, 2), 1, "force 2 has one enrolled ship")
+  assert_eq(fleet.enrolled_for_force(tbl, 2)[1].caption, "Foreign", "force 2 ship caption")
+  assert_eq(#fleet.enrolled_for_force(tbl, 99), 0, "unknown force -> no options")
+  assert_eq(#fleet.enrolled_for_force(nil, 1), 0, "nil fleet table -> no options")
+
+  -- an invalid platform handle degrades to the id caption (test-runner safe)
+  local stale = { ["1/5"] = { enrolled = true, force = 1, platform = { valid = false, name = "Gone" } } }
+  assert_eq(fleet.enrolled_for_force(stale, 1)[1].caption, "1/5", "invalid handle -> caption falls back to id")
+end)
+
 -- ---------------------------------------------------------------------------
 -- Task 4: schedule builder -- pure route -> records (load clamping, wide load,
 -- 2-stop shape, wait-conditions, zero-manifest). The engine write-wrapper is
@@ -822,6 +852,9 @@ describe("dispatcher.pick_ship -- eligibility, determinism, pin override", funct
   -- pin that is ineligible falls back to auto-pick
   local pinnable = { ship(2), ship(7, { state = fleet.ENROUTE }) }
   assert_eq(dispatcher.pick_ship(pinnable, {}, "nauvis", "vulcanus", 7).id, 2, "ineligible pin falls back to auto-pick")
+  -- pinned ship BUSY (already used this tick) -> falls back to lowest-id eligible
+  assert_eq(dispatcher.pick_ship(ships, { [9] = true }, "nauvis", "vulcanus", 9).id, 2,
+    "pinned ship busy -> falls back to lowest-id eligible")
 end)
 
 describe("dispatcher.plan -- wide load, re-export, deterministic assignment", function()
