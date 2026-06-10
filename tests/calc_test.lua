@@ -166,11 +166,13 @@ describe("reserves write helpers", function()
   assert_eq(reserves.reserve(node, "iron-plate"), 300, "set_item override")
   reserves.set_item(node, "iron-plate", nil) -- clear override
   assert_eq(reserves.reserve(node, "iron-plate"), 50, "cleared override falls back to default")
-  -- ensure with a default_floor seed only applies on first creation
+  -- ensure on a fresh node creates a default-0 config; it never clobbers an
+  -- existing default (the registry seeds the real default inline at node creation)
   local n2 = {}
-  reserves.ensure(n2, 17)
-  assert_eq(n2.reserves.default, 17, "ensure seeds default_floor")
-  reserves.ensure(n2, 999)
+  reserves.ensure(n2)
+  assert_eq(n2.reserves.default, 0, "ensure creates default-0 config")
+  n2.reserves.default = 17
+  reserves.ensure(n2)
   assert_eq(n2.reserves.default, 17, "ensure does not clobber existing default")
 end)
 

@@ -485,20 +485,6 @@ function watchdog.hub_counter(platform)
   end
 end
 
--- [provisional] Has the ship delivered and finished its mod route? v1 definition:
--- the final stop is its current destination, it is no longer moving, AND its hub
--- no longer holds any of OUR cargo (the manifest + return manifest -- NOT the whole
--- hold, which also carries the platform's own fuel/ammo). `schedule.current` is the
--- index of the current DESTINATION (the stop the ship is travelling toward OR
--- parked at), NOT an arrival flag, so `current >= #records` alone can't mean
--- "arrived at the last stop". The manifest-delivered check is the real completion
--- guard (a ship in transit to the final stop still holds its cargo, so it won't read
--- delivered until the native drop finishes); the `speed == 0` check additionally
--- rejects the edge where the cargo is already gone WHILE still travelling to the
--- final stop (e.g. a return leg that failed to load) -- a parked ship has zero
--- speed. `speed` degrades safely: an unreadable (nil) speed falls back to the
--- manifest-delivered guard alone. Confirm `schedule.current`, `get_item_count`, and
--- `speed` in-engine.
 -- Shared "arrived + parked at the final stop" gate for `completed` and
 -- `delivery_stalled`: the final stop is the active destination
 -- (`schedule.current >= #records`) AND the ship is no longer moving
@@ -518,6 +504,20 @@ function watchdog.parked_at_last_stop(platform)
   return (platform.speed or 0) == 0 -- parked at the final stop, not still moving
 end
 
+-- [provisional] Has the ship delivered and finished its mod route? v1 definition:
+-- the final stop is its current destination, it is no longer moving, AND its hub
+-- no longer holds any of OUR cargo (the manifest + return manifest -- NOT the whole
+-- hold, which also carries the platform's own fuel/ammo). `schedule.current` is the
+-- index of the current DESTINATION (the stop the ship is travelling toward OR
+-- parked at), NOT an arrival flag, so `current >= #records` alone can't mean
+-- "arrived at the last stop". The manifest-delivered check is the real completion
+-- guard (a ship in transit to the final stop still holds its cargo, so it won't read
+-- delivered until the native drop finishes); the `speed == 0` check additionally
+-- rejects the edge where the cargo is already gone WHILE still travelling to the
+-- final stop (e.g. a return leg that failed to load) -- a parked ship has zero
+-- speed. `speed` degrades safely: an unreadable (nil) speed falls back to the
+-- manifest-delivered guard alone. Confirm `schedule.current`, `get_item_count`, and
+-- `speed` in-engine.
 function watchdog.completed(platform, a)
   if not watchdog.parked_at_last_stop(platform) then
     return false -- not yet arrived + parked at the final stop

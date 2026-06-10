@@ -42,13 +42,14 @@ end
 -- write
 -- ---------------------------------------------------------------------------
 
--- Ensure `node.reserves` exists and is well-formed; returns it. `default_floor`
--- (optional) seeds the global floor the first time the config is created
--- (Task 10 passes the mod setting; absent it falls back to 0).
-function reserves.ensure(node, default_floor)
+-- Ensure `node.reserves` exists and is well-formed; returns it. A freshly created
+-- config starts with a default floor of 0; the registry seeds the real default
+-- inline at node creation (`add_node` -> `default_reserve()`), so this never needs
+-- to take a seed value.
+function reserves.ensure(node)
   local cfg = node.reserves
   if not cfg then
-    cfg = { default = default_floor or 0, items = {} }
+    cfg = { default = 0, items = {} }
     node.reserves = cfg
   end
   cfg.items = cfg.items or {}

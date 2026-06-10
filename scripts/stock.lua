@@ -23,13 +23,15 @@
 -- the next tick. The cache is plain in-memory (a read-through of engine state),
 -- NOT in `storage`: it is rebuilt freely and holds no authoritative data.
 
+local state = require("scripts.state")
 local reserves = require("scripts.reserves")
 local qkey = require("scripts.qkey")
 
 local stock = {}
 
--- Minimum-trip threshold fallback. Task 10 wires the real value via this
--- setting; until then surplus below this many items reports as zero.
+-- Minimum-trip threshold fallback when `settings` is absent (the pure-Lua test
+-- runner); `stock.min_trip()` reads the real value from this setting. Surplus
+-- below this many items reports as zero.
 stock.MIN_TRIP = 1
 stock.MIN_TRIP_SETTING = "planet-express-min-trip"
 
@@ -167,13 +169,7 @@ end
 -- as a module function so the view-model reuses this single source of truth
 -- (it classifies `below_min_trip` waiting demand against the same value).
 function stock.min_trip()
-  if settings and settings.global then
-    local s = settings.global[stock.MIN_TRIP_SETTING]
-    if s and type(s.value) == "number" then
-      return s.value
-    end
-  end
-  return stock.MIN_TRIP
+  return state.setting(stock.MIN_TRIP_SETTING, stock.MIN_TRIP)
 end
 
 -- Exportable surplus of the cargo `key` (a `qkey(item, quality)`) on `node`:

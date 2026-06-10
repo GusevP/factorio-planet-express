@@ -35,16 +35,10 @@ registry.HUB_NAME = "space-platform-hub"
 registry.DEFAULT_RESERVE_SETTING = "planet-express-default-reserve"
 
 -- The global default reserve floor a freshly-registered node starts with. Reads
--- the mod setting when the engine is present (Task 10 wires the real value),
--- else 0.
+-- the mod setting via `state.setting` (0 when `settings` is absent, e.g. the
+-- pure-Lua test runner).
 local function default_reserve()
-  if settings and settings.global then
-    local s = settings.global[registry.DEFAULT_RESERVE_SETTING]
-    if s and type(s.value) == "number" then
-      return s.value
-    end
-  end
-  return 0
+  return state.setting(registry.DEFAULT_RESERVE_SETTING, 0)
 end
 
 -- ---------------------------------------------------------------------------

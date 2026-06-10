@@ -1,8 +1,9 @@
 -- control.lua -- Planet Express control-stage entry point.
 --
--- Wires the engine event seams to the mod's modules. At 0.0.1 this only stands
--- up the determinism/state core and registers a no-op dispatcher tick; later
--- tasks (dispatcher, watchdog, GUIs) hook in here.
+-- Wires the engine event seams to the mod's modules: it stands up the
+-- determinism/state core, registers the registry's build/mine/surface events,
+-- registers the dispatcher + watchdog tick cadences, and routes the GUI events to
+-- the Monitor, Trade tab, and Fleet tab.
 
 local state = require("scripts.state")
 local registry = require("scripts.registry")
@@ -166,27 +167,24 @@ script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
 end)
 
 -- ---------------------------------------------------------------------------
--- fleet Monitor GUI wiring (Task 8)
+-- GUI wiring (Task 8/9): fleet Monitor + entity-GUI overlays
 --
--- The panel opens from a top-bar shortcut and re-renders on filter changes and
--- the dispatcher tick. All shaping is in the pure viewmodel; this is just event
--- routing. Verified by manual playtest.
--- ---------------------------------------------------------------------------
-
--- ---------------------------------------------------------------------------
--- Entity-GUI overlays: Trade tab (Task 9) + Fleet tab
+-- The fleet Monitor is a `gui.screen` panel opened from a top-bar shortcut; it
+-- re-renders on filter changes and the dispatcher tick. All shaping is in the pure
+-- viewmodel; this is just event routing.
 --
--- Two relative-GUI overlays anchored to vanilla entity windows, both gated behind
--- the technology and both verified by manual playtest:
+-- The two entity-GUI overlays are relative-GUI panels anchored to vanilla entity
+-- windows, both gated behind the technology:
 --   * Trade tab  -- on the Cargo Landing Pad (one pad per planet => per-planet
---     trade node): persists reserve/import-flag/priority edits into storage.nodes;
---     the live readout reuses the pure view-model.
+--     trade node): persists reserve/import-flag/priority/pin edits into
+--     storage.nodes; the live readout reuses the pure view-model.
 --   * Fleet tab  -- on the Space Platform Hub: the per-platform ENROLLMENT toggle
 --     + reserve-for-manual-use, persisted into storage.fleet. This is the only
 --     way to enroll a ship, so the dispatcher has a fleet to draw from.
 --
 -- The shared GUI events fan out to every interested handler (Monitor, Trade tab,
--- Fleet tab); each ignores elements/entities that aren't its own.
+-- Fleet tab); each ignores elements/entities that aren't its own. All verified by
+-- manual playtest.
 -- ---------------------------------------------------------------------------
 
 script.on_event(defines.events.on_lua_shortcut, monitor.on_shortcut)
@@ -293,12 +291,14 @@ commands.add_command("pe-reset", "Planet Express: clear all assignments + fleet 
     freed, reset))
 end)
 
--- In-engine test hook (factorio-test). Dev-only: needs BOTH the framework mod
--- present AND tests/ available. Shipped builds strip tests/ (see the package.sh
--- allowlist), so the require fails there and the hook must no-op rather than
--- crash the load -- it can never assume tests/ is packaged. In a dev checkout
--- the folder has tests/, so the spec list (which grows as later tasks add
--- integration specs) loads and runs.
+-- In-engine test hook (factorio-test) -- a PERMANENT STUB SEAM, not a live
+-- harness. Dev-only: needs BOTH the framework mod present AND tests/ available.
+-- The mod ships no in-engine specs (tests/test_list.lua is an empty stub), and
+-- shipped builds strip tests/ (see the package.sh allowlist), so the require
+-- fails there and the hook must no-op rather than crash the load -- it can never
+-- assume tests/ is packaged. In a dev checkout the (empty) spec list loads only
+-- when the optional factorio-test mod is also installed, so it never runs in
+-- normal play.
 if script.active_mods["factorio-test"] then
   local ok, test_list = pcall(require, "tests.test_list")
   if ok then

@@ -11,8 +11,9 @@
 -- Design split (per the plan's pure-function seam): the ELIGIBILITY math
 -- (`allows_planet`, `idle_eligible`) is PURE over a plain entry table -- no
 -- engine globals -- so it loads and runs under plain `lua` and is unit-tested.
--- The WRITERS mutate `storage.fleet`; the dispatcher (Task 5) and Trade-tab GUI
--- (Task 9) call them. The registry (Task 3) creates the entries.
+-- The WRITERS mutate `storage.fleet`; the Fleet-tab GUI (gui/fleet_tab.lua)
+-- calls the enrollment writers, and the dispatcher/watchdog drive the
+-- state/assignment writers. The registry (Task 3) creates the entries.
 
 local fleet = {}
 
@@ -27,8 +28,8 @@ fleet.WITHDRAWN = "withdrawn"
 
 -- The single mod gate (Task 10): a platform can only be enrolled once its force
 -- has researched "Interplanetary Trade Logistics" -- the same technology that
--- gates the Trade tab. Mirrors trade_tab.tech_researched so the two GUIs gate
--- identically.
+-- gates the Trade tab. This is the SINGLE source of truth: the Trade tab aliases
+-- `fleet.TECH` / `fleet.tech_researched` so all three GUIs gate identically.
 fleet.TECH = "interplanetary-trade-logistics"
 
 -- Has `force` researched the gating technology? Tolerates a nil/partial force so

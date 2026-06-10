@@ -32,12 +32,10 @@ local common = require("scripts.gui.common")
 
 local trade_tab = {}
 
--- [provisional] The relative-GUI anchor for the cargo landing pad window.
--- Confirm the exact `defines.relative_gui_type` for the cargo landing pad
--- in-engine before flipping the api-notes GUI seam to [confirmed]; the rest of
--- the module is independent of which anchor is used.
+-- [provisional] The cargo landing pad prototype name. Mirrors registry.PAD_NAME
+-- (the registry indexes pads off the same name); confirm the exact 2.0 / Space
+-- Age name in-engine before publishing.
 trade_tab.PAD_NAME = "cargo-landing-pad"
-trade_tab.TECH = "interplanetary-trade-logistics"
 
 -- Element names (greppable, collision-proof under the mod namespace). Per-item
 -- rows append the item name so each widget round-trips to the item it edits.
@@ -58,15 +56,11 @@ local PIN_DROPDOWN = "planet-express-trade-pin-ship"
 -- tech gate
 -- ---------------------------------------------------------------------------
 
--- The Trade tab only appears once the mid-game technology is researched (Task
--- 9/10). The minimal prototype exists since Task 0, so this is fully testable now.
-function trade_tab.tech_researched(force)
-  if not (force and force.technologies) then
-    return false
-  end
-  local tech = force.technologies[trade_tab.TECH]
-  return tech ~= nil and tech.researched == true
-end
+-- The Trade tab gates on the SAME technology as the fleet (the Fleet tab gates on
+-- it too), so alias `fleet.TECH` / `fleet.tech_researched` rather than keep a
+-- duplicate copy -- a single source of truth keeps the two GUIs gating identically.
+trade_tab.TECH = fleet.TECH
+trade_tab.tech_researched = fleet.tech_researched
 
 -- ---------------------------------------------------------------------------
 -- node lookup
@@ -308,6 +302,10 @@ end
 -- open / close (driven by on_gui_opened / on_gui_closed)
 -- ---------------------------------------------------------------------------
 
+-- [provisional] The relative-GUI anchor for the cargo landing pad window.
+-- Confirm the exact `defines.relative_gui_type` for the cargo landing pad
+-- in-engine before flipping the api-notes GUI seam to [confirmed]; the rest of
+-- the module is independent of which anchor is used.
 local function relative_anchor()
   return {
     gui = defines.relative_gui_type.cargo_landing_pad_gui,

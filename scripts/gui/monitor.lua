@@ -14,9 +14,9 @@
 -- Refresh cadence: the dispatcher tick calls `monitor.refresh_all()` (NOT every
 -- tick) so the panel updates roughly when trade decisions are made.
 
+local state = require("scripts.state")
 local viewmodel = require("scripts.viewmodel")
 local fleet = require("scripts.fleet")
-local registry = require("scripts.registry")
 local qkey = require("scripts.qkey")
 local common = require("scripts.gui.common")
 
@@ -52,14 +52,9 @@ local function manifest_caption(manifest)
     return "-"
   end
   local parts = {}
-  -- Stable order: sort the keys.
-  local keys = {}
-  for k in pairs(manifest) do
-    keys[#keys + 1] = k
-  end
-  table.sort(keys)
-  for _, k in ipairs(keys) do
-    parts[#parts + 1] = qkey.label(k) .. " x" .. tostring(manifest[k])
+  -- Stable order: iterate in sorted-key order via the determinism helper.
+  for k, qty in state.sorted_pairs(manifest) do
+    parts[#parts + 1] = qkey.label(k) .. " x" .. tostring(qty)
   end
   if #parts == 0 then
     return "-"
@@ -293,7 +288,7 @@ function monitor.open(player)
   filters.add({
     type = "drop-down",
     name = FILTER_STATE,
-    items = { "any", fleet.IDLE, fleet.ENROUTE, fleet.LOADING, fleet.UNLOADING, fleet.WITHDRAWN },
+    items = STATE_OPTIONS,
     selected_index = 1,
   })
 
@@ -356,7 +351,7 @@ end
 -- crafted/foreign ship key (or a foreign ship that slipped into a nil-force
 -- roster row) can't drag the view onto another force's platform.
 local function recenter_on_ship(player, ship_id)
-  local entry = registry and fleet.get(ship_id)
+  local entry = fleet.get(ship_id)
   if not entry then
     return
   end

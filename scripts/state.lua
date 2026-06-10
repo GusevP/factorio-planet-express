@@ -173,21 +173,41 @@ function state.sorted_pairs(tbl, comp)
 end
 
 -- ---------------------------------------------------------------------------
+-- guarded runtime-global setting reader
+-- ---------------------------------------------------------------------------
+
+-- Read a runtime-global mod setting, degrading safely when the engine is absent
+-- (the pure-Lua test runner has no `settings` global). Returns the stored value
+-- ONLY when `settings.global` is present AND the value's type matches
+-- `type(fallback)`, else the `fallback`. A numeric value is `math.floor`ed --
+-- every numeric setting in this mod is an integer, and the dispatcher interval /
+-- max-ships caps rely on integers. This is the single source of truth for the
+-- module-level-fallback load convention: every pure module that reads a setting
+-- goes through here so it still loads under plain `lua`.
+function state.setting(name, fallback)
+  if settings and settings.global then
+    local s = settings.global[name]
+    if s ~= nil and type(s.value) == type(fallback) then
+      if type(s.value) == "number" then
+        return math.floor(s.value)
+      end
+      return s.value
+    end
+  end
+  return fallback
+end
+
+-- ---------------------------------------------------------------------------
 -- debug logging
 -- ---------------------------------------------------------------------------
 
 state.DEBUG_SETTING = "planet-express-debug-log"
 
--- Is debug logging enabled? Reads the runtime-global setting if the engine is
--- present; defaults to false otherwise (e.g. under the pure-Lua test runner).
+-- Is debug logging enabled? Reads the runtime-global setting via `state.setting`
+-- (defaults to false under the pure-Lua test runner). The `== true` keeps the
+-- boolean contract even if a non-boolean value somehow slipped through.
 function state.debug_enabled()
-  if settings and settings.global then
-    local s = settings.global[state.DEBUG_SETTING]
-    if s then
-      return s.value == true
-    end
-  end
-  return false
+  return state.setting(state.DEBUG_SETTING, false) == true
 end
 
 -- Log a dispatch/decision line when debug logging is on. No-op otherwise.

@@ -183,8 +183,7 @@ demand.reader = read_native_demand
 
 -- Sum the fleet cargo already committed to `node` per item across in-flight
 -- assignments. Deterministic: iterates assignments via the sorted helper.
--- Returns a plain { [item] = qty } table. Until Task 5 lands there are no
--- assignments, so this is {}.
+-- Returns a plain { [item] = qty } table (empty when nothing is in flight).
 --
 -- Two sources of inbound (both two-sided bookkeeping, Task 5/7):
 --   * forward leg: `inbound_commit`, delivered to the assignment's `dest`.

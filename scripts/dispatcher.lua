@@ -66,9 +66,9 @@ dispatcher.MAX_ROUTE_SETTING = "planet-express-max-ships-route"
 
 -- Two-way return trade (Task 7). When enabled, a finalized forward assignment
 -- also picks up a RETURN leg at the destination if the destination has surplus
--- the source still needs (same two planets). Task 10 wires the real runtime
--- setting; until then this fallback is used and the planner reads the flag off
--- the snapshot (set by build_snapshot) so `plan` stays pure/deterministic.
+-- the source still needs (same two planets). TWO_WAY_DEFAULT is the fallback when
+-- `settings` is absent (the pure-Lua test runner); the planner reads the resolved
+-- flag off the snapshot (set by build_snapshot) so `plan` stays pure/deterministic.
 dispatcher.TWO_WAY_SETTING = "planet-express-two-way-return"
 dispatcher.TWO_WAY_DEFAULT = true
 
@@ -591,37 +591,18 @@ function dispatcher.stack_size_of(name)
   return dispatcher.DEFAULT_STACK_SIZE
 end
 
--- Guarded readers for the runtime-global settings. Each falls back to the module
--- default when `settings` is absent (the pure-Lua test runner) so the modules
--- load cleanly outside the engine.
-local function bool_setting(name, fallback)
-  if settings and settings.global then
-    local s = settings.global[name]
-    if s and type(s.value) == "boolean" then
-      return s.value
-    end
-  end
-  return fallback
-end
-
-local function int_setting(name, fallback)
-  if settings and settings.global then
-    local s = settings.global[name]
-    if s and type(s.value) == "number" then
-      return math.floor(s.value)
-    end
-  end
-  return fallback
-end
-
+-- Runtime-global setting reads go through the shared, fallback-guarded
+-- `state.setting` (it floors numeric values, so the integer caps/interval below
+-- stay integers, and degrades to the module default when `settings` is absent --
+-- the pure-Lua test runner).
 local function two_way_enabled()
-  return bool_setting(dispatcher.TWO_WAY_SETTING, dispatcher.TWO_WAY_DEFAULT)
+  return state.setting(dispatcher.TWO_WAY_SETTING, dispatcher.TWO_WAY_DEFAULT)
 end
 
 -- The configured dispatcher cadence in ticks. control.lua reads this to register
 -- (and re-register on settings change) the on_nth_tick handler.
 function dispatcher.interval()
-  return int_setting(dispatcher.INTERVAL_SETTING, dispatcher.INTERVAL)
+  return state.setting(dispatcher.INTERVAL_SETTING, dispatcher.INTERVAL)
 end
 
 -- Build the per-tick snapshot the pure planner consumes. Reads demand + surplus
@@ -722,8 +703,8 @@ function dispatcher.build_snapshot(_tick)
     nodes = nodes,
     ships = ships,
     two_way = two_way_enabled(),
-    max_ships_global = int_setting(dispatcher.MAX_GLOBAL_SETTING, 0),
-    max_ships_route = int_setting(dispatcher.MAX_ROUTE_SETTING, 5),
+    max_ships_global = state.setting(dispatcher.MAX_GLOBAL_SETTING, 0),
+    max_ships_route = state.setting(dispatcher.MAX_ROUTE_SETTING, 5),
     active_global = active_global,
     active_by_route = active_by_route,
   }
@@ -928,8 +909,8 @@ function dispatcher.diagnose()
 
   add(string.format("settings: debug=%s interval=%d two_way=%s min_trip=%d max_global=%d max_route=%d",
     tostring(state.debug_enabled()), dispatcher.interval(), tostring(two_way_enabled()),
-    stock.min_trip(), int_setting(dispatcher.MAX_GLOBAL_SETTING, 0),
-    int_setting(dispatcher.MAX_ROUTE_SETTING, 5)))
+    stock.min_trip(), state.setting(dispatcher.MAX_GLOBAL_SETTING, 0),
+    state.setting(dispatcher.MAX_ROUTE_SETTING, 5)))
 
   local node_ids = state.sorted_keys(snapshot.nodes)
   add("nodes: " .. #node_ids)
