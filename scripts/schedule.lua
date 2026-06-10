@@ -221,22 +221,25 @@ local function unload_wait(manifest, timeout)
   return conds
 end
 
--- Departure at the two-way TURNAROUND stop (the destination): deliver the forward
--- manifest AND load the return manifest at the SAME stop -- the pad pulls the
+-- Departure at the two-way TURNAROUND stop (the destination): the pad pulls the
 -- forward cargo (allows_unloading) while rockets bring the return cargo up. Leave
--- when every forward item is gone (== 0) AND every return item is aboard (>= qty),
--- or on inactivity / timeout (retained cargo or a short return supply may never
--- hit the exact counts). Forward and return are different items, so the per-item
--- conditions compose without confusing each other.
+-- once every RETURN item is aboard (>= qty) -- that is the ship's whole purpose for
+-- this stop -- or on inactivity / timeout.
+--
+-- We deliberately DO NOT gate departure on the forward items reaching 0. Rockets
+-- are atomic, so the SOURCE over-delivers any non-rocket-multiple request (e.g. 12
+-- of a 10/rocket item -> two full rockets = 20 launched); the dest pulls only what
+-- it requested (12) and 8 stay aboard, so a forward `== 0` condition NEVER clears.
+-- AND-combined with the return condition that stranded the ship at the turnaround
+-- until the 5-min timeout even though the return was loaded and the forward cargo
+-- was long delivered. The pad pulls via logistics (sub-second) well before the
+-- rockets finish loading the return, so by the time `return >= qty` holds the
+-- forward is delivered; any over-delivery residue rides home and is cleared at the
+-- final stop by the watchdog (delivery_stalled). `unload_manifest` is kept in the
+-- signature for caller symmetry but intentionally NOT conditioned on.
 local function turnaround_wait(unload_manifest, load_manifest, timeout)
+  local _ = unload_manifest
   local conds = {}
-  for item in state.sorted_pairs(unload_manifest or {}) do
-    conds[#conds + 1] = {
-      type = schedule.WAIT_ITEM_COUNT,
-      compare_type = "and",
-      condition = { comparator = "=", first_signal = item_signal(item), constant = 0 },
-    }
-  end
   for item, qty in state.sorted_pairs(load_manifest or {}) do
     conds[#conds + 1] = {
       type = schedule.WAIT_ITEM_COUNT,
