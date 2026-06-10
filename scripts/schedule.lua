@@ -33,15 +33,7 @@ local schedule = {}
 -- its own fuel / ammo / repair-packs, so a whole-hold wait stalls on a partial
 -- load and never reads empty. `time` is the mandatory timeout backstop (#1).
 schedule.WAIT_ITEM_COUNT = "item_count"
-schedule.WAIT_INACTIVITY = "inactivity"
 schedule.WAIT_TIME = "time"
-
--- Ticks of no cargo movement that mean "the landing-pad pull has finished" at an
--- unload stop. Departing on item_count==0 alone stalls when the ship legitimately
--- RETAINS some of a delivered item (its own fuel/ammo, or a partial pad pull), so
--- inactivity is the robust fallback. 5s: long enough that a brief gap between
--- cargo-pod transfers doesn't fire it early, short enough to beat the timeout.
-schedule.UNLOAD_INACTIVITY = 300
 
 -- ---------------------------------------------------------------------------
 -- pure load clamp + slot-aware wide manifest
@@ -217,9 +209,10 @@ end
 -- Departure at the two-way TURNAROUND stop (the destination): the pad pulls the
 -- forward cargo (allows_unloading) while rockets bring the return cargo up. Leave
 -- once every RETURN item is aboard (>= qty) -- that is the ship's whole purpose for
--- this stop -- or on inactivity / timeout.
+-- this stop -- or on the timeout. NO inactivity (a lull while the return is still
+-- loading would otherwise send the ship home with a partial return).
 --
--- We deliberately DO NOT gate departure on the forward items reaching 0. Rockets
+-- We also deliberately DO NOT gate departure on the forward items reaching 0. Rockets
 -- are atomic, so the SOURCE over-delivers any non-rocket-multiple request (e.g. 12
 -- of a 10/rocket item -> two full rockets = 20 launched); the dest pulls only what
 -- it requested (12) and 8 stay aboard, so a forward `== 0` condition NEVER clears.
@@ -240,11 +233,9 @@ local function turnaround_wait(unload_manifest, load_manifest, timeout)
       condition = { comparator = ">=", first_signal = item_signal(item), constant = qty },
     }
   end
-  conds[#conds + 1] = {
-    type = schedule.WAIT_INACTIVITY,
-    ticks = schedule.UNLOAD_INACTIVITY,
-    compare_type = "or",
-  }
+  -- Depart ONLY when the whole return is aboard (>= qty), or the timeout. NO
+  -- inactivity: a brief lull while the return is still loading would otherwise fire
+  -- it and send the ship home with a partial (or empty) return load.
   if timeout then
     conds[#conds + 1] = { type = schedule.WAIT_TIME, ticks = timeout, compare_type = "or" }
   end

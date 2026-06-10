@@ -1895,7 +1895,6 @@ describe("schedule.build_records -- two-way is a 3-stop turnaround (same two pla
       condition = { comparator = "=",
         first_signal = { type = "item", name = item, quality = "normal" }, constant = 0 } }
   end
-  local inactivity = { type = "inactivity", ticks = 300, compare_type = "or" }
   local timeout_or = { type = "time", ticks = 3600, compare_type = "or" }
 
   -- stop 1: load forward at the source
@@ -1908,20 +1907,19 @@ describe("schedule.build_records -- two-way is a 3-stop turnaround (same two pla
 
   -- stop 2: the TURNAROUND at the destination -- requests the RETURN manifest
   -- (loaded there) AND allows unloading so the pad pulls the forward cargo. Departs
-  -- once the RETURN is loaded (copper>=150), OR inactivity/timeout. It does NOT gate
-  -- on the forward reaching 0: atomic rockets over-deliver a non-rocket-multiple
-  -- request, leaving residue that `==0` would never clear -- which used to strand
-  -- the ship at the turnaround until the timeout. The pad pulls the forward (fast)
-  -- well before the return finishes loading, so the forward is delivered by then.
+  -- ONLY once the RETURN is loaded (copper>=150) OR the timeout. NO inactivity (a
+  -- lull while the return loads would send the ship home with a partial return) and
+  -- NO forward `==0` gate (atomic rockets over-deliver a non-rocket-multiple request,
+  -- leaving residue that `==0` would never clear -- which stranded the ship here).
+  -- The pad pulls the forward (fast) well before the return finishes loading.
   local turn = built.records[2]
   assert_eq(turn.station, "vulcanus", "stop 2 is the destination turnaround")
   assert_eq(turn.requests, { ["copper-plate"] = 150 }, "turnaround requests the RETURN manifest")
   assert_eq(turn.import_from, "vulcanus", "return request scoped to the destination")
   assert_eq(turn.allows_unloading, true, "turnaround allows the pad to pull the forward cargo")
   assert_eq(turn.wait_conditions[1], loaded("copper-plate", 150), "return copper loaded (>=qty) is the only blocking gate")
-  assert_eq(turn.wait_conditions[2], inactivity, "... or inactivity")
-  assert_eq(turn.wait_conditions[3], timeout_or, "... or timeout")
-  assert_eq(turn.wait_conditions[4], nil, "NO forward ==0 gate (over-delivery residue would never clear it)")
+  assert_eq(turn.wait_conditions[2], timeout_or, "... or timeout")
+  assert_eq(turn.wait_conditions[3], nil, "NO inactivity and NO forward ==0 gate")
 
   -- stop 3: drop the return cargo back at the source -- the FINAL stop, so it HOLDS
   -- on the timeout and the watchdog clears the route (no looping ==0 condition).
