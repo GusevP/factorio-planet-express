@@ -100,8 +100,7 @@ end
 -- Pure over the plain `fleet_tbl` (a `{ [key]=entry }` map) so it is unit-tested.
 function fleet.enrolled_for_force(fleet_tbl, force_key)
   local ids = {}
-  for id in pairs(fleet_tbl or {}) do
-    local entry = fleet_tbl[id]
+  for id, entry in pairs(fleet_tbl or {}) do
     if entry and entry.enrolled == true and entry.force == force_key then
       ids[#ids + 1] = id
     end
