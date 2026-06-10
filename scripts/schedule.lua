@@ -185,18 +185,17 @@ end
 
 -- Departure at the FINAL stop (the one-way destination, or the two-way return drop
 -- back at the source). The ship deliberately HOLDS here -- the only wait condition
--- is the long `time` backstop -- and the WATCHDOG clears the route once delivery is
--- done (`completed` for a clean drop, `delivery_stalled` when atomic-rocket
--- over-delivery leaves unwanted residue aboard). The pad still pulls the cargo while
--- it waits (allows_unloading is set on the stop). This is load-bearing: a platform
--- schedule is CYCLIC, so ANY satisfiable per-item / inactivity condition makes the
--- ship depart the final stop and loop back to stop 1 -- re-running the whole route
--- forever -- on the very next tick, long before the (per-N-tick) watchdog can free
--- it. Holding on the timeout keeps the ship parked at the final stop until the
--- watchdog reliably clears the route (well within the timeout); the timeout only
--- ever fires if the watchdog somehow never runs. `manifest` is unused (kept for
--- caller symmetry); the watchdog decides "delivered" from the destination's real
--- demand, not the ship's residual cargo count.
+-- is the long `time` backstop -- and the WATCHDOG frees it (clearing the route + hub
+-- request) the moment it sees the ship PARKED at this stop. The landing pad keeps
+-- auto-delivering the carried cargo to the planet whether the ship is on a schedule
+-- or idle, so we never wait for the hub to read empty. This is load-bearing: a
+-- platform schedule is CYCLIC, so ANY satisfiable per-item / inactivity condition
+-- makes the ship depart the final stop and loop back to stop 1 -- re-running the
+-- whole route forever -- on the very next tick, long before the (per-N-tick)
+-- watchdog can free it. Holding on the timeout keeps the ship parked at the final
+-- stop until the watchdog clears the route (well within the timeout); the timeout
+-- only ever fires if the watchdog somehow never runs. `manifest` is unused (kept for
+-- caller symmetry) -- "delivered" is the pad's job, not a cargo-count check here.
 local function unload_wait(manifest, timeout)
   local _ = manifest
   local conds = {}
@@ -220,9 +219,9 @@ end
 -- until the 5-min timeout even though the return was loaded and the forward cargo
 -- was long delivered. The pad pulls via logistics (sub-second) well before the
 -- rockets finish loading the return, so by the time `return >= qty` holds the
--- forward is delivered; any over-delivery residue rides home and is cleared at the
--- final stop by the watchdog (delivery_stalled). `unload_manifest` is kept in the
--- signature for caller symmetry but intentionally NOT conditioned on.
+-- forward is delivered; any over-delivery residue rides home and is dropped at the
+-- final stop (the pad pulls whatever that planet wants). `unload_manifest` is kept
+-- in the signature for caller symmetry but intentionally NOT conditioned on.
 local function turnaround_wait(unload_manifest, load_manifest, timeout)
   local _ = unload_manifest
   local conds = {}

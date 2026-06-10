@@ -1576,35 +1576,6 @@ describe("watchdog.signable_records -- interrupt/temporary records ignored by th
   assert_eq(#watchdog.signable_records(nil), 0, "nil records -> empty signable list")
 end)
 
-describe("watchdog.manifest_delivered -- completion over OUR cargo only (not whole hold)", function()
-  -- count_fn from a plain hold table; items not present read as 0 (delivered).
-  local function counter(hold)
-    return function(item) return hold[item] or 0 end
-  end
-  local manifest = { ["iron-plate"] = 300, ["copper-plate"] = 150 }
-
-  -- everything pulled by the pad -> hub holds none of our cargo -> delivered
-  assert_true(watchdog.manifest_delivered(counter({}), manifest, nil),
-    "hub holds 0 of every manifest item -> delivered")
-  -- the platform's own fuel/ammo sits in the hold but is NOT in the manifest, so
-  -- it must NOT block completion (the whole-hub is_empty check used to)
-  assert_true(watchdog.manifest_delivered(counter({ ["nuclear-fuel"] = 5, ["uranium-rounds-magazine"] = 80 }), manifest, nil),
-    "non-manifest fuel/ammo in the hold -> still delivered (ignored)")
-  -- one manifest item not yet pulled -> not delivered
-  assert_eq(watchdog.manifest_delivered(counter({ ["copper-plate"] = 40 }), manifest, nil), false,
-    "one manifest item remaining -> not delivered")
-  -- empty / nil manifest -> nothing to deliver -> trivially delivered
-  assert_true(watchdog.manifest_delivered(counter({ ["iron-plate"] = 999 }), {}, nil),
-    "empty manifest -> trivially delivered (ignores unrelated cargo)")
-  assert_true(watchdog.manifest_delivered(counter({}), nil, nil),
-    "nil manifests -> delivered")
-  -- two-way: forward pulled but the RETURN manifest is still aboard -> not delivered
-  assert_eq(watchdog.manifest_delivered(counter({ ["copper-plate"] = 150 }), {}, { ["copper-plate"] = 150 }), false,
-    "return manifest still aboard -> not delivered")
-  -- two-way: both forward + return drained -> delivered
-  assert_true(watchdog.manifest_delivered(counter({}), { ["iron-plate"] = 300 }, { ["copper-plate"] = 150 }),
-    "forward + return both drained -> delivered")
-end)
 
 describe("watchdog.stop_request -- per-stop hub request (forward/return lifecycle)", function()
   local a = {
@@ -1727,70 +1698,6 @@ describe("watchdog.load_impossible -- abort a trip whose source ran dry", functi
     "current!=1 -> not the forward load stop")
   -- no platform -> false (never abort blindly)
   assert_eq(watchdog.load_impossible({ manifest = {} }, nil), false, "no platform -> false")
-end)
-
-describe("watchdog.delivery_impossible -- abort a parked, no-longer-wanted delivery", function()
-  -- count_fn = what the hub STILL holds; request_fn = the drop planet's RAW unmet
-  -- (requested - on_hand, EXCLUDING fleet inbound -- deliberately NOT open_demand,
-  -- which would net out this assignment's own inbound and read ~0 mid-unload).
-  local function held(hold) return function(item) return hold[item] or 0 end end
-  local function wants(req) return function(item) return req[item] or 0 end end
-  local a = { manifest = { ["iron-plate"] = 300, ["copper-plate"] = 150 } }
-
-  -- cargo still aboard AND the destination no longer requests ANY of it -> abort
-  assert_true(
-    watchdog.delivery_impossible(a,
-      wants({}),                                       -- dest wants nothing now
-      held({ ["iron-plate"] = 300, ["copper-plate"] = 150 })),
-    "cargo aboard + dest requests none -> impossible (abort)")
-
-  -- the destination STILL requests one of the held items (raw unmet > 0) -> healthy
-  assert_eq(
-    watchdog.delivery_impossible(a,
-      wants({ ["iron-plate"] = 120 }),                 -- still short on iron
-      held({ ["iron-plate"] = 300, ["copper-plate"] = 150 })),
-    false, "a held item still wanted (raw unmet > 0) -> NOT impossible")
-
-  -- the pad already pulled everything -> hub holds none of our cargo -> not our job
-  -- here (completed wins, checked first in the run loop); never impossible.
-  assert_eq(
-    watchdog.delivery_impossible(a, wants({}), held({})),
-    false, "cargo already pulled (nothing held) -> NOT impossible (completed wins)")
-
-  -- "not at the unload stop": en route / mid-pull the destination still has its
-  -- full raw demand (on_hand low -> requested - on_hand > 0), so even with cargo
-  -- aboard the predicate reads healthy. (The run loop ALSO gates on parked-at-last-
-  -- stop, so this is never even called before arrival.)
-  assert_eq(
-    watchdog.delivery_impossible(a,
-      wants({ ["iron-plate"] = 300, ["copper-plate"] = 150 }),
-      held({ ["iron-plate"] = 300, ["copper-plate"] = 150 })),
-    false, "dest still fully requests (pre-delivery / mid-pull) -> NOT impossible")
-
-  -- mixed: the dest dropped its iron request but still wants copper -> a single
-  -- still-wanted held item keeps the delivery healthy (it'll deliver the rest).
-  assert_eq(
-    watchdog.delivery_impossible(a,
-      wants({ ["copper-plate"] = 80 }),
-      held({ ["iron-plate"] = 300, ["copper-plate"] = 150 })),
-    false, "one held item still wanted -> NOT impossible")
-
-  -- return-only cargo (two-way drop at the source): forward already delivered
-  -- (count 0), only the return manifest aboard. Source no longer wants it -> abort;
-  -- source still wants it -> healthy.
-  local twoway = { manifest = { ["iron-plate"] = 300 }, return_manifest = { ["copper-plate"] = 150 } }
-  assert_true(
-    watchdog.delivery_impossible(twoway, wants({}), held({ ["copper-plate"] = 150 })),
-    "return cargo aboard + source requests none -> impossible")
-  assert_eq(
-    watchdog.delivery_impossible(twoway, wants({ ["copper-plate"] = 60 }), held({ ["copper-plate"] = 150 })),
-    false, "return cargo still wanted at the source -> NOT impossible")
-
-  -- empty / nil edges -> nothing held -> never impossible (defensive)
-  assert_eq(watchdog.delivery_impossible({}, wants({}), held({})), false,
-    "no manifest -> NOT impossible")
-  assert_eq(watchdog.delivery_impossible(nil, wants({}), held({})), false,
-    "nil assignment -> NOT impossible")
 end)
 
 -- ---------------------------------------------------------------------------
@@ -3096,7 +3003,7 @@ end)
 -- stays keyed by the OPAQUE cargo qkey, but the engine-facing wait conditions
 -- (item_count first_signal) DECODE the qkey to {name, quality} -- a different
 -- quality variant of the same item gates on its own item_count. (The set_slot /
--- hub-request decode + the watchdog hub_counter decode are IO seams, playtested
+-- hub-request decode is an IO seam, playtested
 -- per docs/api-notes.md; this covers the PURE wait-condition decode that
 -- build_records emits. NOTE per the plan: do NOT assert quality in
 -- schedule_signature tests -- the signature serializes only type/ticks/

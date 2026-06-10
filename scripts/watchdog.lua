@@ -33,14 +33,13 @@
 --     only DETECTS "stuck" via the timeout, it never refuels.
 --
 -- Design split (per the plan's pure-function seam):
---   * `reclamp_amount`, `schedule_signature`, `expired`, and `manifest_delivered`
---     (completion over an injected hub count_fn) are PURE over plain tables/scalars
---     -- no engine globals -- so they load and run under plain `lua` and are
---     unit-tested. The signature is order-stable (multiplayer
---     determinism: iterate records in order, requests via the sorted helper) per
---     docs/api-notes.md §4.
+--   * `reclamp_amount`, `schedule_signature`, `expired`, `phase_for`, and
+--     `signable_records` are PURE over plain tables/scalars -- no engine globals --
+--     so they load and run under plain `lua` and are unit-tested. The signature is
+--     order-stable (multiplayer determinism: iterate records in order, requests via
+--     the sorted helper) per docs/api-notes.md §4.
 --   * everything else (the `run` loop, platform-validity / live-schedule /
---     arrival / manifest-delivered reads, the request rewrite) is thin IO, marked
+--     arrival reads, the request rewrite) is thin IO, marked
 --     [provisional] against the engine seams, and verified by manual playtest
 --     (the Post-Completion checklist: asteroid loss, fuel starvation, mid-flight
 --     edit).
@@ -49,8 +48,6 @@ local state = require("scripts.state")
 local fleet = require("scripts.fleet")
 local stock = require("scripts.stock")
 local schedule = require("scripts.schedule")
-local demand = require("scripts.demand")
-local qkey = require("scripts.qkey")
 
 local watchdog = {}
 
@@ -119,65 +116,6 @@ function watchdog.advanced(prev, current)
     return false
   end
   return prev == nil or current > prev
-end
-
--- Pure: has the ship delivered all of OUR cargo? True when the hub holds zero of
--- every item in BOTH the forward `manifest` and the `return_manifest`
--- (`count_fn(item)` returns the hub count of that item). This deliberately ignores
--- the platform's own fuel/ammo/repair-packs and any other non-manifest cargo: a
--- ship that stocks its own fuel would never read whole-hub-empty, so completion
--- gates on the MANIFEST cargo, not the whole hold. An empty manifest (nothing to
--- deliver) is trivially delivered. Iterates via the sorted helper for determinism
--- (the boolean is order-independent, but keep iteration stable). Pure over the
--- injected `count_fn` + plain manifest tables.
-function watchdog.manifest_delivered(count_fn, manifest, return_manifest)
-  local function all_zero(m)
-    for item in state.sorted_pairs(m or {}) do
-      if (count_fn(item) or 0) > 0 then
-        return false
-      end
-    end
-    return true
-  end
-  return all_zero(manifest) and all_zero(return_manifest)
-end
-
--- Pure: should a parked delivery be ABORTED as impossible? True when the ship
--- STILL holds some of OUR cargo (`count_fn(item) > 0` for a manifest/return item)
--- AND the drop planet's RAW request for EVERY held item is 0 -- i.e. the
--- destination genuinely no longer wants any of it. `request_fn(item)` is the RAW
--- native unmet (`max(0, requested - on_hand)`, EXCLUDING fleet inbound) -- NOT
--- `demand.open_demand`, which nets out THIS assignment's own `inbound_commit` and
--- so reads ~0 for the whole unload window of any in-flight cargo; gating on it
--- would abort HEALTHY deliveries (review finding). If ANY held item is still
--- wanted (raw request > 0) the delivery is healthy -> false. If the ship holds
--- NONE of our cargo (the pad already pulled it) -> false: that is `completed`'s
--- job, checked FIRST in the run loop. Iterates via the sorted helper for
--- determinism (the boolean is order-independent). Pure over the injected fns +
--- plain manifest tables.
-function watchdog.delivery_impossible(a, request_fn, count_fn)
-  if not a then
-    return false
-  end
-  local held_any = false
-  local function scan(m)
-    for item in state.sorted_pairs(m or {}) do
-      if (count_fn(item) or 0) > 0 then
-        held_any = true
-        if (request_fn(item) or 0) > 0 then
-          return true -- a still-held item is still wanted -> healthy, not impossible
-        end
-      end
-    end
-    return false
-  end
-  if scan(a.manifest) then
-    return false
-  end
-  if scan(a.return_manifest) then
-    return false
-  end
-  return held_any
 end
 
 -- Pure: which hub request the ship should be holding at schedule stop `current`,
@@ -451,35 +389,14 @@ function watchdog.player_edited(a, platform)
   return live ~= a.schedule_signature
 end
 
--- [provisional] Per-(item,quality) hub cargo count, bound to this platform.
--- Returns a `count_fn(key) -> count` where `key` is a manifest cargo qkey: this is
--- an engine-read seam, so it DECODES the qkey and reads
--- `hub.get_item_count{name, quality}` (api-notes §1, Task 11 #4d) -- normal- and
--- uncommon-quality iron count independently, so completion/abort test the exact
--- variant the mod shipped. A bare item-name key decodes to "normal". Returns nil
--- when the hub can't be read (then completion never fires -- we don't "complete" a
--- ship whose hold we can't read). Used by `completed`/`delivery_stalled` to test
--- the MANIFEST cargo specifically rather than the whole hold. 2.0 `get_item_count`
--- takes a SINGLE `ItemWithQualityID` ({name, quality}) -- the old two-arg
--- `(name, quality)` form crashed in-engine (Expected 0 or 1 arguments).
-function watchdog.hub_counter(platform)
-  local hub = platform and platform.valid and platform.hub
-  if not (hub and hub.valid and hub.get_item_count) then
-    return nil
-  end
-  return function(key)
-    local name, quality = qkey.qparse(key)
-    return hub.get_item_count({ name = name, quality = quality })
-  end
-end
-
--- Shared "arrived + parked at the final stop" gate for `completed` and
--- `delivery_stalled`: the final stop is the active destination
--- (`schedule.current >= #records`) AND the ship is no longer moving
--- (`speed == 0`). Engine-read-thin over `platform.schedule`/`speed`. `speed`
--- degrades safely: an unreadable (nil) speed reads as 0 (parked), so the caller
--- falls through to its own cargo guard. Returns false on any unreadable schedule
--- seam (never act blindly).
+-- The roundtrip-done gate: the ship has ARRIVED and PARKED at its final stop -- the
+-- final stop is the active destination (`schedule.current >= #records`) and the ship
+-- is no longer moving (`speed == 0`). The run loop frees the assignment here: the
+-- landing pad auto-delivers the carried cargo to the planet whether the ship is on a
+-- schedule or idle, so there is no need to read the hub or the destination's demand
+-- (a delivered item can overlap the platform's own construction/fuel stock and never
+-- clear). Engine-read-thin over `platform.schedule`/`speed`; an unreadable (nil)
+-- speed reads as 0 (parked). Returns false on any unreadable schedule seam.
 function watchdog.parked_at_last_stop(platform)
   local sched = platform and platform.valid and platform.schedule
   local records = sched and sched.records
@@ -490,31 +407,6 @@ function watchdog.parked_at_last_stop(platform)
     return false -- the final stop is not yet the active destination
   end
   return (platform.speed or 0) == 0 -- parked at the final stop, not still moving
-end
-
--- [provisional] Has the ship delivered and finished its mod route? v1 definition:
--- the final stop is its current destination, it is no longer moving, AND its hub
--- no longer holds any of OUR cargo (the manifest + return manifest -- NOT the whole
--- hold, which also carries the platform's own fuel/ammo). `schedule.current` is the
--- index of the current DESTINATION (the stop the ship is travelling toward OR
--- parked at), NOT an arrival flag, so `current >= #records` alone can't mean
--- "arrived at the last stop". The manifest-delivered check is the real completion
--- guard (a ship in transit to the final stop still holds its cargo, so it won't read
--- delivered until the native drop finishes); the `speed == 0` check additionally
--- rejects the edge where the cargo is already gone WHILE still travelling to the
--- final stop (e.g. a return leg that failed to load) -- a parked ship has zero
--- speed. `speed` degrades safely: an unreadable (nil) speed falls back to the
--- manifest-delivered guard alone. Confirm `schedule.current`, `get_item_count`, and
--- `speed` in-engine.
-function watchdog.completed(platform, a)
-  if not watchdog.parked_at_last_stop(platform) then
-    return false -- not yet arrived + parked at the final stop
-  end
-  local count_fn = watchdog.hub_counter(platform)
-  if not count_fn then
-    return false -- can't read the hold -> never complete blindly
-  end
-  return watchdog.manifest_delivered(count_fn, a and a.manifest, a and a.return_manifest)
 end
 
 -- [provisional] Is the platform idle with no active mod schedule? Used to recover
@@ -537,64 +429,6 @@ function watchdog.load_impossible(a, platform)
   local sched = platform and platform.valid and platform.schedule
   return sched ~= nil and sched.current == 1
     and a.manifest ~= nil and next(a.manifest) == nil
-end
-
--- [provisional] The DROP node's RAW native request as a `request_fn(item) ->
--- max(0, requested - on_hand)`, for the delivery-impossible abort. CRITICAL: this
--- is the RAW pad request EXCLUDING fleet inbound -- deliberately NOT
--- `demand.open_demand` (which nets out this very assignment's `inbound_commit`, so
--- a destination's *open* demand reads ~0 for the whole unload window and would
--- abort healthy deliveries). The raw request also self-guards a mid-pull: while
--- the pad is still draining cargo, `on_hand` is low so raw unmet stays > 0. The
--- drop node is the DESTINATION for a one-way trip (last stop = the unload) and the
--- SOURCE for a two-way return drop (last stop = the return drop), mirroring
--- `stop_request`'s forward/return split. Reuses the `demand.reader` §3 seam and the
--- pure `compute_unmet` (inbound forced to 0 = raw). Returns nil when the node or
--- its request can't be read, so the caller never aborts blindly.
---
--- QUALITY (Task 11, #4d): `demand.reader` already keys each row by
--- `qkey(name, quality)` (Task 9 -- the per-quality pad-request read decodes there,
--- the engine-read seam), so `raw` is qkey-keyed. `delivery_impossible` calls this
--- `request_fn` with the manifest's cargo qkeys, so the lookup is qkey-to-qkey: the
--- raw request resolves per (name, quality) WITHOUT a second decode here (normal-
--- and uncommon-quality iron net independently).
-function watchdog.dest_request_fn(a)
-  local two_way = a and a.return_manifest and next(a.return_manifest) ~= nil
-  local node_id = two_way and a.source or (a and a.dest)
-  local node = storage and storage.nodes and storage.nodes[node_id]
-  if not node then
-    return nil
-  end
-  local raw = {}
-  for _, row in ipairs(demand.reader(node) or {}) do
-    raw[row.item] = demand.compute_unmet(row.requested, row.on_hand, 0)
-  end
-  return function(key)
-    return raw[key] or 0
-  end
-end
-
--- [provisional] Should a parked, no-longer-wanted cargo be aborted? Gated
--- CONCRETELY: the ship must be parked at the LAST stop (`schedule.current >=
--- #records` AND `speed == 0`) -- the same "arrived + stopped" gate as `completed`,
--- which the run loop checks FIRST so a genuine pad-pull COMPLETES (idles, no
--- residue) instead. Only then does the pure `delivery_impossible` decide, over the
--- drop node's RAW request (`dest_request_fn`) and the live hub count
--- (`hub_counter`). The `current >= #records` gate scopes this to the ONE-WAY
--- delivery (last stop) and the two-way RETURN drop (last stop), NOT a two-way
--- forward turnaround (stop 2 of 3) -- that case waits its per-stop timeout, residue
--- self-heals at the stop-3 drop. Returns false on any unreadable seam (never abort
--- blindly). Confirm `schedule.current` / `speed` / the pad request read in-engine.
-function watchdog.delivery_stalled(a, platform)
-  if not watchdog.parked_at_last_stop(platform) then
-    return false -- not yet arrived + parked at the final stop
-  end
-  local count_fn = watchdog.hub_counter(platform)
-  local request_fn = watchdog.dest_request_fn(a)
-  if not (count_fn and request_fn) then
-    return false -- can't read the hold or the drop request -> never abort blindly
-  end
-  return watchdog.delivery_impossible(a, request_fn, count_fn)
 end
 
 -- [provisional] Re-issue the active stop's cargo request as `manifest` (scoped to
