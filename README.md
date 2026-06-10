@@ -42,7 +42,10 @@ and exporting the same item at once.
    to keep an enrolled ship out of auto-dispatch when you want to fly it yourself.
 3. **Set demand.** Use the landing pad's normal request slots — that _is_ the
    demand signal. Each slot gets a `source via fleet` toggle (default on) and an
-   optional priority in the Trade tab.
+   optional priority in the Trade tab. Optionally pin a **Preferred ship** for a
+   planet from the Trade tab's drop-down (default "(auto)"); the dispatcher uses
+   that enrolled ship when it's free and eligible, falling back to auto-pick
+   otherwise.
 4. **Set reserves.** In the Trade tab, set a global default floor plus per-item
    overrides so exports never strip-mine a planet below what it needs.
 5. **Watch it run.** Open the fleet **Monitor** from the top-bar shortcut.
@@ -63,9 +66,11 @@ the **minimum-trip threshold** so trivially small amounts don't dispatch ships.
 
 Opened from the top-bar shortcut, the Monitor shows the whole fleet at a glance:
 
-- **Fleet roster** — each ship's state (idle / enroute / loading / unloading /
-  withdrawn), current job `From → To`, manifest, and timeout countdown.
-- **Active shipments** — quantities and progress.
+- **Fleet roster** — each ship's live state (idle / enroute / loading /
+  unloading / withdrawn), current job `From → To`, manifest, and timeout
+  countdown. Loading/unloading are derived from where the ship is parked, so the
+  roster tracks a trip in real time.
+- **Active shipments** — quantities, progress, and the live per-shipment phase.
 - **Waiting demand** — items wanting transport but not yet dispatched, each with
   a reason: `no source`, `source busy importing`, `no ship`, or `below min-trip`.
 - **Alerts** — stranded / destroyed / conflict events.

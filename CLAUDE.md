@@ -21,6 +21,12 @@ save/load:
 - **All persistent state lives in `storage`** — `storage.nodes`, `storage.fleet`,
   `storage.assignments`, `storage.alerts`. The per-tick stock cache is the only
   in-memory state, and it is rebuilt each tick (never read across ticks).
+  `storage.fleet` is keyed by the force-qualified fleet key
+  `"<forcekey>/<platform.index>"` (`registry.fleet_key`; `forcekey` =
+  `force.index or force.name`) — a stable string so `state.sorted_keys` ordering
+  stays total. Storage schema is **v2** (`state.SCHEMA_VERSION`): the v1→v2
+  migration (`state.migrate_fleet_keys`) re-keys `storage.fleet` and rewrites
+  each `storage.assignments[*].ship`.
 - The player-edit signature is an **order-stable** serialization (records in
   fixed order; wait-conditions and request pairs via the sorted helper). A
   `pairs`-order signature would cause false "player edited it" positives.
@@ -72,6 +78,7 @@ globals) still loads them.
 | `gui/monitor.lua` | fleet monitor render + event routing (dumb view) |
 | `gui/trade_tab.lua` | Trade tab on the landing pad GUI (dumb view) |
 | `gui/fleet_tab.lua` | Fleet tab on the platform hub GUI — enroll / reserve-for-manual toggles (dumb view) |
+| `gui/common.lua` | shared GUI trust glue: `ancestor_frame` (element-ancestry check) + `force_key` (force-match key), used by the three dumb views |
 | `viewmodel.lua` | pure builders for GUI view models (testable) |
 | `qkey.lua` | pure `(item, quality)` compound-key helper (`qkey`/`qparse`/`label`) |
 
