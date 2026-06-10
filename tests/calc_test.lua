@@ -594,12 +594,8 @@ describe("schedule.build_records -- 2-stop route + wait-conditions", function()
       condition = { comparator = ">=",
         first_signal = { type = "item", name = item, quality = "normal" }, constant = qty } }
   end
-  local function delivered(item)
-    return { type = "item_count", compare_type = "and",
-      condition = { comparator = "=",
-        first_signal = { type = "item", name = item, quality = "normal" }, constant = 0 } }
-  end
   local timeout_or = { type = "time", ticks = 3600, compare_type = "or" }
+  local hold_timeout = { type = "time", ticks = 3600, compare_type = "and" }
 
   -- source stop: the clamped wide manifest as per-stop requests
   local src = built.records[1]
@@ -613,16 +609,16 @@ describe("schedule.build_records -- 2-stop route + wait-conditions", function()
   assert_eq(src.wait_conditions[2], loaded("iron-plate", 500), "source waits on iron loaded")
   assert_eq(src.wait_conditions[3], timeout_or, "source manifest-loaded OR timeout")
 
-  -- dest stop: native unload -> no requests, per-item delivered (==0) OR timeout
+  -- dest stop is the FINAL stop: it HOLDS on the timeout (the watchdog clears the
+  -- route + the hub request once delivery is done). NO per-item ==0 / inactivity:
+  -- the platform schedule is cyclic, so any satisfiable condition would loop the
+  -- ship back to stop 1 forever. Native unload -> no requests, allows_unloading true.
   local dst = built.records[2]
   assert_eq(dst.station, "vulcanus", "second stop is the destination planet")
   assert_eq(dst.requests, {}, "destination has no explicit cargo request (native unload)")
   assert_eq(dst.allows_unloading, true, "drop stop allows unloading (dest pad pulls the cargo)")
-  assert_eq(dst.wait_conditions[1], delivered("copper-plate"), "destination waits on copper delivered")
-  assert_eq(dst.wait_conditions[2], delivered("iron-plate"), "destination waits on iron delivered")
-  assert_eq(dst.wait_conditions[3], { type = "inactivity", ticks = 300, compare_type = "or" },
-    "destination also departs on inactivity (retained cargo never hits item==0)")
-  assert_eq(dst.wait_conditions[4], timeout_or, "... or the timeout backstop")
+  assert_eq(dst.wait_conditions[1], hold_timeout, "final stop HOLDS on the timeout (watchdog clears the route)")
+  assert_eq(dst.wait_conditions[2], nil, "no looping ==0 / inactivity conditions on the final stop")
 
   -- the built manifest is exposed for the dispatcher's bookkeeping (Task 5)
   assert_eq(built.manifest, { ["iron-plate"] = 500, ["copper-plate"] = 200 },
@@ -1927,12 +1923,15 @@ describe("schedule.build_records -- two-way is a 3-stop turnaround (same two pla
   assert_eq(turn.wait_conditions[3], timeout_or, "... or timeout")
   assert_eq(turn.wait_conditions[4], nil, "NO forward ==0 gate (over-delivery residue would never clear it)")
 
-  -- stop 3: drop the return cargo back at the source
+  -- stop 3: drop the return cargo back at the source -- the FINAL stop, so it HOLDS
+  -- on the timeout and the watchdog clears the route (no looping ==0 condition).
   local back = built.records[3]
   assert_eq(back.station, "nauvis", "stop 3 drops the return at the source")
   assert_eq(back.requests, {}, "return drop carries no request")
   assert_eq(back.allows_unloading, true, "drop stop allows unloading")
-  assert_eq(back.wait_conditions[1], delivered("copper-plate"), "return copper delivered (==0)")
+  assert_eq(back.wait_conditions[1], { type = "time", ticks = 3600, compare_type = "and" },
+    "final return-drop stop HOLDS on the timeout (watchdog clears the route)")
+  assert_eq(back.wait_conditions[2], nil, "no looping ==0 condition on the final stop")
 
   assert_eq(built.return_manifest, { ["copper-plate"] = 150 }, "built exposes the return manifest")
 end)
@@ -1946,10 +1945,9 @@ describe("schedule.build_records -- empty return manifest stays a 2-stop route",
   })
   assert_eq(#built.records, 2, "empty return manifest -> still two stops")
   assert_eq(built.records[2].wait_conditions[1],
-    { type = "item_count", compare_type = "and",
-      condition = { comparator = "=",
-        first_signal = { type = "item", name = "iron-plate", quality = "normal" }, constant = 0 } },
-    "dest reverts to a 2-stop unload (iron delivered)")
+    { type = "time", ticks = 3600, compare_type = "and" },
+    "dest reverts to a 2-stop unload that HOLDS on the timeout (watchdog clears the route)")
+  assert_eq(built.records[2].wait_conditions[2], nil, "no looping ==0 condition on the final unload")
   assert_eq(built.return_manifest, nil, "no return manifest exposed")
 end)
 
@@ -2023,12 +2021,9 @@ describe("schedule.engine_records -- apples-to-apples signature compare with a r
     {
       station = "vulcanus",
       allows_unloading = true,
+      -- final stop now HOLDS on the timeout only (no looping ==0 / inactivity)
       wait_conditions = {
-        { type = "item_count", compare_type = "and",
-          condition = { comparator = "=",
-            first_signal = { type = "item", name = "iron-plate", quality = "normal" }, constant = 0 } },
-        { type = "inactivity", ticks = 300, compare_type = "or" },
-        { type = "time", ticks = 3600, compare_type = "or" },
+        { type = "time", ticks = 3600, compare_type = "and" },
       },
     },
   }
@@ -3129,18 +3124,17 @@ describe("schedule.build_records -- quality-tagged requests decode at the wait s
   assert_eq(built.records[1].requests, { [q("iron-plate", "uncommon")] = 500 },
     "source requests keyed by the qkey (decoded only at the hub-request seam)")
 
-  -- the load + unload wait conditions DECODE the qkey -> {name, quality} so the
-  -- item_count reads the exact quality variant.
+  -- the LOAD wait condition DECODES the qkey -> {name, quality} so the item_count
+  -- reads the exact quality variant. (The final unload stop no longer carries an
+  -- item_count condition -- it HOLDS on the timeout and the watchdog clears the
+  -- route -- so there is no unload-side qkey decode to assert.)
   assert_eq(built.records[1].wait_conditions[1], {
     type = "item_count", compare_type = "and",
     condition = { comparator = ">=",
       first_signal = { type = "item", name = "iron-plate", quality = "uncommon" }, constant = 500 } },
     "load wait first_signal decodes the qkey to name + quality")
-  assert_eq(built.records[2].wait_conditions[1], {
-    type = "item_count", compare_type = "and",
-    condition = { comparator = "=",
-      first_signal = { type = "item", name = "iron-plate", quality = "uncommon" }, constant = 0 } },
-    "unload wait first_signal decodes the qkey to name + quality")
+  assert_eq(built.records[2].wait_conditions[1], { type = "time", ticks = 3600, compare_type = "and" },
+    "final unload stop HOLDS on the timeout (no per-item ==0)")
 end)
 
 -- ---------------------------------------------------------------------------

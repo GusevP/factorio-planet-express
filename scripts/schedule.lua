@@ -191,32 +191,25 @@ local function load_wait(manifest, timeout)
   return conds
 end
 
--- Departure at an unload stop, as: (every manifest item == 0) OR inactivity OR
--- timeout. The per-item `item_count == 0` is the FAST path for a clean delivery
--- (the landing-pad pull emptied those items). But the ship can legitimately RETAIN
--- some of a delivered item -- it stocks its own fuel/ammo/repair-kits, or the pad
--- only pulled part of the load -- so `== 0` may never hit; `inactivity` then fires
--- once the pull goes quiet, and the timeout is the final backstop (invariant #1).
+-- Departure at the FINAL stop (the one-way destination, or the two-way return drop
+-- back at the source). The ship deliberately HOLDS here -- the only wait condition
+-- is the long `time` backstop -- and the WATCHDOG clears the route once delivery is
+-- done (`completed` for a clean drop, `delivery_stalled` when atomic-rocket
+-- over-delivery leaves unwanted residue aboard). The pad still pulls the cargo while
+-- it waits (allows_unloading is set on the stop). This is load-bearing: a platform
+-- schedule is CYCLIC, so ANY satisfiable per-item / inactivity condition makes the
+-- ship depart the final stop and loop back to stop 1 -- re-running the whole route
+-- forever -- on the very next tick, long before the (per-N-tick) watchdog can free
+-- it. Holding on the timeout keeps the ship parked at the final stop until the
+-- watchdog reliably clears the route (well within the timeout); the timeout only
+-- ever fires if the watchdog somehow never runs. `manifest` is unused (kept for
+-- caller symmetry); the watchdog decides "delivered" from the destination's real
+-- demand, not the ship's residual cargo count.
 local function unload_wait(manifest, timeout)
+  local _ = manifest
   local conds = {}
-  for item in state.sorted_pairs(manifest or {}) do
-    conds[#conds + 1] = {
-      type = schedule.WAIT_ITEM_COUNT,
-      compare_type = "and",
-      condition = {
-        comparator = "=",
-        first_signal = item_signal(item),
-        constant = 0,
-      },
-    }
-  end
-  conds[#conds + 1] = {
-    type = schedule.WAIT_INACTIVITY,
-    ticks = schedule.UNLOAD_INACTIVITY,
-    compare_type = "or",
-  }
   if timeout then
-    conds[#conds + 1] = { type = schedule.WAIT_TIME, ticks = timeout, compare_type = "or" }
+    conds[#conds + 1] = { type = schedule.WAIT_TIME, ticks = timeout, compare_type = "and" }
   end
   return conds
 end
