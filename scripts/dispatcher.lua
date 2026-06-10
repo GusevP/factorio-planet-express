@@ -173,6 +173,61 @@ function dispatcher.ships_for_force(ships, force)
 end
 
 -- ---------------------------------------------------------------------------
+-- pure within-tick demand netting (mirror of demand.inbound_for)
+-- ---------------------------------------------------------------------------
+
+-- Credit a node for cargo committed TO it this tick, so a later destination in
+-- the SAME tick can't re-ship what is already on its way. This mirrors
+-- `demand.inbound_for` (the cross-tick read), applied to the working snapshot:
+--   * forward leg: the DEST node is credited by `manifest` (node as destination),
+--   * return leg: the SOURCE node is credited by `return_manifest` (node as the
+--     return destination).
+-- For each `(item, qty)` it decrements the node's `unmet_by_item[item]` (clamp at
+-- 0, REMOVE the key at 0 so `exportable`'s `unmet > 0` test matches next-tick
+-- semantics) and the matching `demand` row (`d.unmet = max(0, d.unmet - qty)`).
+--
+-- Composition side effect (the thrash-guard re-open hole): when an item's
+-- `unmet_by_item` reaches 0, the node's working `surplus[item]` is zeroed too --
+-- otherwise `exportable(node, item)` (which returns surplus ONLY when unmet == 0)
+-- would RE-OPEN for the rest of the tick and let a later destination export the
+-- very item this node just received (ships passing each other). The zeroing is
+-- keyed strictly off unmet reaching 0; it does NOT subtract the manifest from
+-- surplus (the forward leg already drains the SOURCE's surplus in `plan`, and the
+-- return leg drains the DEST's surplus there), so it never double-applies over
+-- those existing drains. Pure over the node snapshot.
+local function credit_inbound(node, commit)
+  if not (node and commit) then
+    return
+  end
+  for item, qty in pairs(commit) do
+    if qty and qty > 0 then
+      if node.unmet_by_item then
+        local left = (node.unmet_by_item[item] or 0) - qty
+        if left > 0 then
+          node.unmet_by_item[item] = left
+        else
+          node.unmet_by_item[item] = nil
+          -- unmet hit 0: an item delivered here this tick is never a sane export
+          -- source from here this tick -- zero its working surplus so the thrash
+          -- guard stays closed for the rest of the tick.
+          if node.surplus then
+            node.surplus[item] = nil
+          end
+        end
+      end
+      if node.demand then
+        for _, d in ipairs(node.demand) do
+          if d.item == item then
+            local u = (d.unmet or 0) - qty
+            d.unmet = u > 0 and u or 0
+          end
+        end
+      end
+    end
+  end
+end
+
+-- ---------------------------------------------------------------------------
 -- pure best-source selection
 -- ---------------------------------------------------------------------------
 
@@ -368,6 +423,11 @@ function dispatcher.plan(snapshot)
             for item, qty in pairs(manifest) do
               source.surplus[item] = (source.surplus[item] or 0) - qty
             end
+            -- demand-side within-tick bookkeeping (mirror of demand.inbound_for):
+            -- credit the DEST node for the forward manifest so a later
+            -- destination this tick can't re-ship what's already inbound here, and
+            -- (when its unmet hits 0) close the export-re-open hole on that item.
+            credit_inbound(dest, manifest)
 
             -- Two-way return leg: the empty ship loads wide at the destination
             -- on its way home with whatever the source still needs. Same guard,
@@ -380,6 +440,12 @@ function dispatcher.plan(snapshot)
                 for item, qty in pairs(ret) do
                   dest.surplus[item] = (dest.surplus[item] or 0) - qty
                 end
+                -- demand-side bookkeeping for the return leg (mirror of
+                -- demand.inbound_for): the return cargo is delivered to the SOURCE
+                -- node, so credit IT -- a later destination this tick reading the
+                -- source's un-netted demand would otherwise ship the same item to
+                -- it again (the reachable 3-node double-serve).
+                credit_inbound(source, ret)
                 return_manifest = ret
               end
             end

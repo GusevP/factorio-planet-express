@@ -986,6 +986,137 @@ describe("dispatcher.plan -- guard blocks importing-and-exporting the same item"
   assert_eq(#dispatcher.plan(snapshot), 0, "thrash guard: a node importing iron is never an iron source")
 end)
 
+describe("dispatcher.plan -- two-way return leg nets the source's demand within the tick", function()
+  -- Reciprocal trade: A needs X / has Y, B needs Y / has X, two idle ships,
+  -- two_way enabled. The first plan (A as dest) ships X A<-B and picks up a
+  -- RETURN leg of Y B<-A. That return leg covers ALL of B's demand for Y, so
+  -- when B is considered as a destination next, the planner must NOT re-ship Y
+  -- to B again -- the within-tick credit_inbound on the SOURCE (A's forward = B's
+  -- return dest) nets B's demand to zero.
+  local snapshot = {
+    two_way = true,
+    nodes = {
+      [1] = { id = 1, planet = "A", demand = { { item = "X", unmet = 200, priority = 0 } },
+        surplus = { ["Y"] = 500 }, unmet_by_item = { ["X"] = 200 } },
+      [2] = { id = 2, planet = "B", demand = { { item = "Y", unmet = 200, priority = 0 } },
+        surplus = { ["X"] = 500 }, unmet_by_item = { ["Y"] = 200 } },
+    },
+    ships = {
+      { id = 1, capacity = 1000, entry = { enrolled = true, state = fleet.IDLE } },
+      { id = 2, capacity = 1000, entry = { enrolled = true, state = fleet.IDLE } },
+    },
+  }
+  local plans = dispatcher.plan(snapshot)
+  -- exactly ONE forward plan (A<-B for X) with a Y return leg; B is fully served
+  -- by that return leg, so it produces no second forward plan.
+  assert_eq(#plans, 1, "reciprocal trade fits one ship round-trip -> a single plan")
+  assert_eq(plans[1].dest_id, 1, "lower-id destination (A) planned")
+  assert_eq(plans[1].source_id, 2, "B is the forward source")
+  assert_eq(plans[1].manifest, { ["X"] = 200 }, "forward leg ships X to A")
+  assert_eq(plans[1].return_manifest, { ["Y"] = 200 }, "return leg ships Y back to B")
+end)
+
+describe("dispatcher.plan -- 3-node forward-then-return decrements the SOURCE's demand", function()
+  -- S(1) needs X / has W, T(2) has X, D(3) needs W / has X. The forward leg
+  -- T->S ships X to S (S as a destination). Then D (as a destination) needs W
+  -- and sources it from S, picking up a RETURN leg of X back to... no -- the
+  -- forward T->S leg already credited S with X, so when D's plan considers
+  -- shipping X anywhere to S, S's demand for X is already netted to zero. This
+  -- pins the FORWARD-side decrement: without crediting S on the forward leg,
+  -- D's return leg would re-read S's un-netted X demand and ship it again.
+  local snapshot = {
+    two_way = true,
+    nodes = {
+      [1] = { id = 1, planet = "S", demand = { { item = "X", unmet = 150, priority = 0 } },
+        surplus = { ["W"] = 500 }, unmet_by_item = { ["X"] = 150 } },
+      [2] = { id = 2, planet = "T", demand = {},
+        surplus = { ["X"] = 500 }, unmet_by_item = {} },
+      [3] = { id = 3, planet = "D", demand = { { item = "W", unmet = 150, priority = 0 } },
+        surplus = { ["X"] = 500 }, unmet_by_item = { ["W"] = 150 } },
+    },
+    ships = {
+      { id = 1, capacity = 1000, entry = { enrolled = true, state = fleet.IDLE } },
+      { id = 2, capacity = 1000, entry = { enrolled = true, state = fleet.IDLE } },
+    },
+  }
+  local plans = dispatcher.plan(snapshot)
+  -- S (id 1) served first: X from T. D (id 3) served next: W from S, with a
+  -- return leg of X back to S -- BUT S's X demand was already netted by the
+  -- forward T->S leg, so the return leg must carry NO X.
+  assert_eq(#plans, 2, "both demanding nodes planned")
+  assert_eq(plans[1].dest_id, 1, "S served first (X from T)")
+  assert_eq(plans[1].manifest, { ["X"] = 150 }, "forward leg ships X to S")
+  assert_eq(plans[2].dest_id, 3, "D served next (W from S)")
+  assert_eq(plans[2].source_id, 1, "D sources W from S")
+  assert_eq(plans[2].manifest, { ["W"] = 150 }, "forward leg ships W to D")
+  assert_eq(plans[2].return_manifest, nil,
+    "return leg carries NO X to S: the forward T->S leg already netted S's X demand")
+end)
+
+describe("dispatcher.plan -- partial return coverage leaves only the remainder plannable", function()
+  -- A needs 200 X / has Y; B needs Y / has X. B can only return 50 Y (small
+  -- surplus), so A's forward leg covers X but the return leg covers only PART of
+  -- B's Y demand (50 of 200). The remainder (150) must still be plannable -- a
+  -- third node C with Y surplus + an idle ship serves it.
+  local snapshot = {
+    two_way = true,
+    nodes = {
+      [1] = { id = 1, planet = "A", demand = { { item = "X", unmet = 200, priority = 0 } },
+        surplus = { ["Y"] = 50 }, unmet_by_item = { ["X"] = 200 } },
+      [2] = { id = 2, planet = "B", demand = { { item = "Y", unmet = 200, priority = 0 } },
+        surplus = { ["X"] = 500 }, unmet_by_item = { ["Y"] = 200 } },
+      [3] = { id = 3, planet = "C", demand = {},
+        surplus = { ["Y"] = 500 }, unmet_by_item = {} },
+    },
+    ships = {
+      { id = 1, capacity = 1000, entry = { enrolled = true, state = fleet.IDLE } },
+      { id = 2, capacity = 1000, entry = { enrolled = true, state = fleet.IDLE } },
+    },
+  }
+  local plans = dispatcher.plan(snapshot)
+  assert_eq(#plans, 2, "A's round-trip plus a second plan for B's remainder")
+  assert_eq(plans[1].dest_id, 1, "A served first")
+  assert_eq(plans[1].return_manifest, { ["Y"] = 50 }, "return leg covers only A's small Y surplus")
+  assert_eq(plans[2].dest_id, 2, "B's remaining Y demand still served")
+  assert_eq(plans[2].source_id, 3, "remainder sourced from C")
+  assert_eq(plans[2].manifest, { ["Y"] = 150 },
+    "only the remainder (200 - 50 already inbound) is shipped -- no double-serve, no under-serve")
+end)
+
+describe("dispatcher.plan -- forward-served demand closes the export-re-open hole", function()
+  -- A both DEMANDS X (200) and HOLDS X surplus (500). A is served forward this
+  -- tick (X from B), which nets A's X demand to 0. The composition rule must then
+  -- ZERO A's working X surplus -- otherwise exportable(A, X) re-opens (unmet == 0
+  -- now) and a later destination C could export the very X A just received.
+  local snapshot = {
+    two_way = false,  -- isolate the forward-leg export-re-open path (no return leg)
+    nodes = {
+      [1] = { id = 1, planet = "A", demand = { { item = "X", unmet = 200, priority = 0 } },
+        surplus = { ["X"] = 500 }, unmet_by_item = { ["X"] = 200 } },
+      [2] = { id = 2, planet = "B", demand = {},
+        surplus = { ["X"] = 500 }, unmet_by_item = {} },
+      [3] = { id = 3, planet = "C", demand = { { item = "X", unmet = 200, priority = 0 } },
+        surplus = {}, unmet_by_item = { ["X"] = 200 } },
+    },
+    ships = {
+      { id = 1, capacity = 1000, entry = { enrolled = true, state = fleet.IDLE } },
+      { id = 2, capacity = 1000, entry = { enrolled = true, state = fleet.IDLE } },
+    },
+  }
+  local plans = dispatcher.plan(snapshot)
+  -- A (id 1) served from B. C (id 3) served next: its X must come from B (B still
+  -- has 300 left), NEVER from A -- A's surplus was zeroed when its X demand hit 0.
+  assert_eq(#plans, 2, "A and C both served")
+  assert_eq(plans[1].dest_id, 1, "A served first")
+  assert_eq(plans[1].source_id, 2, "A sources X from B")
+  assert_eq(plans[2].dest_id, 3, "C served next")
+  assert_eq(plans[2].source_id, 2,
+    "C sources X from B, NOT from A: A's surplus was zeroed when its demand hit 0 (no export re-open)")
+  -- belt-and-braces: exportable(A, X) is 0 after the forward leg nets A's demand
+  assert_eq(dispatcher.exportable(snapshot.nodes[1], "X"), 0,
+    "exportable(A, X) stays 0: surplus zeroed alongside the unmet decrement")
+end)
+
 describe("dispatcher.unserved_reason -- one branch per gate (diagnostic over the snapshot)", function()
   -- helper: contains-substring assertion (the reason strings are human prose).
   local function reason_has(reason, needle, msg)
