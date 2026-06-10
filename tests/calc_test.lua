@@ -1167,6 +1167,34 @@ describe("dispatcher.plan -- forward-served demand closes the export-re-open hol
     "exportable(A, X) stays 0: surplus zeroed alongside the unmet decrement")
 end)
 
+describe("dispatcher.plan -- PARTIAL credit retains working surplus (zeroed only at unmet 0)", function()
+  -- Mirror image of the export-re-open test: A demands X (200) and HOLDS X surplus
+  -- (500), but the only forward source B can spare just 50 X. The forward leg nets
+  -- A's X demand to 150 (NOT 0), so credit_inbound must LEAVE A's working surplus[X]
+  -- intact -- the zeroing fires ONLY when unmet_by_item hits exactly 0. With A's
+  -- demand still open, A is also still a valid recipient, not an export source.
+  local snapshot = {
+    two_way = false, -- isolate the forward-leg credit path (no return leg)
+    nodes = {
+      [1] = { id = 1, planet = "A", demand = { { item = "X", unmet = 200, priority = 0 } },
+        surplus = { ["X"] = 500 }, unmet_by_item = { ["X"] = 200 } },
+      [2] = { id = 2, planet = "B", demand = {},
+        surplus = { ["X"] = 50 }, unmet_by_item = {} },
+    },
+    ships = {
+      { id = 1, capacity = 1000, entry = { enrolled = true, state = fleet.IDLE } },
+    },
+  }
+  local plans = dispatcher.plan(snapshot)
+  assert_eq(#plans, 1, "A served once (only B's 50 X available)")
+  assert_eq(plans[1].dest_id, 1, "A is the destination")
+  assert_eq(plans[1].manifest, { ["X"] = 50 }, "forward leg carries B's full 50 X")
+  -- the partial credit decremented A's demand but DID NOT touch its surplus:
+  assert_eq(snapshot.nodes[1].unmet_by_item["X"], 150, "A's X demand netted to 150 (still open)")
+  assert_eq(snapshot.nodes[1].surplus["X"], 500,
+    "A's working surplus[X] RETAINED on partial credit (zeroed only when unmet hits 0)")
+end)
+
 describe("dispatcher.unserved_reason -- one branch per gate (diagnostic over the snapshot)", function()
   -- helper: contains-substring assertion (the reason strings are human prose).
   local function reason_has(reason, needle, msg)
@@ -1997,14 +2025,21 @@ describe("watchdog.schedule_signature -- explicit-vs-absent defaults serialize i
   assert_eq(watchdog.schedule_signature(typed), watchdog.schedule_signature(untyped),
     "first_signal.type present vs absent -> signature identical (deliberately excluded)")
 
-  -- a payload-less condition (time/inactivity) serializes its payload slot empty,
-  -- identically whether `condition` is absent (it always is for time/inactivity).
-  local time_only = {
+  -- a payload-less condition (time/inactivity, no `condition` field) signs with an
+  -- empty payload slot regardless of how its OTHER fields are spelled. Two distinct
+  -- input fixtures -- explicit `compare_type = "and"` vs an absent compare_type
+  -- (canonicalized to "and" at line `compare_type or "and"`) -- must canonicalize to
+  -- the SAME signature, so a first-tick readback can't false-trip player-edited.
+  local time_explicit = {
     { station = "nauvis",
-      wait_conditions = { { type = "time", ticks = 3600, compare_type = "or" } } },
+      wait_conditions = { { type = "time", ticks = 3600, compare_type = "and" } } },
   }
-  assert_eq(watchdog.schedule_signature(time_only), watchdog.schedule_signature(time_only),
-    "time/inactivity (no condition payload) signs stably with an empty payload slot")
+  local time_default = {
+    { station = "nauvis",
+      wait_conditions = { { type = "time", ticks = 3600 } } }, -- compare_type absent -> "and"
+  }
+  assert_eq(watchdog.schedule_signature(time_explicit), watchdog.schedule_signature(time_default),
+    "time/inactivity compare_type explicit 'and' vs absent -> identical signature (empty payload slot)")
 end)
 
 describe("dispatcher.plan -- two-way gate (setting off vs on)", function()
@@ -2607,6 +2642,56 @@ describe("state.migrate_fleet_keys: idempotent on already-migrated input", funct
   for _ in pairs(new_fleet) do count = count + 1 end
   assert_eq(count, 1, "exactly one entry (no duplication)")
   assert_eq(assignments[300].ship, "1/42", "assignment .ship unchanged on idempotent re-run")
+end)
+
+describe("state.setting: guarded runtime-global reader (type-matched, floored)", function()
+  local state = require("scripts.state")
+  -- state.setting is the single source of truth for the five guarded setting
+  -- readers (debug_enabled, stock.min_trip, registry default reserve, dispatcher
+  -- interval + max-ships caps). Stub the global `settings` so the pure runner can
+  -- drive every branch, and RESTORE it after so no other block sees the stub.
+  local saved_settings = settings
+  local function with_settings(global, fn)
+    settings = global and { global = global } or nil
+    fn()
+  end
+
+  -- numeric value floored (every numeric setting in this mod is an integer).
+  with_settings({ ["n"] = { value = 12.9 } }, function()
+    assert_eq(state.setting("n", 0), 12, "numeric value math.floored (12.9 -> 12)")
+  end)
+  with_settings({ ["n"] = { value = 300 } }, function()
+    assert_eq(state.setting("n", 5), 300, "already-integer numeric passes through")
+  end)
+
+  -- boolean + string passthrough (type matches the fallback).
+  with_settings({ ["b"] = { value = true } }, function()
+    assert_eq(state.setting("b", false), true, "boolean passthrough")
+  end)
+  with_settings({ ["s"] = { value = "right" } }, function()
+    assert_eq(state.setting("s", "x"), "right", "string passthrough")
+  end)
+
+  -- type mismatch between the stored value and the fallback -> fallback.
+  with_settings({ ["n"] = { value = "not-a-number" } }, function()
+    assert_eq(state.setting("n", 7), 7, "type mismatch (string value, number fallback) -> fallback")
+  end)
+  with_settings({ ["b"] = { value = 1 } }, function()
+    assert_eq(state.setting("b", false), false, "type mismatch (number value, bool fallback) -> fallback")
+  end)
+
+  -- missing key -> fallback (settings.global present but no entry for `name`).
+  with_settings({ ["other"] = { value = 1 } }, function()
+    assert_eq(state.setting("missing", 9), 9, "missing key -> fallback")
+  end)
+
+  -- settings absent entirely (the pure-Lua test runner default) -> fallback.
+  with_settings(nil, function()
+    assert_eq(state.setting("anything", 42), 42, "no settings global -> fallback (number)")
+    assert_eq(state.setting("flag", true), true, "no settings global -> fallback (bool)")
+  end)
+
+  settings = saved_settings
 end)
 
 describe("watchdog.raise_alert caps the stored backlog (oldest evicted)", function()

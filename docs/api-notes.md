@@ -439,11 +439,14 @@ ships), but correctness rests on the signature compare, not the event.
 
 ## 5. Misc seams (already exercised / low-risk)
 
-- `script.on_nth_tick(interval, handler)` — dispatcher heartbeat. **[confirmed]**
-  Registered in `control.lua` (placeholder interval; Task 10 makes it a setting,
-  re-registering on settings change).
+- `script.on_nth_tick(interval, handler)` — dual-cadence registrar. **[confirmed]**
+  Registered in `control.lua`: the dispatcher runs on the dispatch-interval setting
+  and the watchdog on the constant `watchdog.INTERVAL`. Equal periods share one
+  handler; differing periods register two. Re-registers when the dispatch-interval
+  setting changes (clearing any orphaned period).
 - `script.on_init` / `script.on_configuration_changed` — storage init +
-  migration stub. **[confirmed]** Wired to `scripts/state.lua`.
+  schema migration. **[confirmed]** Wired to `scripts/state.lua`
+  (`on_configuration_changed` runs the v1→v2 `migrate_fleet_keys`).
 - Entity build/destroy events for the registry (Task 3):
   `on_built_entity`, `on_robot_built_entity`, `script_raised_built`,
   `on_entity_died`, `on_player_mined_entity`, `on_robot_mined_entity`,

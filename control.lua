@@ -23,9 +23,10 @@ script.on_init(function()
   registry.rebuild()
 end)
 
--- Keep schema current on mod add/update/remove (migration stub at 0.0.1), then
--- rebuild the registry so a save created before the mod (or before Task 3) gets
--- its existing pads and platforms indexed.
+-- Keep schema current on mod add/update/remove (runs the real v2 fleet-key
+-- migration via state.on_configuration_changed), then rebuild the registry so a
+-- save created before the mod gets its existing pads and platforms indexed. The
+-- migration MUST run before the rebuild (re-key first, re-add under the new key).
 script.on_configuration_changed(function(event)
   state.on_configuration_changed(event)
   registry.rebuild()

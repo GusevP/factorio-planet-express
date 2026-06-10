@@ -70,7 +70,7 @@ Opened from the top-bar shortcut, the Monitor shows the whole fleet at a glance:
   unloading / withdrawn), current job `From → To`, manifest, and timeout
   countdown. Loading/unloading are derived from where the ship is parked, so the
   roster tracks a trip in real time.
-- **Active shipments** — quantities, progress, and the live per-shipment phase.
+- **Active shipments** — manifests and the live per-shipment phase.
 - **Waiting demand** — items wanting transport but not yet dispatched, each with
   a reason: `no source`, `source busy importing`, `no ship`, or `below min-trip`.
 - **Alerts** — stranded / destroyed / conflict events.
@@ -87,7 +87,7 @@ dispatcher timer, not every tick.
 | Minimum trip | 1 | Surplus below this reports as zero (no tiny trips). |
 | Default reserve floor | 0 | Reserve applied to new trade nodes. |
 | Max ships (global) | 0 (unlimited) | Cap on concurrent active assignments. |
-| Max ships (per route) | 1 | Cap on concurrent ships per source→dest pair. |
+| Max ships (per route) | 5 | Cap on concurrent ships per source→dest pair. |
 | Two-way return trade | on | Add a reciprocal return leg when profitable. |
 | Debug log | off | Record every dispatch decision (diagnostics). |
 

@@ -224,7 +224,7 @@ local function refresh_frame(frame)
   end
   local tick = game and game.tick or 0
   local force_key = viewing_force_key(frame)
-  local world = viewmodel.apply_force_scope(viewmodel.gather(tick, force_key), force_key)
+  local world = viewmodel.apply_force_scope(viewmodel.gather(tick), force_key)
   local view = viewmodel.build(world)
   view = viewmodel.apply_filters(view, read_filters(frame))
   render_body(body, view)

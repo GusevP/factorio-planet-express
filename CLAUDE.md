@@ -66,7 +66,7 @@ globals) still loads them.
 
 | Module | Responsibility |
 | --- | --- |
-| `state.lua` | storage init, migration stub, `next_id`, `sorted_pairs`/`sorted_keys`, `debug_log` |
+| `state.lua` | storage init, schema migration (`migrate_fleet_keys`, v1→v2), `next_id`, `sorted_pairs`/`sorted_keys`, `setting`, `debug_log` |
 | `reserves.lua` | reserve config read/write + `reserve(node, item)` resolver |
 | `stock.lua` | launchable stock read, per-tick cache (`begin_tick`), `surplus()` |
 | `demand.lua` | native pad requests → `unmet`/`open_demand`, inbound netting |

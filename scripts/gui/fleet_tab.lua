@@ -25,6 +25,7 @@
 -- ship starts/stops being dispatched).
 
 local fleet = require("scripts.fleet")
+local registry = require("scripts.registry")
 local common = require("scripts.gui.common")
 
 local fleet_tab = {}
@@ -67,8 +68,10 @@ end
 -- ---------------------------------------------------------------------------
 
 -- The LuaSpacePlatform for a hub entity (nil unless it really is a platform hub).
--- The registry keys storage.fleet by platform.index (see registry.add_platform),
--- so that index is the fleet id used everywhere below.
+-- The registry keys storage.fleet by the force-qualified `registry.fleet_key`
+-- (see registry.add_platform), so that string key is the fleet id used everywhere
+-- below -- `open` derives it via registry.fleet_key(platform) and stores it in the
+-- frame tag, never the bare platform.index.
 local function platform_of(entity)
   if not (entity and entity.valid and entity.name == fleet_tab.HUB_NAME) then
     return nil
@@ -76,7 +79,8 @@ local function platform_of(entity)
   return entity.surface and entity.surface.platform
 end
 
--- The fleet id a Fleet frame is editing, recovered from its stored platform index.
+-- The fleet id a Fleet frame is editing, recovered from its stored fleet key (the
+-- force-qualified registry.fleet_key string, set by `open`).
 local function id_of_frame(frame)
   return frame and frame.tags and frame.tags.platform or nil
 end
@@ -170,7 +174,10 @@ function fleet_tab.open(player, entity)
   if common.force_key(entity.force) ~= common.force_key(player.force) then
     return
   end
-  local id = platform.index
+  -- The fleet id is the force-qualified registry key (registry.fleet_key reads
+  -- platform.force internally), NOT the bare platform.index -- that is the key the
+  -- registry/dispatcher/storage.fleet use post-migration (Task 7).
+  local id = registry.fleet_key(platform)
   local entry = id and fleet.get(id)
   if not entry then
     return -- platform not indexed yet (the registry adds it on build/rebuild)

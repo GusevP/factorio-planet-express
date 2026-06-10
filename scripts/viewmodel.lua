@@ -467,9 +467,9 @@ local demand = require("scripts.demand")
 --
 -- gather STAMPS a `force` key onto every projected row (fleet entry, assignment,
 -- waiting-demand, alert) but does NOT filter -- the pure `apply_force_scope`
--- below does the scoping. `force_key` is accepted for symmetry with that step (it
--- is unused here; gather always stamps every row regardless of the viewer).
-function viewmodel.gather(tick, force_key)
+-- below does the scoping (the call site composes them:
+-- `apply_force_scope(gather(tick), force_key)`).
+function viewmodel.gather(tick)
   stock.begin_tick(tick)
   local snapshot = dispatcher.build_snapshot(tick)
   -- Same minimum-trip threshold the stock layer suppresses surplus against, so
