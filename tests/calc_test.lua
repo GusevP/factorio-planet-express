@@ -1549,6 +1549,43 @@ describe("watchdog.current_is_ours -- index-keyed interrupt guard (note_progress
   assert_eq(watchdog.current_is_ours(a, records, 9), false, "out-of-range index -> NOT ours")
 end)
 
+describe("watchdog.phase_for -- live loading/unloading/enroute lifecycle", function()
+  local two_way = {
+    source_planet = "nauvis", dest_planet = "vulcanus",
+    return_manifest = { ["copper-plate"] = 150 },
+  }
+  local one_way = { source_planet = "nauvis", dest_planet = "vulcanus" }
+  -- parked at stop 1 is the forward load
+  assert_eq(watchdog.phase_for(one_way, 1, true), fleet.LOADING,
+    "parked at stop 1 -> LOADING (forward load)")
+  -- parked at stop 2 WITH a return manifest is the two-way turnaround load
+  assert_eq(watchdog.phase_for(two_way, 2, true), fleet.LOADING,
+    "parked at stop 2 with a return manifest -> LOADING (turnaround load)")
+  -- parked at stop 2 WITHOUT a return manifest is the one-way unload
+  assert_eq(watchdog.phase_for(one_way, 2, true), fleet.UNLOADING,
+    "parked at stop 2 without a return manifest -> UNLOADING (one-way unload)")
+  local empty_ret = {
+    source_planet = "nauvis", dest_planet = "vulcanus", return_manifest = {},
+  }
+  assert_eq(watchdog.phase_for(empty_ret, 2, true), fleet.UNLOADING,
+    "parked at stop 2 with an EMPTY return manifest -> UNLOADING")
+  -- parked at the last stop (stop 3, the return drop) is an unload
+  assert_eq(watchdog.phase_for(two_way, 3, true), fleet.UNLOADING,
+    "parked at stop 3 (return drop) -> UNLOADING")
+  -- in transit (not parked) at any stop is enroute
+  assert_eq(watchdog.phase_for(one_way, 1, false), fleet.ENROUTE,
+    "in transit (not parked) -> ENROUTE")
+  assert_eq(watchdog.phase_for(two_way, 2, false), fleet.ENROUTE,
+    "in transit to the turnaround -> ENROUTE")
+  -- a foreign/unreadable stop arrives here as not-parked (current_is_ours folded
+  -- into the caller's `parked`), so it falls through to ENROUTE
+  assert_eq(watchdog.phase_for(one_way, 9, false), fleet.ENROUTE,
+    "foreign/unreadable stop (parked=false) -> ENROUTE")
+  -- nil current is likewise not-parked -> ENROUTE
+  assert_eq(watchdog.phase_for(one_way, nil, false), fleet.ENROUTE,
+    "nil current -> ENROUTE")
+end)
+
 describe("watchdog.load_impossible -- abort a trip whose source ran dry", function()
   local function plat(current)
     return { valid = true, schedule = { current = current } }

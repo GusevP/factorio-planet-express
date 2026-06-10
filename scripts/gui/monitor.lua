@@ -153,13 +153,18 @@ local function render_body(body, view)
   if #view.shipments == 0 then
     body.add({ type = "label", caption = { "planet-express.monitor-empty" } })
   else
-    local t = body.add({ type = "table", column_count = 3 })
+    -- ship / route / phase / manifest. The phase column renders the assignment's
+    -- live lifecycle state (enroute / loading / unloading), derived by the watchdog
+    -- and threaded through viewmodel.gather/build. No header row on this table, so
+    -- the raw state string is rendered inline (no locale key needed).
+    local t = body.add({ type = "table", column_count = 4 })
     for _, sh in ipairs(view.shipments) do
       t.add({ type = "label", caption = "#" .. tostring(sh.ship_id) })
       t.add({
         type = "label",
         caption = tostring(sh.from) .. " -> " .. tostring(sh.to),
       })
+      t.add({ type = "label", caption = sh.phase or "-" })
       local m = manifest_caption(sh.manifest)
       if sh.return_manifest and next(sh.return_manifest) then
         m = m .. "  (return: " .. manifest_caption(sh.return_manifest) .. ")"

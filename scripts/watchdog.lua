@@ -231,6 +231,35 @@ function watchdog.current_is_ours(a, records, current)
   return watchdog.station_is_ours(a, rec and rec.station)
 end
 
+-- Pure: which fleet lifecycle phase a ship is in, derived from its CURRENT route
+-- stop and whether it is parked. The route is 1 source(load fwd) -> 2 dest(unload,
+-- or TURNAROUND load on a two-way trip) -> 3 source(return drop). So:
+--   * parked at stop 1                       -> LOADING (the forward load),
+--   * parked at stop 2 with a non-empty       \ the two-way turnaround loads return
+--     `return_manifest`                       / cargo while the pad pulls forward,
+--                                            -> LOADING,
+--   * parked at ANY OTHER own stop (one-way   \ stop 2 plain unload, stop 3 return
+--     unload at stop 2, return drop at stop 3) / drop                  -> UNLOADING,
+--   * otherwise (in transit, or a foreign /  -> ENROUTE.
+--     unreadable stop)
+-- `parked` is the caller's `(speed == 0) AND current_is_ours` observation, so a
+-- foreign/unreadable `current` arrives here as `parked == false` and falls through
+-- to ENROUTE. A nil `current` is likewise not-parked -> ENROUTE. Pure over `a` +
+-- the scalars: its inputs are replicated engine reads on the shared watchdog tick,
+-- so the derived state is deterministic across peers and save/load.
+function watchdog.phase_for(a, current, parked)
+  if not parked then
+    return fleet.ENROUTE
+  end
+  if current == 1 then
+    return fleet.LOADING
+  end
+  if current == 2 and a and a.return_manifest and next(a.return_manifest) ~= nil then
+    return fleet.LOADING -- two-way turnaround: load the return cargo
+  end
+  return fleet.UNLOADING -- any other own stop is an unload (stop 2 one-way, stop 3 drop)
+end
+
 -- Order-stable serialization of a schedule's records (docs/api-notes.md §4).
 -- The signature must be deterministic across save/load and across clients, so:
 --   * iterate RECORDS in their fixed schedule order (array order),
@@ -817,6 +846,20 @@ function watchdog.run(tick)
           state.debug_log("watchdog abort a#" .. tostring(id)
             .. ": destination no longer requests the delivered cargo -- idling (residue aboard)")
           watchdog.free_assignment(id, nil, fleet.IDLE, tick)
+        else
+          -- The assignment SURVIVES this iteration: derive and publish its live
+          -- loading/unloading phase. This write is in the surviving path only -- the
+          -- load_impossible / delivery_stalled branches above already freed the
+          -- ship to IDLE, and that IDLE state write must win, not race a stale
+          -- phase. `parked` is `speed == 0` AND `current_is_ours` (a foreign /
+          -- unreadable stop reads as not-parked so phase_for yields ENROUTE).
+          local sched = platform.schedule
+          local current = sched and sched.current
+          local parked = (platform.speed or 0) == 0
+            and watchdog.current_is_ours(a, sched and sched.records, current)
+          local phase = watchdog.phase_for(a, current, parked)
+          fleet.set_state(a.ship, phase)
+          a.phase = phase
         end
       end
     end
