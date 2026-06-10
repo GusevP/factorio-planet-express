@@ -73,6 +73,16 @@ globals) still loads them.
 | `gui/trade_tab.lua` | Trade tab on the landing pad GUI (dumb view) |
 | `gui/fleet_tab.lua` | Fleet tab on the platform hub GUI — enroll / reserve-for-manual toggles (dumb view) |
 | `viewmodel.lua` | pure builders for GUI view models (testable) |
+| `qkey.lua` | pure `(item, quality)` compound-key helper (`qkey`/`qparse`/`label`) |
+
+**Item quality.** Cargo is keyed by `(item, quality)` end-to-end (demand, surplus,
+manifest, hub request, wait conditions, bookkeeping) via `scripts/qkey.lua`
+(`item .. "@" .. quality`). All decision maps stay string-keyed so
+`state.sorted_pairs` iteration stays deterministic; the thin IO wrappers `qparse`
+back to (name, quality) at the engine seam. **Reserves, import flags, and
+priorities stay keyed by item NAME** (quality-independent — a floor / opt-out /
+priority applies to all qualities of an item), so any call site holding a qkey must
+`qparse` it back to the bare name before reading reserves/overlay.
 
 The **`exportable(node, item)`** thrash guard lives in `dispatcher.lua` (the
 demand↔supply join point), NOT in `stock.lua`: `surplus()` stays pure stock math;

@@ -2,9 +2,10 @@
 --
 -- Launchable-stock reads + surplus computation for a trade node.
 --
--- "Surplus" is what a planet can offer for export: its launchable on-surface
--- stock minus the reserve floor, suppressed to zero below the minimum-trip
--- threshold so the dispatcher never schedules a pointless dribble.
+-- "Surplus" is what a planet can offer for export: its launchable stock (scoped
+-- to the trade node's OWN logistic network, not the whole surface) minus the
+-- reserve floor, suppressed to zero below the minimum-trip threshold so the
+-- dispatcher never schedules a pointless dribble.
 --
 --   surplus(node, item) = max(0, stock - reserve)   [then min-trip suppressed]
 --
@@ -23,6 +24,7 @@
 -- NOT in `storage`: it is rebuilt freely and holds no authoritative data.
 
 local reserves = require("scripts.reserves")
+local qkey = require("scripts.qkey")
 
 local stock = {}
 
@@ -52,12 +54,36 @@ end
 -- launchable-stock IO wrapper (provisional -- docs/api-notes.md §2)
 -- ---------------------------------------------------------------------------
 
--- [provisional] Aggregate the planet's logistic-network item count for the
--- node's force+surface -- "everything on this planet available to launch".
--- Summing over the surface's networks is order-independent (a commutative
--- reduction, NOT a game-affecting decision iteration), so plain `pairs` is fine
--- here. Confirm the exact accessor in-engine before flipping §2 to [confirmed].
-local function read_launchable_stock(node, item)
+-- [provisional] Launchable item count scoped to the trade node's OWN logistic
+-- network -- the network the pad entity belongs to (`pad.logistic_network`).
+-- This is what a rocket silo on the pad's network can actually launch; summing
+-- ALL networks on the surface over-counts on planets with two or more
+-- DISCONNECTED logistic networks, making the mod promise surplus a silo can't
+-- launch (see docs/api-notes.md §2 and its silo-vs-pad caveat). When the
+-- per-node accessor is unavailable (no/invalid pad entity, or the pad isn't on
+-- a network) we DEGRADE SAFELY to the old surface-sum rather than erroring; an
+-- under-count is recovered by the re-clamp / load_impossible paths, never a
+-- crash. Confirm `LuaEntity.logistic_network` (+ `get_item_count`) in-engine
+-- before flipping §2 to [confirmed].
+--
+-- QUALITY (Task 9, #4b): the cargo key is a `qkey(item, quality)`, so the
+-- launchable stock is read PER QUALITY (`network.get_item_count(name, quality)`)
+-- -- normal-quality iron and uncommon-quality iron are independent stock pools.
+-- A bare item-name key decodes to "normal" so legacy/quality-agnostic reads
+-- still resolve.
+local function read_launchable_stock(node, key)
+  local name, quality = qkey.qparse(key)
+  local pad = node.entity
+  if pad and pad.valid then
+    local network = pad.logistic_network
+    if network then
+      return network.get_item_count(name, quality)
+    end
+  end
+
+  -- Fallback: aggregate every logistic network on the node's surface. Summing
+  -- is order-independent (a commutative reduction, NOT a game-affecting decision
+  -- iteration), so plain `pairs` is fine here.
   local surface, force = node.surface, node.force
   if not (surface and force and force.logistic_networks) then
     return 0
@@ -68,7 +94,7 @@ local function read_launchable_stock(node, item)
   end
   local total = 0
   for _, network in pairs(networks) do
-    total = total + network.get_item_count(item)
+    total = total + network.get_item_count(name, quality)
   end
   return total
 end
@@ -86,8 +112,10 @@ local cache = { tick = nil, values = {} }
 
 -- Cache key: launchable stock is per-surface AND per-force (forces don't share
 -- logistic networks), so key on a stable surface identifier, the force identity,
--- and the item name. Without the force term, two forces on one surface would read
--- each other's cached stock. Falls back to a node-supplied key (tests) or "?".
+-- and the cargo `qkey` (item@quality -- so normal- and uncommon-quality stock of
+-- one item cache independently). Without the force term, two forces on one surface
+-- would read each other's cached stock. Falls back to a node-supplied key (tests)
+-- or "?".
 local function cache_key(node, item)
   local sid = node.cache_key
   if sid == nil and node.surface then
@@ -137,13 +165,18 @@ function stock.min_trip()
   return stock.MIN_TRIP
 end
 
--- Exportable surplus of `item` on `node`: cached launchable stock minus the
--- node's reserve floor, min-trip suppressed. This is pure STOCK math --
--- demand-awareness (the re-export thrash guard) lives in the dispatcher's
--- `exportable()` (Task 5), not here.
-function stock.surplus(node, item)
-  local s = stock.stock_count(node, item)
-  return stock.compute_surplus(s, reserves.reserve(node, item), stock.min_trip())
+-- Exportable surplus of the cargo `key` (a `qkey(item, quality)`) on `node`:
+-- cached launchable stock minus the node's reserve floor, min-trip suppressed.
+-- This is pure STOCK math -- demand-awareness (the re-export thrash guard) lives
+-- in the dispatcher's `exportable()` (Task 5), not here.
+--
+-- The reserve floor is keyed by bare item NAME (a reserve applies to ALL
+-- qualities of an item -- per the plan's Decisions), so the qkey is `qparse`d
+-- back to its name before `reserves.reserve`; the stock read stays per quality.
+function stock.surplus(node, key)
+  local name = qkey.qparse(key)
+  local s = stock.stock_count(node, key)
+  return stock.compute_surplus(s, reserves.reserve(node, name), stock.min_trip())
 end
 
 return stock

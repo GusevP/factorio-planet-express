@@ -9,9 +9,10 @@ for the confirmed engine seams.
 
 Planet Express turns the player's **own** space platforms into a merchant fleet.
 It reads each planet's **native cargo-landing-pad requests** as demand, finds
-another planet holding **above-reserve surplus** of the wanted item, picks an
+another planet holding **above-reserve surplus** of the wanted item — matched per
+**(item, quality)** and scoped to that planet's **own** logistic network — picks an
 **idle enrolled ship**, and writes that ship a two-planet route plus the hub
-logistic request that loads the cargo. It never spawns, teleports, or inserts —
+logistic request that loads the cargo (sized to the ship's real cargo hold). It never spawns, teleports, or inserts —
 the only platform mutation is `platform.schedule = …` (and the hub's own logistic
 request). Every game-affecting decision is deterministic (stable sorted iteration,
 monotonic ids, no wall-clock/RNG) so it is multiplayer- and save/load-safe.
@@ -62,7 +63,10 @@ fleet may source there, so trade doesn't strip a planet bare.**
 
 Flow:
 - Open the cargo landing pad → **Trade** tab (`gui/trade_tab.lua`).
-- Reserve floor + per-item import flags persist via the `reserves` writers.
+- Reserve floor + per-item import flags persist via the `reserves` writers. These
+  are keyed by item **name** (quality-independent): a floor or an import opt-out
+  applies to **every** quality of that item (call sites `qparse` a `(item, quality)`
+  cargo key back to the bare name before reading the reserve/overlay).
 - `stock.surplus = stock − reserve` (with min-trip suppression); only
   above-reserve stock is ever exportable.
 
@@ -76,22 +80,26 @@ wherever has spare, so I don't hand-fly cargo.**
 
 Flow (per dispatcher tick, `dispatcher.run`):
 1. `demand.open_demand` — native pad request − on-hand − in-flight inbound =
-   what's still genuinely wanted.
+   what's still genuinely wanted, keyed per `(item, quality)`.
 2. `dispatcher.build_snapshot` — per-planet open demand + above-reserve surplus
-   (minus surplus already committed to in-flight shipments), the ship list, caps.
+   (read from the planet's **own** logistic network, not the whole surface; minus
+   surplus already committed to in-flight shipments), the ship list, caps.
 3. `dispatcher.plan` (pure, deterministic):
    - `best_source` — the same-force planet covering the most of the demand, guarded
      by `exportable` (story 8), nearest tie-break.
    - `pick_ship` — lowest-id `idle_eligible` ship.
-   - `build_manifest` — **fair-share** across demanded items, then priority-leftover,
-     clamped to surplus / ship capacity / unmet (so one bulk item can't hog a ship).
+   - `build_manifest` — **fair-share** across demanded `(item, quality)` rows, then
+     priority-leftover, clamped to surplus / the ship's real **slot budget** (its hub
+     inventory size, packed `ceil(load / stack_size)` slots per item) / unmet — so
+     one bulk item can't hog a ship and the manifest always fits the actual hold.
 4. `dispatcher.commit` — allocate a monotonic id, write the route + hub request,
    record two-sided bookkeeping (`inbound_commit` on the demand side,
    `surplus_commit` on the supply side), flip the ship to `enroute`.
 5. The ship flies to the source, the hub requests the manifest
-   (`schedule.apply_hub_request`, scoped via `import_from`), rockets load it, the
-   `item_count ≥ qty` wait condition fires, it flies to the destination, the pad
-   pulls the cargo, and it departs (`item_count == 0` / inactivity / timeout).
+   (`schedule.apply_hub_request`, scoped via `import_from`, one filter per
+   `(item, quality)`), rockets load it, the per-`(item, quality)` `item_count ≥ qty`
+   wait condition fires, it flies to the destination, the pad pulls the cargo, and
+   it departs (`item_count == 0` / inactivity / timeout).
 
 ### 6. Two-way return trade
 **As a player, I want a ship to bring something back instead of deadheading, so
@@ -177,26 +185,43 @@ never `platform.schedule = nil` (which would drop interrupts too).
 
 ## Resilience
 
-### 14. A source runs dry mid-trip
+### 14. A source runs dry, or a destination stops wanting the cargo, mid-trip
 **As a player, if the items are taken (another ship, manual use, production) after
-a ship is dispatched, it shouldn't sit idle at the source for the full timeout.**
+a ship is dispatched, it shouldn't sit idle at the source for the full timeout —
+and a ship whose destination no longer wants the cargo shouldn't linger at the pad
+or loop re-loading.**
 
-Flow (`watchdog`, each tick while at a load stop):
-- `maybe_reclamp` re-clamps the manifest to the source's **live** surplus and
-  rewrites BOTH the hub request and the schedule's wait conditions
-  (`schedule.resync_conditions`) so they stay in sync — partial availability ships
-  the partial.
-- If the forward manifest empties entirely, `load_impossible` is true and the run
-  loop **aborts** the trip: frees the ship to idle and re-opens the demand for the
-  next dispatch (which won't re-send while dry, and will once the source recovers).
+Flow (`watchdog`, each tick):
+- **Source dry (load side).** While at a load stop, `maybe_reclamp` re-clamps the
+  manifest to the source's **live** surplus and rewrites BOTH the hub request and
+  the schedule's wait conditions (`schedule.resync_conditions`) so they stay in
+  sync — partial availability ships the partial. If the forward manifest empties
+  entirely, `load_impossible` is true and the run loop **aborts** the trip: frees
+  the ship to idle and re-opens the demand for the next dispatch (which won't
+  re-send while dry, and will once the source recovers).
+- **Destination stops wanting it (delivery side, symmetric).** While parked at the
+  final stop still holding manifest cargo, `delivery_impossible` reads the drop
+  planet's **raw** pad request (`requested − on_hand`, NOT the in-flight-netted
+  `open_demand`) for everything the ship still holds; if that's 0 the destination
+  genuinely no longer wants the cargo, so `delivery_stalled` **aborts**: frees the
+  ship to idle (silent). `completed` (story 15) is evaluated FIRST, so a real
+  pad-pull always wins; by definition the dest's raw demand is already 0 here, so
+  there's nothing to re-open — the only residue is the leftover cargo aboard the
+  idled ship (bounded; reused/cleared on the next dispatch).
 
 ### 15. A platform is destroyed, or a trip stalls
 **As a player, a lost or stuck ship must not leave a phantom assignment.**
 
 Flow: `watchdog.run` rules, in order — destroyed platform → free + alert; player
-edit → withdraw; completed delivery → free (silent); no-progress past the deadline
-→ free + alert; otherwise re-clamp. Freeing an assignment reverses both bookkeeping
-sides (they're read live), so the demand re-opens cleanly.
+edit → withdraw; **completed** delivery → free (silent); no-progress past the
+deadline → free + alert; otherwise re-clamp (which is also where the load-/
+delivery-impossible aborts of story 14 fire). **Completion is now per-manifest, not
+whole-hub:** `watchdog.completed` → `manifest_delivered` fires once the ship is
+parked (`speed == 0`) and the hub holds **none of OUR cargo** — each forward +
+return item, by `(item, quality)` — so a ship carrying its own fuel/ammo/repair
+packs still completes instead of waiting on a hub that never reads empty. Freeing an
+assignment reverses both bookkeeping sides (they're read live), so the demand
+re-opens cleanly.
 
 ### 16. Concurrency caps
 **As a player, I want to cap how many ships work a route or the whole fleet, so I
@@ -229,6 +254,12 @@ dispatch re-plans from a clean slate. Leaves un-enrolled (player) ships alone.
 - **Determinism:** every ordered/decision loop uses `state.sorted_pairs` /
   `state.sorted_keys`; ids come only from `state.next_id`; no `math.random` /
   `os.time` / wall-clock; all persistent state in `storage`.
+- **Item quality:** cargo is keyed by `(item, quality)` end-to-end (demand, surplus,
+  manifest, hub request, wait conditions, bookkeeping) via the `scripts/qkey.lua`
+  compound key, so normal- and uncommon-quality variants of one item trade
+  independently and never cross-contaminate. **Reserve floors, import flags, and
+  priorities stay keyed by item NAME** (they apply to all qualities); those call
+  sites `qparse` the key back to the bare name before reading the reserve/overlay.
 - **Two-sided bookkeeping:** each shipment records `inbound_commit` (demand side,
   read by `demand.inbound_for`) and `surplus_commit` (supply side, read by
   `committed_surplus_by_node`); a single assignment deletion reverses both.

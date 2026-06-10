@@ -26,6 +26,7 @@ local state = require("scripts.state")
 local reserves = require("scripts.reserves")
 local demand = require("scripts.demand")
 local viewmodel = require("scripts.viewmodel")
+local qkey = require("scripts.qkey")
 
 local trade_tab = {}
 
@@ -135,11 +136,25 @@ end
 local function render_imports(body, node)
   section_header(body, { "planet-express.trade-imports" })
   local rows = demand.reader(node) or {}
+  -- The pad's request rows are keyed by qkey(item, quality): the SAME item at two
+  -- qualities is two rows. But the fleet-toggle + priority overlay is keyed by
+  -- bare item NAME -- it applies to ALL qualities of the item (per the plan's
+  -- Decisions, and matching demand.source_via_fleet / demand.priority, which take
+  -- a name). So collapse the rows to their unique item NAMES and render one
+  -- control per name; keying a widget by the qkey would store an override
+  -- `source_via_fleet` / `priority` never read back (a silent no-op).
+  local seen = {}
+  local names = {}
+  for _, row in ipairs(rows) do
+    local name = qkey.qparse(row.item)
+    if not seen[name] then
+      seen[name] = true
+      names[#names + 1] = name
+    end
+  end
   -- Stable order so the panel renders identically on every client.
-  table.sort(rows, function(a, b)
-    return tostring(a.item) < tostring(b.item)
-  end)
-  if #rows == 0 then
+  table.sort(names)
+  if #names == 0 then
     body.add({ type = "label", caption = { "planet-express.trade-no-requests" } })
     return
   end
@@ -147,15 +162,14 @@ local function render_imports(body, node)
   t.add({ type = "label", caption = { "planet-express.trade-col-item" } })
   t.add({ type = "label", caption = { "planet-express.trade-col-fleet" } })
   t.add({ type = "label", caption = { "planet-express.trade-col-priority" } })
-  for _, row in ipairs(rows) do
-    local item = row.item
-    t.add({ type = "label", caption = item })
+  for _, name in ipairs(names) do
+    t.add({ type = "label", caption = name })
     t.add({
       type = "checkbox",
-      name = FLEET_TOGGLE_PREFIX .. item,
-      state = demand.source_via_fleet(node, item),
+      name = FLEET_TOGGLE_PREFIX .. name,
+      state = demand.source_via_fleet(node, name),
     })
-    numeric_field(t, PRIORITY_PREFIX .. item, demand.priority(node, item), 50)
+    numeric_field(t, PRIORITY_PREFIX .. name, demand.priority(node, name), 50)
   end
 end
 
@@ -204,6 +218,8 @@ local function render_readout(body, node)
   section_header(body, { "planet-express.trade-now" })
   local view = viewmodel.build_node_readout(viewmodel.gather_node(node, game and game.tick or 0))
 
+  -- build_node_readout decodes each cargo qkey into a bare item NAME + quality;
+  -- qkey.label_parts renders that as "iron-plate" (or "iron-plate (uncommon)").
   body.add({ type = "label", caption = { "planet-express.trade-now-demand" } })
   if #view.demand == 0 then
     body.add({ type = "label", caption = { "planet-express.trade-none" } })
@@ -211,7 +227,7 @@ local function render_readout(body, node)
     for _, d in ipairs(view.demand) do
       body.add({
         type = "label",
-        caption = string.format("  %s x%d (p%d)", tostring(d.item), d.unmet, d.priority),
+        caption = string.format("  %s x%d (p%d)", qkey.label_parts(d.item, d.quality), d.unmet, d.priority),
       })
     end
   end
@@ -221,7 +237,7 @@ local function render_readout(body, node)
     body.add({ type = "label", caption = { "planet-express.trade-none" } })
   else
     for _, s in ipairs(view.surplus) do
-      body.add({ type = "label", caption = string.format("  %s x%d", tostring(s.item), s.qty) })
+      body.add({ type = "label", caption = string.format("  %s x%d", qkey.label_parts(s.item, s.quality), s.qty) })
     end
   end
 
@@ -230,7 +246,7 @@ local function render_readout(body, node)
     body.add({ type = "label", caption = { "planet-express.trade-none" } })
   else
     for _, i in ipairs(view.inbound) do
-      body.add({ type = "label", caption = string.format("  %s x%d", tostring(i.item), i.qty) })
+      body.add({ type = "label", caption = string.format("  %s x%d", qkey.label_parts(i.item, i.quality), i.qty) })
     end
   end
 end

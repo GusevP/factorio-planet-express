@@ -35,6 +35,7 @@ local fleet = require("scripts.fleet")
 local schedule = require("scripts.schedule")
 local registry = require("scripts.registry")
 local watchdog = require("scripts.watchdog")
+local qkey = require("scripts.qkey")
 
 local dispatcher = {}
 
@@ -71,10 +72,15 @@ dispatcher.MAX_ROUTE_SETTING = "planet-express-max-ships-route"
 dispatcher.TWO_WAY_SETTING = "planet-express-two-way-return"
 dispatcher.TWO_WAY_DEFAULT = true
 
--- [provisional] Per-platform cargo capacity. Confirm the in-engine accessor
--- before flipping the relevant api-notes seam to [confirmed]; until then every
--- ship uses this fallback so the math is exercised end-to-end.
-dispatcher.DEFAULT_CAPACITY = 1000
+-- [provisional] Per-platform cargo capacity is now a SLOT BUDGET (the hub's
+-- main-inventory slot count), NOT an item count -- the slot-aware manifest packer
+-- (Task 7) fills this many slots. DEFAULT_CAPACITY is the fallback slot count used
+-- when the hub inventory can't be read (degrade safely). DEFAULT_STACK_SIZE is the
+-- fallback per-item stack size used when a prototype is unavailable (e.g. the
+-- pure-Lua test runner, which has no `prototypes` global). Confirm both in-engine
+-- accessors before flipping the api-notes seams to [confirmed].
+dispatcher.DEFAULT_CAPACITY = 80
+dispatcher.DEFAULT_STACK_SIZE = 50
 
 -- ---------------------------------------------------------------------------
 -- pure thrash guard
@@ -85,6 +91,12 @@ dispatcher.DEFAULT_CAPACITY = 1000
 -- otherwise it would import and export `item` at once (ships passing each other).
 -- `stock.surplus` stays pure stock math (Task 1) -- the demand-awareness lives
 -- HERE. Pure over a node snapshot { surplus = {}, unmet_by_item = {} }.
+--
+-- QUALITY (Task 10, #4c): `item` is a `qkey(item, quality)` and both `surplus`
+-- and `unmet_by_item` are keyed by qkey, so the guard is PER (item, quality):
+-- a node importing normal-quality iron can still export its uncommon-quality iron
+-- (a different cargo key), and surplus of one quality never masks demand for
+-- another. The keys are opaque strings here, so the guard logic is unchanged.
 function dispatcher.exportable(node, item)
   if not node then
     return 0
@@ -260,7 +272,9 @@ function dispatcher.return_manifest(snapshot, source_id, dest_id, capacity)
   for _, d in ipairs(return_dest.demand) do
     local avail = dispatcher.exportable(return_src, d.item)
     if avail > 0 then
-      items[#items + 1] = { item = d.item, surplus = avail, unmet = d.unmet }
+      -- carry stack_size through (set by build_snapshot) so the slot-aware packer
+      -- sizes the return cargo too; `capacity` here is the ship's slot budget.
+      items[#items + 1] = { item = d.item, surplus = avail, unmet = d.unmet, stack_size = d.stack_size }
     end
   end
 
@@ -282,18 +296,24 @@ end
 --   5. when two-way trade is enabled (`snapshot.two_way`), also pick a RETURN leg
 --      via `return_manifest` and DECREMENT the destination's working surplus too.
 --
+-- Every cargo key below (`demand[i].item`, the `surplus`/`unmet_by_item` keys,
+-- and the manifest keys) is a `qkey(item, quality)` (Task 10, #4c): a single item
+-- at two qualities is two independent cargo keys that match, source, load, and
+-- net out separately. The keys are opaque strings, so coverage, the surplus
+-- decrement, and the caps all carry quality through with no structural change.
+--
 -- snapshot = {
 --   two_way = bool,  -- Task 7 gate (set by build_snapshot from the setting)
---   nodes = { [node_id] = { id, planet, demand = {{item,unmet,priority},...},
---                           surplus = { [item]=qty },        -- working (mutated)
---                           unmet_by_item = { [item]=qty },  -- guard input
+--   nodes = { [node_id] = { id, planet, demand = {{item,unmet,priority,stack_size},...},
+--                           surplus = { [qkey]=qty },        -- working (mutated)
+--                           unmet_by_item = { [qkey]=qty },  -- guard input
 --                           pin = <platform id>|nil } },
 --   ships = { { id, entry, capacity }, ... },
 -- }
 --
 -- Returns a list of plans: { source_id, source_planet, dest_id, dest_planet,
---   ship_id, ship, manifest = {[item]=qty}, items = {{item,surplus,unmet},...},
---   return_manifest = {[item]=qty}|nil }.
+--   ship_id, ship, manifest = {[qkey]=qty}, items = {{item=qkey,surplus,unmet,
+--   stack_size},...}, return_manifest = {[qkey]=qty}|nil }.
 function dispatcher.plan(snapshot)
   local plans = {}
   local used = {}
@@ -326,7 +346,10 @@ function dispatcher.plan(snapshot)
           for _, d in ipairs(dest.demand) do
             local avail = dispatcher.exportable(source, d.item)
             if avail > 0 then
-              items[#items + 1] = { item = d.item, surplus = avail, unmet = d.unmet }
+              -- carry stack_size through (set by build_snapshot) so Task 7's
+              -- slot-aware packer sizes each item; `capacity` here is the ship's
+              -- slot budget.
+              items[#items + 1] = { item = d.item, surplus = avail, unmet = d.unmet, stack_size = d.stack_size }
             end
           end
 
@@ -388,7 +411,13 @@ end
 -- Sum surplus already committed FROM each node across in-flight assignments
 -- (`surplus_commit`), so the snapshot subtracts it and a source isn't drained
 -- twice while its rockets are still launching. Deterministic: iterates
--- assignments via the sorted helper. Returns { [node_id] = { [item] = qty } }.
+-- assignments via the sorted helper. Returns { [node_id] = { [qkey] = qty } }.
+--
+-- QUALITY (Task 10, #4c): `surplus_commit` / `return_manifest` are keyed by
+-- `qkey(item, quality)` (they are copies of the qkey-keyed manifest), so the
+-- per-node totals are qkey-keyed too and `build_snapshot` subtracts them against
+-- the matching qkey'd `stock.surplus` read -- the demand-side `inbound_for` nets
+-- the same way, so both bookkeeping sides stay uniformly qkey-keyed.
 --
 -- Two-way return leg (Task 7): a `return_manifest` is sourced FROM the
 -- destination planet, so it is committed surplus on `a.dest` -- counted here too
@@ -432,10 +461,42 @@ function dispatcher.planet_name(node)
   return s and s.name or nil
 end
 
--- [provisional] A platform's cargo capacity. Until the in-engine accessor is
--- confirmed, every ship uses DEFAULT_CAPACITY.
-function dispatcher.capacity_of(_entry)
+-- [provisional] A platform's cargo capacity as a SLOT BUDGET: the number of slots
+-- in the hub's main inventory (`hub.get_inventory(defines.inventory.hub_main)`,
+-- then `#inv`). This is what the slot-aware packer (Task 7) fills. Cargo bays
+-- enlarge the hub inventory, so a freighter reports more slots than a bare hub.
+-- Falls back to DEFAULT_CAPACITY slots when the hub/inventory can't be read
+-- (degrade safely, never error). Confirm the in-engine accessor before flipping
+-- the api-notes seam.
+function dispatcher.capacity_of(entry)
+  local platform = entry and entry.platform
+  local hub = platform and platform.valid and platform.hub
+  if hub and hub.valid and defines and defines.inventory and defines.inventory.hub_main then
+    local inv = hub.get_inventory(defines.inventory.hub_main)
+    if inv then
+      local slots = #inv
+      if slots > 0 then
+        return slots
+      end
+    end
+  end
   return dispatcher.DEFAULT_CAPACITY
+end
+
+-- [provisional] The stack size of an item, used by the slot-aware manifest packer
+-- (Task 7) to convert an item-count load into a slot count
+-- (`ceil(load / stack_size)`). Reads `prototypes.item[name].stack_size`; falls
+-- back to DEFAULT_STACK_SIZE when `prototypes` is unavailable (the pure-Lua test
+-- runner) or the item has no prototype, so callers degrade safely. Confirm the
+-- in-engine accessor before flipping the api-notes seam.
+function dispatcher.stack_size_of(name)
+  if prototypes and prototypes.item then
+    local proto = prototypes.item[name]
+    if proto and proto.stack_size then
+      return proto.stack_size
+    end
+  end
+  return dispatcher.DEFAULT_STACK_SIZE
 end
 
 -- Guarded readers for the runtime-global settings. Each falls back to the module
@@ -488,6 +549,14 @@ function dispatcher.build_snapshot(_tick)
     for _, d in ipairs(open) do
       unmet_by_item[d.item] = d.unmet
       demanded_items[d.item] = true
+      -- IO read (Task 6): tag each demanded item with its stack size so the pure
+      -- planner can attach it to manifest `items` for the slot-aware packer (Task
+      -- 7). Reading here keeps `plan`/`return_manifest` pure (they only copy the
+      -- snapshot field, never touch `prototypes`). `d.item` is a `qkey` (Task 9),
+      -- but stack_size is a per-NAME physical property (quality-independent), so
+      -- decode to the bare item name before the prototype read.
+      local name = qkey.qparse(d.item)
+      d.stack_size = dispatcher.stack_size_of(name)
     end
     nodes[id] = {
       id = id,
@@ -515,13 +584,21 @@ function dispatcher.build_snapshot(_tick)
   local ships = {}
   for pid, entry in registry.platforms() do
     local platform = entry and entry.platform
-    local force = platform and platform.valid and platform.force
-    ships[#ships + 1] = {
-      id = pid,
-      entry = entry,
-      capacity = dispatcher.capacity_of(entry),
-      force = dispatcher.force_key(force),
-    }
+    local valid = platform and platform.valid
+    -- Skip hub-less platforms (#6). A platform with no valid hub can't load or
+    -- deliver -- the manifest is realized as a logistic request on the hub, so a
+    -- hub-less ship would be picked here only to abort at apply_records, churning
+    -- a `dispatch SKIP` every tick. Filter it out in the IO snapshot; this keeps
+    -- `fleet.idle_eligible` pure (no engine hub read there).
+    local hub = valid and platform.hub
+    if valid and hub and hub.valid then
+      ships[#ships + 1] = {
+        id = pid,
+        entry = entry,
+        capacity = dispatcher.capacity_of(entry),
+        force = dispatcher.force_key(platform.force),
+      }
+    end
   end
 
   -- Concurrency caps + current in-flight counts for the pure planner (Task 10).
@@ -542,10 +619,13 @@ end
 -- IO: commit a plan (allocate id, bookkeep, schedule, set ship state)
 -- ---------------------------------------------------------------------------
 
+-- Render a qkey-keyed manifest for the debug decision log. Keys are
+-- qkey(item, quality); `qkey.label` decodes each for display (debug-only,
+-- cosmetic) so the line reads "iron-plate=500" not "iron-plate@normal=500".
 local function manifest_str(m)
   local parts = {}
   for item, qty in state.sorted_pairs(m) do
-    parts[#parts + 1] = item .. "=" .. tostring(qty)
+    parts[#parts + 1] = qkey.label(item) .. "=" .. tostring(qty)
   end
   return "{" .. table.concat(parts, ",") .. "}"
 end
@@ -651,7 +731,10 @@ function dispatcher.unserved_reason(snapshot, dest)
   for _, d in ipairs(dest.demand) do
     local avail = dispatcher.exportable(source, d.item)
     if avail > 0 then
-      items[#items + 1] = { item = d.item, surplus = avail, unmet = d.unmet }
+      -- thread stack_size so this diagnostic packs by SLOTS exactly as `plan`
+      -- does; without it the slot budget would be read as an item count and the
+      -- "nothing loads" reason could fire (or not) inconsistently with the planner.
+      items[#items + 1] = { item = d.item, surplus = avail, unmet = d.unmet, stack_size = d.stack_size }
     end
   end
   if next(schedule.build_manifest(items, ship.capacity)) == nil then
@@ -736,7 +819,8 @@ function dispatcher.diagnose()
     local n = snapshot.nodes[id]
     local parts = {}
     for _, d in ipairs(n.demand) do
-      parts[#parts + 1] = d.item .. ":" .. tostring(d.unmet)
+      -- d.item is a cargo qkey; decode it for the debug dump (cosmetic).
+      parts[#parts + 1] = qkey.label(d.item) .. ":" .. tostring(d.unmet)
     end
     add(string.format("  pad#%s planet=%s force=%s demand=[%s]",
       tostring(id), tostring(n.planet), tostring(n.force), table.concat(parts, ",")))

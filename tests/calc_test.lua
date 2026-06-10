@@ -149,6 +149,7 @@ end)
 
 describe("stock per-tick cache", function()
   -- counting stub reader: records how many times the engine would be hit
+  local saved_reader = stock.reader
   local hits = {}
   stock.reader = function(node, item)
     local k = node.cache_key .. "/" .. item
@@ -174,10 +175,11 @@ describe("stock per-tick cache", function()
   assert_eq(hits["nauvis/iron-plate"], 2, "reader hit again on the new tick")
 
   -- restore the real reader so nothing else is affected
-  stock.reader = nil
+  stock.reader = saved_reader
 end)
 
 describe("stock.surplus end-to-end (stubbed reader, no engine)", function()
+  local saved_reader = stock.reader
   stock.reader = function(node, item)
     return node.values[item] or 0
   end
@@ -199,7 +201,7 @@ describe("stock.surplus end-to-end (stubbed reader, no engine)", function()
   node.values["iron-plate"] = 130 -- surplus 30, below min-trip 50
   assert_eq(stock.surplus(node, "iron-plate"), 0, "surplus 30 below min-trip 50 -> 0")
 
-  stock.reader = nil
+  stock.reader = saved_reader
   stock.MIN_TRIP = 1
 end)
 
@@ -377,7 +379,9 @@ end)
 local schedule = require("scripts.schedule")
 
 describe("schedule.clamp_load", function()
-  -- load = min(surplus, capacity, unmet), clamped at 0
+  -- Generic min-clamp over item-count units: load = min(surplus, capacity, unmet),
+  -- clamped at 0. build_manifest supplies `capacity` as available_slots*stack_size
+  -- (the slot->item conversion lives in the packer; this stays a pure min).
   assert_eq(schedule.clamp_load(500, 1000, 800), 500, "surplus is the binding limit")
   assert_eq(schedule.clamp_load(500, 1000, 300), 300, "unmet is the binding limit")
   assert_eq(schedule.clamp_load(500, 200, 800), 200, "capacity is the binding limit")
@@ -387,41 +391,110 @@ describe("schedule.clamp_load", function()
   assert_eq(schedule.clamp_load(nil, nil, nil), 0, "nil inputs -> 0")
 end)
 
-describe("schedule.build_manifest -- wide load up to capacity", function()
-  -- ample capacity: every item loads to its own min(surplus,unmet)
+describe("schedule.build_manifest -- item-count fallback (stack_size = 1)", function()
+  -- Items with NO stack_size default to 1 item/slot, so the slot budget behaves as
+  -- a plain item-count budget -- the dispatcher always supplies a real stack_size,
+  -- this just keeps un-annotated callers (and the engine fallback) sane.
   local items = {
     { item = "iron-plate", surplus = 500, unmet = 800 },   -- -> 500
     { item = "copper-plate", surplus = 300, unmet = 200 }, -- -> 200
   }
   assert_eq(schedule.build_manifest(items, 1000),
-    { ["iron-plate"] = 500, ["copper-plate"] = 200 }, "wide load: both items, each clamped")
+    { ["iron-plate"] = 500, ["copper-plate"] = 200 }, "ample slots: both items, each clamped")
 
-  -- tight capacity: fair share first (iron 300, copper 200), then leftover (100)
-  -- tops up the higher-priority iron -> iron 400, copper fully satisfied at 200
+  -- tight: fair share first (iron 300, copper 200), then leftover (100) tops up
+  -- the higher-priority iron -> iron 400, copper fully satisfied at 200
   assert_eq(schedule.build_manifest(items, 600),
     { ["iron-plate"] = 400, ["copper-plate"] = 200 },
     "fair share carries BOTH; leftover tops up priority item")
 
-  -- very tight capacity: still carries BOTH items (50 each) instead of one item
+  -- very tight: still carries BOTH items (50 each) instead of one item
   assert_eq(schedule.build_manifest(items, 100),
     { ["iron-plate"] = 50, ["copper-plate"] = 50 },
-    "fair share -> variety even when capacity < one item's demand")
+    "fair share -> variety even when budget < one item's demand")
 
-  -- capacity 500: share 250 each; copper needs only 200, leftover tops up iron
+  -- 500 slots: share 250 each; copper needs only 200, leftover tops up iron
   assert_eq(schedule.build_manifest(items, 500),
     { ["iron-plate"] = 300, ["copper-plate"] = 200 },
     "fair share carries both; leftover goes to the priority item")
 
-  -- an item with no surplus is omitted but does not consume capacity
+  -- an item with no surplus is omitted but does not consume slots
   local with_empty = {
     { item = "stone", surplus = 0, unmet = 50 },
     { item = "iron-plate", surplus = 500, unmet = 800 },
   }
   assert_eq(schedule.build_manifest(with_empty, 1000),
-    { ["iron-plate"] = 500 }, "zero-surplus item skipped, capacity preserved for the next")
+    { ["iron-plate"] = 500 }, "zero-surplus item skipped, slots preserved for the next")
 
   assert_eq(schedule.build_manifest({}, 1000), {}, "no items -> empty manifest")
-  assert_eq(schedule.build_manifest(items, 0), {}, "no capacity -> empty manifest")
+  assert_eq(schedule.build_manifest(items, 0), {}, "no slots -> empty manifest")
+end)
+
+describe("schedule.build_manifest -- packs by SLOTS (ceil(load/stack_size))", function()
+  -- FULL FIT: ample slots, both items reach their full min(surplus,unmet).
+  -- iron stacks 100 -> 500 items = 5 slots; copper stacks 50 -> 200 items = 4 slots.
+  local full = {
+    { item = "iron-plate", surplus = 500, unmet = 800, stack_size = 100 },
+    { item = "copper-plate", surplus = 300, unmet = 200, stack_size = 50 },
+  }
+  assert_eq(schedule.build_manifest(full, 20),
+    { ["iron-plate"] = 500, ["copper-plate"] = 200 },
+    "full fit: 5 + 4 slots comfortably inside a 20-slot hold")
+
+  -- TIGHT SLOTS SPLIT FAIRLY: 6 slots, two items stacking 100 each -> 3 slots
+  -- (300 items) apiece, not one item hogging all 6.
+  local tight = {
+    { item = "iron-plate", surplus = 1000, unmet = 1000, stack_size = 100 },
+    { item = "copper-plate", surplus = 1000, unmet = 1000, stack_size = 100 },
+  }
+  assert_eq(schedule.build_manifest(tight, 6),
+    { ["iron-plate"] = 300, ["copper-plate"] = 300 },
+    "tight: 6 slots split fairly -> 3 slots (300 items) each")
+
+  -- MIXED STACK SIZES: equal SLOT share (2 each of 4) carries very different item
+  -- counts -- small stacks 10 -> 20 items, big stacks 200 -> 400 items.
+  local mixed = {
+    { item = "small", surplus = 1000, unmet = 1000, stack_size = 10 },
+    { item = "big", surplus = 1000, unmet = 1000, stack_size = 200 },
+  }
+  assert_eq(schedule.build_manifest(mixed, 4),
+    { ["small"] = 20, ["big"] = 400 },
+    "mixed stacks: equal slot share, different item counts")
+
+  -- LEFTOVER in slot units tops up the priority item: iron (ss 100) takes its fair
+  -- 5 slots = 500; copper (ss 50) needs only 50 = 1 slot; the 4 freed slots top up
+  -- iron to 900 (9 slots).
+  local leftover = {
+    { item = "iron-plate", surplus = 1000, unmet = 1000, stack_size = 100 },
+    { item = "copper-plate", surplus = 50, unmet = 50, stack_size = 50 },
+  }
+  assert_eq(schedule.build_manifest(leftover, 10),
+    { ["iron-plate"] = 900, ["copper-plate"] = 50 },
+    "leftover slots top up the priority item")
+
+  -- PARTIAL-SLOT BOUND: 250 wanted at stack 100 needs 3 slots, but only 2 are free
+  -- -> capped at 200 (2 full slots), never the impossible 3rd partial slot.
+  local partial = {
+    { item = "iron-plate", surplus = 250, unmet = 250, stack_size = 100 },
+  }
+  assert_eq(schedule.build_manifest(partial, 2),
+    { ["iron-plate"] = 200 },
+    "slot bound caps load at slots * stack_size")
+
+  -- ZERO SLOTS: nothing loads regardless of demand.
+  assert_eq(schedule.build_manifest(full, 0), {}, "zero slots -> empty manifest")
+
+  -- SAME-NAME QUALITIES are DISTINCT cargo qkeys: normal- and uncommon-quality iron
+  -- pack as two independent items, so a tight slot budget fair-shares between them
+  -- instead of letting one quality monopolize the hold (stack_size is per-NAME, so
+  -- the two share the same stack size). 6 slots, stack 100 -> 3 slots (300) each.
+  local same_name = {
+    { item = "iron-plate@normal",   surplus = 1000, unmet = 1000, stack_size = 100 },
+    { item = "iron-plate@uncommon", surplus = 1000, unmet = 1000, stack_size = 100 },
+  }
+  assert_eq(schedule.build_manifest(same_name, 6),
+    { ["iron-plate@normal"] = 300, ["iron-plate@uncommon"] = 300 },
+    "two same-name qualities each get a fair slot share (300 items apiece)")
 end)
 
 describe("schedule.build_records -- 2-stop route + wait-conditions", function()
@@ -440,13 +513,17 @@ describe("schedule.build_records -- 2-stop route + wait-conditions", function()
 
   -- wait conditions are scoped to the manifest items (per-item item_count), in
   -- stable item order, with the timeout OR-ed on -- never a whole-hold full/empty.
+  -- The item_count first_signal carries (name, quality) decoded from the cargo
+  -- qkey (Task 11, #4d); a bare item-name key decodes to "normal".
   local function loaded(item, qty)
     return { type = "item_count", compare_type = "and",
-      condition = { comparator = ">=", first_signal = { type = "item", name = item }, constant = qty } }
+      condition = { comparator = ">=",
+        first_signal = { type = "item", name = item, quality = "normal" }, constant = qty } }
   end
   local function delivered(item)
     return { type = "item_count", compare_type = "and",
-      condition = { comparator = "=", first_signal = { type = "item", name = item }, constant = 0 } }
+      condition = { comparator = "=",
+        first_signal = { type = "item", name = item, quality = "normal" }, constant = 0 } }
   end
   local timeout_or = { type = "time", ticks = 3600, compare_type = "or" }
 
@@ -944,19 +1021,15 @@ describe("watchdog.schedule_signature -- order-stable, edit-sensitive", function
     }
   end
 
-  -- request-map order must NOT affect the signature (sorted-helper serialization)
-  local a = { station = "nauvis", requests = { ["iron-plate"] = 500, ["copper-plate"] = 200 }, wait_conditions = {} }
-  local b = { station = "nauvis", requests = { ["copper-plate"] = 200, ["iron-plate"] = 500 }, wait_conditions = {} }
-  assert_eq(watchdog.schedule_signature({ a }), watchdog.schedule_signature({ b }),
-    "signature is independent of request-map insertion order")
+  -- NOTE: production signs `schedule.engine_records(...)`, which STRIPS the
+  -- `requests` map (a 2.0 ScheduleRecord has no cargo field -- cargo is the hub's
+  -- logistic request), and `read_signature` reads those engine records back. So the
+  -- signature only detects STATION + WAIT-CONDITION edits, NOT load-qty edits; we
+  -- therefore do not assert request-qty sensitivity here (it would test a dead path).
 
   -- identical schedules -> identical signatures
   assert_eq(watchdog.schedule_signature(records(500, 200)), watchdog.schedule_signature(records(500, 200)),
     "identical schedules -> identical signature")
-
-  -- a changed request quantity (the player edited the load) -> different signature
-  check(watchdog.schedule_signature(records(500, 200)) ~= watchdog.schedule_signature(records(400, 200)),
-    "changed request qty -> signature differs (player edit detected)")
 
   -- a changed station (re-routed) -> different signature
   local rerouted = records(500, 200)
@@ -1007,6 +1080,36 @@ describe("watchdog.schedule_signature -- compare_type default round-trips engine
     "an explicit non-default compare_type still changes the signature")
 end)
 
+describe("watchdog.manifest_delivered -- completion over OUR cargo only (not whole hold)", function()
+  -- count_fn from a plain hold table; items not present read as 0 (delivered).
+  local function counter(hold)
+    return function(item) return hold[item] or 0 end
+  end
+  local manifest = { ["iron-plate"] = 300, ["copper-plate"] = 150 }
+
+  -- everything pulled by the pad -> hub holds none of our cargo -> delivered
+  assert_true(watchdog.manifest_delivered(counter({}), manifest, nil),
+    "hub holds 0 of every manifest item -> delivered")
+  -- the platform's own fuel/ammo sits in the hold but is NOT in the manifest, so
+  -- it must NOT block completion (the whole-hub is_empty check used to)
+  assert_true(watchdog.manifest_delivered(counter({ ["nuclear-fuel"] = 5, ["uranium-rounds-magazine"] = 80 }), manifest, nil),
+    "non-manifest fuel/ammo in the hold -> still delivered (ignored)")
+  -- one manifest item not yet pulled -> not delivered
+  assert_eq(watchdog.manifest_delivered(counter({ ["copper-plate"] = 40 }), manifest, nil), false,
+    "one manifest item remaining -> not delivered")
+  -- empty / nil manifest -> nothing to deliver -> trivially delivered
+  assert_true(watchdog.manifest_delivered(counter({ ["iron-plate"] = 999 }), {}, nil),
+    "empty manifest -> trivially delivered (ignores unrelated cargo)")
+  assert_true(watchdog.manifest_delivered(counter({}), nil, nil),
+    "nil manifests -> delivered")
+  -- two-way: forward pulled but the RETURN manifest is still aboard -> not delivered
+  assert_eq(watchdog.manifest_delivered(counter({ ["copper-plate"] = 150 }), {}, { ["copper-plate"] = 150 }), false,
+    "return manifest still aboard -> not delivered")
+  -- two-way: both forward + return drained -> delivered
+  assert_true(watchdog.manifest_delivered(counter({}), { ["iron-plate"] = 300 }, { ["copper-plate"] = 150 }),
+    "forward + return both drained -> delivered")
+end)
+
 describe("watchdog.stop_request -- per-stop hub request (forward/return lifecycle)", function()
   local a = {
     manifest = { ["iron-plate"] = 300 },
@@ -1032,6 +1135,49 @@ describe("watchdog.stop_request -- per-stop hub request (forward/return lifecycl
   assert_eq(watchdog.stop_request(empty_ret, 2), {}, "empty return manifest -> stop 2 clears")
 end)
 
+describe("watchdog.station_is_ours -- interrupt guard (only act on OUR route stops)", function()
+  local a = { source_planet = "nauvis", dest_planet = "vulcanus" }
+  assert_true(watchdog.station_is_ours(a, "nauvis"), "the source planet is one of ours")
+  assert_true(watchdog.station_is_ours(a, "vulcanus"), "the destination planet is one of ours")
+  -- a refuel/rearm INTERRUPT can splice in a stop the mod never wrote; the watchdog
+  -- must NOT re-point the hub request off it (it keys cargo by stop INDEX).
+  assert_eq(watchdog.station_is_ours(a, "gleba"), false,
+    "a foreign station (e.g. a refuel-interrupt stop) is NOT ours")
+  assert_eq(watchdog.station_is_ours(a, "shattered-planet"), false,
+    "any other space location is NOT ours")
+  -- defensive edges: an unreadable record / nil assignment -> never act blindly
+  assert_eq(watchdog.station_is_ours(a, nil), false,
+    "an unreadable (nil) station is NOT ours (defensive)")
+  assert_eq(watchdog.station_is_ours(nil, "nauvis"), false,
+    "no assignment -> NOT ours (defensive)")
+end)
+
+describe("watchdog.current_is_ours -- index-keyed interrupt guard (note_progress + maybe_reclamp)", function()
+  local a = { source_planet = "nauvis", dest_planet = "vulcanus" }
+  local records = {
+    { station = "nauvis" },   -- stop 1: our forward load (source)
+    { station = "vulcanus" }, -- stop 2: our turnaround (dest)
+    { station = "nauvis" },   -- stop 3: our return drop (source)
+  }
+  assert_true(watchdog.current_is_ours(a, records, 1), "current at our source stop -> ours")
+  assert_true(watchdog.current_is_ours(a, records, 2), "current at our dest stop -> ours")
+  assert_true(watchdog.current_is_ours(a, records, 3), "current at our return-drop stop -> ours")
+  -- a refuel/rearm INTERRUPT splices a foreign record and shifts `current` onto it:
+  -- both note_progress and maybe_reclamp key off this numeric index, so neither may
+  -- re-point/re-clamp the hub request against the wrong leg's cargo.
+  local spliced = {
+    { station = "nauvis" },
+    { station = "gleba" },    -- foreign refuel-interrupt stop (current shifted here)
+    { station = "vulcanus" },
+  }
+  assert_eq(watchdog.current_is_ours(a, spliced, 2), false,
+    "current shifted onto a foreign interrupt stop -> NOT ours (no re-point/re-clamp)")
+  -- defensive edges: an unreadable index / missing records -> never act blindly
+  assert_eq(watchdog.current_is_ours(a, records, nil), false, "nil current -> NOT ours")
+  assert_eq(watchdog.current_is_ours(a, nil, 1), false, "nil records -> NOT ours")
+  assert_eq(watchdog.current_is_ours(a, records, 9), false, "out-of-range index -> NOT ours")
+end)
+
 describe("watchdog.load_impossible -- abort a trip whose source ran dry", function()
   local function plat(current)
     return { valid = true, schedule = { current = current } }
@@ -1048,6 +1194,70 @@ describe("watchdog.load_impossible -- abort a trip whose source ran dry", functi
     "current!=1 -> not the forward load stop")
   -- no platform -> false (never abort blindly)
   assert_eq(watchdog.load_impossible({ manifest = {} }, nil), false, "no platform -> false")
+end)
+
+describe("watchdog.delivery_impossible -- abort a parked, no-longer-wanted delivery", function()
+  -- count_fn = what the hub STILL holds; request_fn = the drop planet's RAW unmet
+  -- (requested - on_hand, EXCLUDING fleet inbound -- deliberately NOT open_demand,
+  -- which would net out this assignment's own inbound and read ~0 mid-unload).
+  local function held(hold) return function(item) return hold[item] or 0 end end
+  local function wants(req) return function(item) return req[item] or 0 end end
+  local a = { manifest = { ["iron-plate"] = 300, ["copper-plate"] = 150 } }
+
+  -- cargo still aboard AND the destination no longer requests ANY of it -> abort
+  assert_true(
+    watchdog.delivery_impossible(a,
+      wants({}),                                       -- dest wants nothing now
+      held({ ["iron-plate"] = 300, ["copper-plate"] = 150 })),
+    "cargo aboard + dest requests none -> impossible (abort)")
+
+  -- the destination STILL requests one of the held items (raw unmet > 0) -> healthy
+  assert_eq(
+    watchdog.delivery_impossible(a,
+      wants({ ["iron-plate"] = 120 }),                 -- still short on iron
+      held({ ["iron-plate"] = 300, ["copper-plate"] = 150 })),
+    false, "a held item still wanted (raw unmet > 0) -> NOT impossible")
+
+  -- the pad already pulled everything -> hub holds none of our cargo -> not our job
+  -- here (completed wins, checked first in the run loop); never impossible.
+  assert_eq(
+    watchdog.delivery_impossible(a, wants({}), held({})),
+    false, "cargo already pulled (nothing held) -> NOT impossible (completed wins)")
+
+  -- "not at the unload stop": en route / mid-pull the destination still has its
+  -- full raw demand (on_hand low -> requested - on_hand > 0), so even with cargo
+  -- aboard the predicate reads healthy. (The run loop ALSO gates on parked-at-last-
+  -- stop, so this is never even called before arrival.)
+  assert_eq(
+    watchdog.delivery_impossible(a,
+      wants({ ["iron-plate"] = 300, ["copper-plate"] = 150 }),
+      held({ ["iron-plate"] = 300, ["copper-plate"] = 150 })),
+    false, "dest still fully requests (pre-delivery / mid-pull) -> NOT impossible")
+
+  -- mixed: the dest dropped its iron request but still wants copper -> a single
+  -- still-wanted held item keeps the delivery healthy (it'll deliver the rest).
+  assert_eq(
+    watchdog.delivery_impossible(a,
+      wants({ ["copper-plate"] = 80 }),
+      held({ ["iron-plate"] = 300, ["copper-plate"] = 150 })),
+    false, "one held item still wanted -> NOT impossible")
+
+  -- return-only cargo (two-way drop at the source): forward already delivered
+  -- (count 0), only the return manifest aboard. Source no longer wants it -> abort;
+  -- source still wants it -> healthy.
+  local twoway = { manifest = { ["iron-plate"] = 300 }, return_manifest = { ["copper-plate"] = 150 } }
+  assert_true(
+    watchdog.delivery_impossible(twoway, wants({}), held({ ["copper-plate"] = 150 })),
+    "return cargo aboard + source requests none -> impossible")
+  assert_eq(
+    watchdog.delivery_impossible(twoway, wants({ ["copper-plate"] = 60 }), held({ ["copper-plate"] = 150 })),
+    false, "return cargo still wanted at the source -> NOT impossible")
+
+  -- empty / nil edges -> nothing held -> never impossible (defensive)
+  assert_eq(watchdog.delivery_impossible({}, wants({}), held({})), false,
+    "no manifest -> NOT impossible")
+  assert_eq(watchdog.delivery_impossible(nil, wants({}), held({})), false,
+    "nil assignment -> NOT impossible")
 end)
 
 -- ---------------------------------------------------------------------------
@@ -1144,11 +1354,13 @@ describe("schedule.build_records -- two-way is a 3-stop turnaround (same two pla
 
   local function loaded(item, qty)
     return { type = "item_count", compare_type = "and",
-      condition = { comparator = ">=", first_signal = { type = "item", name = item }, constant = qty } }
+      condition = { comparator = ">=",
+        first_signal = { type = "item", name = item, quality = "normal" }, constant = qty } }
   end
   local function delivered(item)
     return { type = "item_count", compare_type = "and",
-      condition = { comparator = "=", first_signal = { type = "item", name = item }, constant = 0 } }
+      condition = { comparator = "=",
+        first_signal = { type = "item", name = item, quality = "normal" }, constant = 0 } }
   end
   local inactivity = { type = "inactivity", ticks = 300, compare_type = "or" }
   local timeout_or = { type = "time", ticks = 3600, compare_type = "or" }
@@ -1194,7 +1406,8 @@ describe("schedule.build_records -- empty return manifest stays a 2-stop route",
   assert_eq(#built.records, 2, "empty return manifest -> still two stops")
   assert_eq(built.records[2].wait_conditions[1],
     { type = "item_count", compare_type = "and",
-      condition = { comparator = "=", first_signal = { type = "item", name = "iron-plate" }, constant = 0 } },
+      condition = { comparator = "=",
+        first_signal = { type = "item", name = "iron-plate", quality = "normal" }, constant = 0 } },
     "dest reverts to a 2-stop unload (iron delivered)")
   assert_eq(built.return_manifest, nil, "no return manifest exposed")
 end)
@@ -1622,6 +1835,475 @@ describe("watchdog.raise_alert caps the stored backlog (oldest evicted)", functi
     "newest alert retained")
   assert_eq(storage.alerts[1].assignment, 6, "oldest five evicted (1..5)")
   storage = saved_storage
+end)
+
+-- ---------------------------------------------------------------------------
+-- Task 8: quality compound-key helper -- (item, quality) <-> "item@quality"
+-- round-trip. Stable string keys keep the decision maps sortable for
+-- state.sorted_pairs determinism. Pure module, no engine globals.
+-- ---------------------------------------------------------------------------
+
+local qkey = require("scripts.qkey")
+
+describe("qkey.qkey -- encode (item, quality) -> string", function()
+  assert_eq(qkey.qkey("iron-plate", "normal"), "iron-plate@normal", "explicit normal quality")
+  assert_eq(qkey.qkey("iron-plate", "uncommon"), "iron-plate@uncommon", "non-normal quality")
+  -- nil quality defaults to "normal" (matches the engine's default-quality item)
+  assert_eq(qkey.qkey("iron-plate"), "iron-plate@normal", "nil quality -> normal default")
+  assert_eq(qkey.qkey("iron-plate", nil), "iron-plate@normal", "explicit nil quality -> normal default")
+end)
+
+describe("qkey.qparse -- decode string -> (item, quality)", function()
+  local item, quality = qkey.qparse("iron-plate@normal")
+  assert_eq(item, "iron-plate", "parsed item name")
+  assert_eq(quality, "normal", "parsed quality")
+
+  local i2, q2 = qkey.qparse("iron-plate@legendary")
+  assert_eq(i2, "iron-plate", "parsed item (non-normal)")
+  assert_eq(q2, "legendary", "parsed non-normal quality")
+
+  -- a bare item name (no separator -> legacy / quality-agnostic key) decodes as
+  -- the default quality so old maps degrade safely.
+  local i3, q3 = qkey.qparse("iron-plate")
+  assert_eq(i3, "iron-plate", "bare key -> item name")
+  assert_eq(q3, "normal", "bare key -> normal default")
+
+  -- an empty quality segment also falls back to the default.
+  local i4, q4 = qkey.qparse("iron-plate@")
+  assert_eq(i4, "iron-plate", "empty-quality key -> item name")
+  assert_eq(q4, "normal", "empty quality segment -> normal default")
+end)
+
+describe("qkey round-trip -- qparse(qkey(...)) == identity", function()
+  -- normal/default-quality items, including unusual prototype names (digits,
+  -- multiple hyphens, underscores -- all valid Factorio names, none contain @).
+  local cases = {
+    { "iron-plate", "normal" },
+    { "uranium-235", "uncommon" },
+    { "se-core-fragment-omni", "rare" },
+    { "fish", "legendary" },
+    { "raw_fish", "epic" },
+    { "a", "normal" },
+    { "item-with-many-dashes-here", "uncommon" },
+  }
+  for _, c in ipairs(cases) do
+    local item, quality = qkey.qparse(qkey.qkey(c[1], c[2]))
+    assert_eq(item, c[1], "round-trip item: " .. c[1])
+    assert_eq(quality, c[2], "round-trip quality: " .. c[1] .. "@" .. c[2])
+  end
+
+  -- default-quality round-trip: encode with nil, decode back to "normal".
+  local item, quality = qkey.qparse(qkey.qkey("copper-plate"))
+  assert_eq(item, "copper-plate", "default-quality round-trip item")
+  assert_eq(quality, "normal", "default-quality round-trip quality")
+end)
+
+describe("qkey keys sort stably (state.sorted_keys determinism)", function()
+  -- The compound keys must be plain strings so the determinism backbone orders
+  -- them stably across peers. Build a map keyed by qkey and confirm sorted order.
+  local state = require("scripts.state")
+  local map = {
+    [qkey.qkey("iron-plate", "uncommon")] = true,
+    [qkey.qkey("iron-plate", "normal")] = true,
+    [qkey.qkey("copper-plate", "normal")] = true,
+  }
+  local keys = state.sorted_keys(map)
+  assert_eq(keys, {
+    "copper-plate@normal", "iron-plate@normal", "iron-plate@uncommon",
+  }, "qkeys sort as stable strings (item then quality)")
+end)
+
+-- ---------------------------------------------------------------------------
+-- Task 9: quality threaded through demand + stock reads (#4b). Demand and
+-- surplus are now keyed by qkey(item, quality); the fleet-flag/priority overlay
+-- AND the reserve floor stay keyed by bare item NAME (decoded via qparse), so a
+-- config for an item applies to ALL of its qualities. compute_unmet/build_open
+-- stay pure (qparse is plain string math).
+-- ---------------------------------------------------------------------------
+
+describe("demand.build_open -- quality-keyed rows, overlay decoded to item NAME", function()
+  local q = qkey.qkey
+  -- one item at two qualities = two DISTINCT demand rows; the name-keyed overlay
+  -- (priority + opt-out) applies to BOTH qualities of that item.
+  local node = {
+    import_flags = { ["coal"] = false }, -- opts out BOTH coal qualities (by name)
+    priorities = { ["iron-plate"] = 3 }, -- applies to BOTH iron qualities (by name)
+  }
+  local rows = {
+    { item = q("iron-plate", "normal"),   requested = 100, on_hand = 0,  inbound = 0 }, -- unmet 100, pri 3
+    { item = q("iron-plate", "uncommon"), requested = 80,  on_hand = 20, inbound = 0 }, -- unmet 60,  pri 3
+    { item = q("coal", "normal"),         requested = 50,  on_hand = 0,  inbound = 0 }, -- opted out
+    { item = q("coal", "rare"),           requested = 50,  on_hand = 0,  inbound = 0 }, -- opted out (by name)
+  }
+  local open = demand.build_open(node, rows)
+  assert_eq(#open, 2, "both coal qualities opted out by item name; both iron qualities survive")
+  -- output stays keyed by qkey; same priority -> largest shortfall first
+  assert_eq(open[1], { item = "iron-plate@normal", unmet = 100, priority = 3 },
+    "normal iron: full unmet, priority resolved from bare name")
+  assert_eq(open[2], { item = "iron-plate@uncommon", unmet = 60, priority = 3 },
+    "uncommon iron: smaller unmet, SAME name-keyed priority")
+end)
+
+describe("demand.build_open -- qkey tie-break stable across input order", function()
+  local q = qkey.qkey
+  -- equal priority AND equal unmet -> stable by qkey string asc (quality breaks
+  -- the tie within one item name), independent of input row order.
+  local rows_a = {
+    { item = q("iron-plate", "uncommon"), requested = 10, on_hand = 0 },
+    { item = q("iron-plate", "normal"),   requested = 10, on_hand = 0 },
+  }
+  local rows_b = {
+    { item = q("iron-plate", "normal"),   requested = 10, on_hand = 0 },
+    { item = q("iron-plate", "uncommon"), requested = 10, on_hand = 0 },
+  }
+  local oa = demand.build_open({}, rows_a)
+  local ob = demand.build_open({}, rows_b)
+  assert_eq(oa, ob, "qkey tie-break independent of input order")
+  assert_eq(oa[1].item, "iron-plate@normal", "normal sorts before uncommon (string asc)")
+  assert_eq(oa[2].item, "iron-plate@uncommon", "uncommon second")
+end)
+
+describe("stock.surplus -- per-quality stock pool, reserve floor shared by item NAME", function()
+  local q = qkey.qkey
+  -- stub reader keyed by qkey: normal and uncommon iron are INDEPENDENT pools.
+  local saved_reader = stock.reader
+  stock.reader = function(node, key)
+    return node.values[key] or 0
+  end
+  stock.MIN_TRIP = 1
+  local node = {
+    cache_key = "nauvis",
+    values = {
+      ["iron-plate@normal"]   = 500,
+      ["iron-plate@uncommon"] = 300,
+    },
+    -- reserve floor configured by bare item NAME -> shared by every quality
+    reserves = { default = 0, items = { ["iron-plate"] = 100 } },
+  }
+  stock.begin_tick(9000)
+  -- reserve-decode: both qualities subtract the SAME name-keyed floor (100) but
+  -- draw from their own per-quality stock pool.
+  assert_eq(stock.surplus(node, q("iron-plate", "normal")), 400,
+    "normal: 500 stock - 100 name-keyed reserve")
+  assert_eq(stock.surplus(node, q("iron-plate", "uncommon")), 200,
+    "uncommon: 300 stock - the SAME 100 name-keyed reserve (decoded, not a qkey miss)")
+  -- distinct cache entries: a stale-tick read of one quality never serves the other
+  assert_eq(stock.stock_count(node, q("iron-plate", "normal")), 500, "normal pool cached independently")
+  assert_eq(stock.stock_count(node, q("iron-plate", "uncommon")), 300, "uncommon pool cached independently")
+  stock.reader = saved_reader
+  stock.MIN_TRIP = 1
+end)
+
+-- ---------------------------------------------------------------------------
+-- Task 10: quality threaded through plan + manifest + bookkeeping (#4c). The
+-- dispatcher's decision maps (surplus, unmet_by_item, the manifest, the commit
+-- maps) are now keyed by qkey(item, quality). The keys are opaque strings, so
+-- exportable/best_source/plan/return_manifest carry quality through unchanged;
+-- these tests prove a single item at two qualities matches, sources, loads, and
+-- nets out INDEPENDENTLY (no cross-contamination).
+-- ---------------------------------------------------------------------------
+
+describe("dispatcher.exportable -- thrash guard is per (item, quality)", function()
+  local q = qkey.qkey
+  -- the node imports ONLY normal-quality iron, but holds surplus of BOTH
+  -- qualities. The guard suppresses the quality it imports and exports the other.
+  local node = {
+    surplus = { [q("iron-plate", "normal")] = 400, [q("iron-plate", "uncommon")] = 200 },
+    unmet_by_item = { [q("iron-plate", "normal")] = 50 },
+  }
+  assert_eq(dispatcher.exportable(node, q("iron-plate", "normal")), 0,
+    "open demand for normal iron -> normal NOT exportable (guard)")
+  assert_eq(dispatcher.exportable(node, q("iron-plate", "uncommon")), 200,
+    "uncommon iron has no open demand -> exportable (quality-independent guard)")
+end)
+
+describe("dispatcher.best_source -- coverage sums per (item, quality)", function()
+  local q = qkey.qkey
+  -- dest needs normal iron (100) + uncommon iron (100). One source covers BOTH
+  -- qualities (200), the other only the normal pool (100) -> most-coverage picks
+  -- the wider source. Distinct qualities are distinct cargo, summed separately.
+  local snapshot = {
+    nodes = {
+      [1] = { id = 1, planet = "dest", demand = {
+        { item = q("iron-plate", "normal"), unmet = 100, priority = 0 },
+        { item = q("iron-plate", "uncommon"), unmet = 100, priority = 0 },
+      } },
+      [2] = { id = 2, planet = "both", unmet_by_item = {},
+        surplus = { [q("iron-plate", "normal")] = 500, [q("iron-plate", "uncommon")] = 500 } },
+      [3] = { id = 3, planet = "normal-only", unmet_by_item = {},
+        surplus = { [q("iron-plate", "normal")] = 500 } },
+    },
+  }
+  local best = dispatcher.best_source(snapshot, snapshot.nodes[1])
+  assert_eq(best.id, 2, "the source covering both qualities is chosen")
+  assert_eq(best.coverage, 200, "coverage sums min(exportable,unmet) across (item,quality) keys")
+end)
+
+describe("dispatcher.plan -- two qualities of one item dispatch as distinct cargo", function()
+  local q = qkey.qkey
+  -- a destination needs the SAME item at two qualities; the source holds both as
+  -- independent pools. The manifest carries both qkeys, each clamped to its own
+  -- unmet -- a normal-quality shortfall is never filled with uncommon stock.
+  local snapshot = {
+    nodes = {
+      [1] = { id = 1, planet = "dest", demand = {
+        { item = q("iron-plate", "normal"), unmet = 200, priority = 0 },
+        { item = q("iron-plate", "uncommon"), unmet = 100, priority = 0 },
+      }, surplus = {}, unmet_by_item = {} },
+      [2] = { id = 2, planet = "src", unmet_by_item = {}, surplus = {
+        [q("iron-plate", "normal")] = 500,
+        [q("iron-plate", "uncommon")] = 300,
+      } },
+    },
+    ships = { { id = 10, capacity = 1000, entry = { enrolled = true, state = fleet.IDLE } } },
+  }
+  local plans = dispatcher.plan(snapshot)
+  assert_eq(#plans, 1, "one assignment planned")
+  assert_eq(plans[1].manifest, {
+    [q("iron-plate", "normal")] = 200,
+    [q("iron-plate", "uncommon")] = 100,
+  }, "both qualities loaded as distinct keys, each clamped to its own unmet")
+  -- the source's working surplus is decremented per quality (no double-claim).
+  assert_eq(snapshot.nodes[2].surplus[q("iron-plate", "normal")], 300, "normal pool drained 500-200")
+  assert_eq(snapshot.nodes[2].surplus[q("iron-plate", "uncommon")], 200, "uncommon pool drained 300-100")
+end)
+
+describe("dispatcher.return_manifest -- quality-keyed reciprocal trade", function()
+  local q = qkey.qkey
+  -- the source needs UNCOMMON copper back; the dest holds both qualities but the
+  -- return leg loads ONLY the quality the source actually requested.
+  local snapshot = {
+    nodes = {
+      [1] = { id = 1, planet = "src", demand = {
+        { item = q("copper-plate", "uncommon"), unmet = 150, priority = 0 },
+      }, surplus = {}, unmet_by_item = { [q("copper-plate", "uncommon")] = 150 } },
+      [2] = { id = 2, planet = "dest", demand = {}, unmet_by_item = {}, surplus = {
+        [q("copper-plate", "uncommon")] = 500,
+        [q("copper-plate", "normal")] = 500,
+      } },
+    },
+  }
+  assert_eq(dispatcher.return_manifest(snapshot, 1, 2, 1000),
+    { [q("copper-plate", "uncommon")] = 150 },
+    "return leg carries only the uncommon copper the source needs; normal is left")
+end)
+
+describe("plan bookkeeping -- commit maps are uniformly qkey-keyed (forward + return)", function()
+  local q = qkey.qkey
+  -- a single in-flight assignment with a quality-mixed forward leg and a
+  -- quality-tagged return leg. inbound_for (demand side) and
+  -- committed_surplus_by_node (supply side) must net per (item, quality).
+  local saved_storage = storage
+  storage = { assignments = {
+    [1] = {
+      source = 7, dest = 9,
+      inbound_commit = { [q("iron-plate", "normal")] = 300, [q("iron-plate", "uncommon")] = 100 },
+      surplus_commit = { [q("iron-plate", "normal")] = 300, [q("iron-plate", "uncommon")] = 100 },
+      return_manifest = { [q("copper-plate", "rare")] = 50 },
+    },
+  } }
+
+  -- demand side: dest sees the forward iron inbound per quality; source sees the
+  -- return copper inbound (keyed by its own quality, so it isn't re-requested).
+  assert_eq(demand.inbound_for({ id = 9 }),
+    { [q("iron-plate", "normal")] = 300, [q("iron-plate", "uncommon")] = 100 },
+    "forward inbound credited to the dest, keyed by (item, quality)")
+  assert_eq(demand.inbound_for({ id = 7 }),
+    { [q("copper-plate", "rare")] = 50 },
+    "return inbound credited to the source, keyed by (item, quality)")
+
+  -- supply side: source debited per forward quality; dest debited for the return.
+  local committed = dispatcher.committed_surplus_by_node()
+  assert_eq(committed[7],
+    { [q("iron-plate", "normal")] = 300, [q("iron-plate", "uncommon")] = 100 },
+    "forward surplus debited from the source per quality")
+  assert_eq(committed[9], { [q("copper-plate", "rare")] = 50 },
+    "return surplus debited from the dest per quality")
+
+  storage = saved_storage
+end)
+
+-- ---------------------------------------------------------------------------
+-- Task 11: quality threaded through the schedule WRITE seam (#4d). The manifest
+-- stays keyed by the OPAQUE cargo qkey, but the engine-facing wait conditions
+-- (item_count first_signal) DECODE the qkey to {name, quality} -- a different
+-- quality variant of the same item gates on its own item_count. (The set_slot /
+-- hub-request decode + the watchdog hub_counter decode are IO seams, playtested
+-- per docs/api-notes.md; this covers the PURE wait-condition decode that
+-- build_records emits. NOTE per the plan: do NOT assert quality in
+-- schedule_signature tests -- the signature serializes only type/ticks/
+-- compare_type, so it never captures first_signal.quality.)
+-- ---------------------------------------------------------------------------
+
+describe("schedule.build_records -- quality-tagged requests decode at the wait seam", function()
+  local q = qkey.qkey
+  local built = schedule.build_records({
+    source = "nauvis",
+    dest = "vulcanus",
+    capacity = 1000,
+    timeout = 3600,
+    items = {
+      { item = q("iron-plate", "uncommon"), surplus = 500, unmet = 800 },
+    },
+  })
+
+  -- the manifest/request map stays keyed by the OPAQUE qkey (records carry it
+  -- through for bookkeeping; only the engine write/wait decodes it).
+  assert_eq(built.manifest, { [q("iron-plate", "uncommon")] = 500 },
+    "manifest stays keyed by the compound qkey")
+  assert_eq(built.records[1].requests, { [q("iron-plate", "uncommon")] = 500 },
+    "source requests keyed by the qkey (decoded only at the hub-request seam)")
+
+  -- the load + unload wait conditions DECODE the qkey -> {name, quality} so the
+  -- item_count reads the exact quality variant.
+  assert_eq(built.records[1].wait_conditions[1], {
+    type = "item_count", compare_type = "and",
+    condition = { comparator = ">=",
+      first_signal = { type = "item", name = "iron-plate", quality = "uncommon" }, constant = 500 } },
+    "load wait first_signal decodes the qkey to name + quality")
+  assert_eq(built.records[2].wait_conditions[1], {
+    type = "item_count", compare_type = "and",
+    condition = { comparator = "=",
+      first_signal = { type = "item", name = "iron-plate", quality = "uncommon" }, constant = 0 } },
+    "unload wait first_signal decodes the qkey to name + quality")
+end)
+
+-- ---------------------------------------------------------------------------
+-- Task 12: quality threaded through the monitor + Trade-tab view models,
+-- overlays, and filters (#4e). The view-model cargo keys are qkey(item, quality);
+-- the pure builders carry them OPAQUELY and DECODE at the display/filter
+-- boundary, while the fleet-toggle/priority overlay stays keyed by bare item NAME
+-- so a player edit round-trips across EVERY quality of an item.
+-- ---------------------------------------------------------------------------
+
+describe("viewmodel.build_node_readout -- decodes cargo qkeys to name + quality", function()
+  local q = qkey.qkey
+  local view = viewmodel.build_node_readout({
+    demand = {
+      { item = q("iron-plate", "uncommon"), unmet = 200, priority = 5 },
+      { item = q("iron-plate", "normal"),   unmet = 200, priority = 5 },
+      { item = q("copper-plate", "normal"), unmet = 50,  priority = 0 },
+    },
+    surplus = {
+      { item = q("stone", "normal"), qty = 300 },
+      { item = q("stone", "rare"),   qty = 100 },
+    },
+    inbound = {
+      { item = q("coal", "normal"), qty = 7 },
+    },
+  })
+  -- demand: equal priority+unmet -> name asc, then quality asc; the qkey is split
+  -- into separate item NAME + quality fields so the dumb view shows real items.
+  assert_eq(view.demand[1].item, "iron-plate", "demand[1] decoded to bare name")
+  assert_eq(view.demand[1].quality, "normal", "normal sorts before uncommon")
+  assert_eq(view.demand[2].item, "iron-plate", "demand[2] same name")
+  assert_eq(view.demand[2].quality, "uncommon", "uncommon second")
+  assert_eq(view.demand[3].item, "copper-plate", "lowest priority last")
+  assert_eq(view.demand[3].quality, "normal", "copper normal quality")
+  -- surplus: one item at two qualities sorts adjacent (name asc, quality asc).
+  assert_eq(view.surplus[1].item, "stone", "surplus decoded name")
+  assert_eq(view.surplus[1].quality, "normal", "stone normal first")
+  assert_eq(view.surplus[2].quality, "rare", "stone rare second")
+  assert_eq(view.surplus[1].qty, 300, "surplus qty carried through")
+  -- inbound decoded too.
+  assert_eq(view.inbound[1].item, "coal", "inbound decoded name")
+  assert_eq(view.inbound[1].quality, "normal", "inbound quality decoded")
+end)
+
+describe("viewmodel.build -- waiting carries the cargo qkey through + classifies per quality", function()
+  local q = qkey.qkey
+  -- two qualities of one item waiting on the same planet stay DISTINCT rows; the
+  -- qkey passes through opaquely (display/filter decode it downstream) and each
+  -- quality is classified independently from its own candidate picture.
+  local world = {
+    fleet = {}, assignments = {}, alerts = {}, tick = 0,
+    waiting = {
+      { item = q("iron-plate", "uncommon"), dest_planet = "vulcanus", unmet = 60,
+        candidates = { { surplus = 500, importing = false } }, min_trip = 50 },
+      { item = q("iron-plate", "normal"), dest_planet = "vulcanus", unmet = 100,
+        candidates = { { surplus = 500, importing = true } }, min_trip = 50 },
+    },
+  }
+  local view = viewmodel.build(world)
+  assert_eq(#view.waiting, 2, "both qualities are distinct waiting rows")
+  -- sorted by planet then qkey string: normal before uncommon.
+  assert_eq(view.waiting[1].item, q("iron-plate", "normal"), "normal qkey sorts first, carried opaquely")
+  assert_eq(view.waiting[1].reason, viewmodel.REASON_SOURCE_BUSY, "normal iron: importing source -> busy")
+  assert_eq(view.waiting[2].item, q("iron-plate", "uncommon"), "uncommon qkey second")
+  assert_eq(view.waiting[2].reason, viewmodel.REASON_NO_SHIP, "uncommon iron: real source -> no_ship")
+end)
+
+describe("apply_filters -- a bare item-NAME filter matches EVERY quality (qkey decode)", function()
+  local q = qkey.qkey
+  local view = {
+    roster = {
+      { ship_id = 1, state = "enroute", from = "nauvis", to = "vulcanus",
+        manifest = { [q("iron-plate", "uncommon")] = 300 } },
+      { ship_id = 2, state = "enroute", from = "nauvis", to = "fulgora",
+        manifest = { [q("copper-plate", "normal")] = 100 } },
+    },
+    shipments = {
+      { id = 1, ship_id = 1, from = "nauvis", to = "vulcanus",
+        manifest = { [q("steel-plate", "normal")] = 50 },
+        return_manifest = { [q("iron-plate", "normal")] = 20 } },
+    },
+    waiting = {
+      { item = q("iron-plate", "rare"), dest_planet = "gleba", unmet = 5, reason = "no_ship" },
+      { item = q("copper-plate", "normal"), dest_planet = "gleba", unmet = 5, reason = "no_ship" },
+    },
+    summary = {},
+  }
+  -- "iron-plate" (free text, no quality) must match the uncommon manifest, the
+  -- return-leg normal iron, and the rare waiting row -- decoding each qkey to its
+  -- bare name in all three comparisons (not just the free-text path).
+  local byiron = viewmodel.apply_filters(view, { item = "iron-plate" })
+  assert_eq(#byiron.roster, 1, "roster: only the iron carrier (manifest qkey decoded to name)")
+  assert_eq(byiron.roster[1].ship_id, 1, "the uncommon-iron ship matches a bare-name filter")
+  assert_eq(#byiron.shipments, 1, "shipment kept: its RETURN leg carries iron (decoded)")
+  assert_eq(#byiron.waiting, 1, "waiting: the rare-iron row matches a bare-name filter")
+  assert_eq(byiron.waiting[1].dest_planet, "gleba", "iron waiter kept")
+  -- a name on no leg / row drops everything.
+  local bynone = viewmodel.apply_filters(view, { item = "stone" })
+  assert_eq(#bynone.roster, 0, "no roster row carries stone")
+  assert_eq(#bynone.shipments, 0, "no shipment carries stone on either leg")
+  assert_eq(#bynone.waiting, 0, "no waiting row needs stone")
+end)
+
+describe("Trade-tab overlay round-trips by item NAME across qualities (Task 12)", function()
+  local q = qkey.qkey
+  -- render_imports reads qkey'd request rows but GROUPS them by bare item NAME and
+  -- keys its fleet-toggle / priority widgets by that NAME (the overlay is
+  -- per-name). So an override stored by the handler reads back by name and governs
+  -- EVERY quality -- keying by qkey would store a value never read back.
+  local node = { import_flags = {}, priorities = {} }
+  -- the handler stores the player's edit by NAME:
+  node.import_flags["iron-plate"] = false
+  node.priorities["iron-plate"] = 5
+  -- the widgets seed from the same name-keyed reads (a sanity pre-check that the
+  -- overlay is name-keyed -- the load-bearing signal is the build_open consequence
+  -- below: a single name override governing BOTH qualities of qkey'd request rows):
+  assert_eq(demand.source_via_fleet(node, "iron-plate"), false, "fleet toggle round-trips by name")
+  assert_eq(demand.priority(node, "iron-plate"), 5, "priority round-trips by name")
+  -- and the single name-keyed override governs BOTH iron qualities when the
+  -- qkey'd request rows run through build_open; copper (no override) survives.
+  local rows = {
+    { item = q("iron-plate", "normal"),   requested = 100, on_hand = 0 },
+    { item = q("iron-plate", "uncommon"), requested = 50,  on_hand = 0 },
+    { item = q("copper-plate", "normal"), requested = 30,  on_hand = 0 },
+  }
+  local open = demand.build_open(node, rows)
+  assert_eq(#open, 1, "name-keyed opt-out suppresses BOTH iron qualities; copper survives")
+  assert_eq(open[1].item, q("copper-plate", "normal"), "only copper remains, still fleet-sourced")
+end)
+
+describe("qkey.label / label_parts -- player-facing display decode", function()
+  -- normal quality shows the bare name; any other quality is parenthesised. Used
+  -- by the monitor manifests, the waiting rows, and the debug decision log.
+  assert_eq(qkey.label(qkey.qkey("iron-plate", "normal")), "iron-plate", "normal -> bare name")
+  assert_eq(qkey.label(qkey.qkey("iron-plate", "uncommon")), "iron-plate (uncommon)", "non-normal parenthesised")
+  assert_eq(qkey.label("iron-plate"), "iron-plate", "bare item-name key -> bare name")
+  assert_eq(qkey.label_parts("copper-plate", nil), "copper-plate", "nil quality -> bare name")
+  assert_eq(qkey.label_parts("copper-plate", "rare"), "copper-plate (rare)", "parts: non-normal parenthesised")
 end)
 
 -- ---------------------------------------------------------------------------

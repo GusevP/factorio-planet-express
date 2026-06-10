@@ -24,6 +24,7 @@
 --     swappable so the pure builder can be exercised without a running engine.
 
 local state = require("scripts.state")
+local qkey = require("scripts.qkey")
 
 local schedule = {}
 
@@ -43,12 +44,21 @@ schedule.WAIT_TIME = "time"
 schedule.UNLOAD_INACTIVITY = 300
 
 -- ---------------------------------------------------------------------------
--- pure load clamp + wide manifest
+-- pure load clamp + slot-aware wide manifest
 -- ---------------------------------------------------------------------------
 
+-- Default per-item stack size used by build_manifest when an item carries no
+-- `stack_size`. 1 == "one item per slot" (the conservative reading), so an
+-- un-annotated caller's slot budget behaves as a plain item-count budget. The
+-- dispatcher always supplies a real `stack_size` (its own fallback is 50), so this
+-- only matters to the pure-Lua test runner.
+schedule.DEFAULT_STACK_SIZE = 1
+
 -- Pure: how much of one item to request at the source stop, never more than the
--- surplus offered, the destination's unmet demand, or the capacity still free on
--- the ship. Clamped at zero.
+-- surplus offered, the destination's unmet demand, or the per-item capacity still
+-- free on the ship. Generic min-clamp over plain item-count units -- build_manifest
+-- supplies `capacity` as `available_slots * stack_size` (the slot->item conversion
+-- lives in the packer, this stays a pure min). Clamped at zero.
 function schedule.clamp_load(surplus, capacity, unmet)
   local load = surplus or 0
   local u = unmet or 0
@@ -65,23 +75,33 @@ function schedule.clamp_load(surplus, capacity, unmet)
   return load
 end
 
--- Pure: build the source manifest by loading WIDE across `items` (already in the
--- caller's priority order) up to `capacity`. Two passes so one high-demand item
--- can't monopolize a tight ship and starve the rest -- the planet asked for many
--- items, so a single trip should carry many:
---   1. FAIR SHARE -- give each loadable item up to `capacity / loadable` (its need
---      if smaller), so every requested item gets aboard.
---   2. LEFTOVER -- distribute any unused capacity greedily in PRIORITY order,
---      topping up the highest-priority items first.
--- When capacity comfortably covers everything both passes collapse to "load each
--- item to its full min(surplus, unmet)" -- identical to the old greedy result.
--- Items that clamp to zero are omitted. Returns { [item] = qty }.
+-- Pure: build the source manifest by packing `items` (already in the caller's
+-- priority order) into a SLOT budget. `slot_budget` is a hub-inventory slot count
+-- (Task 6 made ship capacity a slot count, not an item count); each item consumes
+-- `ceil(load / stack_size)` slots. Two passes so one high-demand item can't
+-- monopolize a tight hold and starve the rest -- the planet asked for many items,
+-- so a single trip should carry many:
+--   1. FAIR SHARE -- give each loadable item up to `slot_budget / loadable` SLOTS
+--      (its need if smaller), so every requested item gets aboard. The slot
+--      allowance converts to an item cap of `share_slots * stack_size`.
+--   2. LEFTOVER -- distribute any unused slots greedily in PRIORITY order, topping
+--      up the highest-priority items first (a top-up may also fill the slack in an
+--      item's existing partial slot for free).
+-- When slots comfortably cover everything both passes collapse to "load each item
+-- to its full min(surplus, unmet)". Items that clamp to zero are omitted.
+-- Returns { [item] = qty } (item counts, not slots).
 --
--- `items` is a list of plain tables { item = <name>, surplus = N, unmet = N }.
-function schedule.build_manifest(items, capacity)
+-- `items` is a list of plain tables { item = <key>, surplus = N, unmet = N,
+-- stack_size = N|nil } (missing stack_size defaults to DEFAULT_STACK_SIZE). The
+-- `item` field is the dispatcher's cargo key -- a `qkey(item, quality)` (Task 10,
+-- #4c) -- carried through OPAQUELY: the packer keys the manifest by it but never
+-- decodes it (the engine write decodes qkey -> name+quality at the seam, Task 11).
+-- `stack_size` is a per-NAME property the dispatcher supplies, so the slot math is
+-- quality-independent.
+function schedule.build_manifest(items, slot_budget)
   local manifest = {}
-  local cap = capacity or 0
-  if cap <= 0 then
+  local slots = math.floor(slot_budget or 0)
+  if slots <= 0 then
     return manifest
   end
 
@@ -95,29 +115,37 @@ function schedule.build_manifest(items, capacity)
     return manifest
   end
 
-  local remaining = cap
-  -- pass 1: fair per-item share (every requested item gets aboard)
-  local share = math.max(1, math.floor(cap / loadable))
+  local remaining = slots
+  -- pass 1: fair per-item SLOT share (every requested item gets aboard)
+  local share = math.max(1, math.floor(slots / loadable))
   for _, it in ipairs(items or {}) do
     if remaining <= 0 then
       break
     end
-    local load = schedule.clamp_load(it.surplus, math.min(share, remaining), it.unmet)
+    local ss = it.stack_size or schedule.DEFAULT_STACK_SIZE
+    -- item cap = (slots offered this pass) * stack_size, then clamped to need.
+    local item_cap = math.min(share, remaining) * ss
+    local load = schedule.clamp_load(it.surplus, item_cap, it.unmet)
     if load > 0 then
       manifest[it.item] = load
-      remaining = remaining - load
+      remaining = remaining - math.ceil(load / ss)
     end
   end
-  -- pass 2: top up in priority order with whatever capacity is left
+  -- pass 2: top up in priority order with whatever slots are left. An item may
+  -- grow to fill the slack in its current top slot PLUS all remaining free slots,
+  -- so convert that slot allowance back to item units before clamping.
   for _, it in ipairs(items or {}) do
     if remaining <= 0 then
       break
     end
+    local ss = it.stack_size or schedule.DEFAULT_STACK_SIZE
     local already = manifest[it.item] or 0
-    local more = schedule.clamp_load((it.surplus or 0) - already, remaining, (it.unmet or 0) - already)
-    if more > 0 then
-      manifest[it.item] = already + more
-      remaining = remaining - more
+    local already_slots = math.ceil(already / ss)
+    local item_cap = (already_slots + remaining) * ss
+    local total = schedule.clamp_load(it.surplus, item_cap, it.unmet)
+    if total > already then
+      manifest[it.item] = total
+      remaining = remaining - (math.ceil(total / ss) - already_slots)
     end
   end
   return manifest
@@ -126,6 +154,18 @@ end
 -- ---------------------------------------------------------------------------
 -- pure wait-condition builders
 -- ---------------------------------------------------------------------------
+
+-- Decode a manifest cargo `key` (a `qkey(item, quality)`) into the engine
+-- `item_count` signal it gates on -- `{ type = "item", name, quality }` (Task 11,
+-- #4d). The manifest is keyed by the OPAQUE qkey, but an `item_count` wait
+-- condition reads a SPECIFIC quality variant of an item, so the signal must carry
+-- both name and quality (normal- and uncommon-quality iron count independently).
+-- A bare item-name key decodes to "normal" so legacy/quality-agnostic manifests
+-- still gate on the right item. PURE: `qkey.qparse` is plain string math.
+local function item_signal(key)
+  local name, quality = qkey.qparse(key)
+  return { type = "item", name = name, quality = quality }
+end
 
 -- "manifest loaded OR timeout" at a load stop: one `item_count >= qty` condition
 -- per manifest item (AND-combined, stable item order for determinism), plus the
@@ -140,7 +180,7 @@ local function load_wait(manifest, timeout)
       compare_type = "and",
       condition = {
         comparator = ">=",
-        first_signal = { type = "item", name = item },
+        first_signal = item_signal(item),
         constant = qty,
       },
     }
@@ -165,7 +205,7 @@ local function unload_wait(manifest, timeout)
       compare_type = "and",
       condition = {
         comparator = "=",
-        first_signal = { type = "item", name = item },
+        first_signal = item_signal(item),
         constant = 0,
       },
     }
@@ -194,14 +234,14 @@ local function turnaround_wait(unload_manifest, load_manifest, timeout)
     conds[#conds + 1] = {
       type = schedule.WAIT_ITEM_COUNT,
       compare_type = "and",
-      condition = { comparator = "=", first_signal = { type = "item", name = item }, constant = 0 },
+      condition = { comparator = "=", first_signal = item_signal(item), constant = 0 },
     }
   end
   for item, qty in state.sorted_pairs(load_manifest or {}) do
     conds[#conds + 1] = {
       type = schedule.WAIT_ITEM_COUNT,
       compare_type = "and",
-      condition = { comparator = ">=", first_signal = { type = "item", name = item }, constant = qty },
+      condition = { comparator = ">=", first_signal = item_signal(item), constant = qty },
     }
   end
   conds[#conds + 1] = {
@@ -224,10 +264,13 @@ end
 -- `assignment` is a plain table:
 --   { source   = <planet name>,
 --     dest     = <planet name>,
---     capacity = <ship cargo capacity>,
+--     capacity = <ship cargo capacity, in SLOTS (hub inventory slot count)>,
 --     timeout  = <ticks for the wait-condition timeout>,
---     items    = { { item, surplus, unmet }, ... },  -- caller's priority order
+--     items    = { { item, surplus, unmet, stack_size }, ... },  -- priority order
 --     return_manifest = { [item] = qty } | nil }      -- Task 7 (two-way return)
+-- Every `item` key here is the dispatcher's cargo key, a `qkey(item, quality)`
+-- (Task 10, #4c), carried OPAQUELY through the records; the engine write decodes
+-- it to a real item name + quality at the seam (apply_hub_request, Task 11).
 --
 -- Returns a table { records = {...}, manifest = { [item] = qty },
 -- return_manifest = { [item] = qty } | nil } where `records` is the engine-
@@ -354,9 +397,11 @@ end
 
 -- Rocket capacity for an item = how many fit in ONE cargo rocket
 -- (`rocket_lift_weight / item.weight`, floored, min 1). Used to decide whether a
--- request is smaller than a single rocket. Returns nil if it can't be read (then
--- the caller leaves the default full-rocket delivery rather than guess). IO: reads
--- `prototypes`, so only meaningful in-engine.
+-- request is smaller than a single rocket. Takes the BARE item name (not a qkey):
+-- `weight` is a per-name prototype property, quality-independent, so the caller
+-- decodes the qkey first. Returns nil if it can't be read (then the caller leaves
+-- the default full-rocket delivery rather than guess). IO: reads `prototypes`, so
+-- only meaningful in-engine.
 local function rocket_capacity(item)
   local consts = prototypes and prototypes.utility_constants
   local lift = consts and consts["rocket_lift_weight"]
@@ -402,10 +447,14 @@ function schedule.apply_hub_request(platform, manifest, import_from)
   -- did not grow the section, so the request stayed empty and nothing loaded.)
   -- Each LogisticFilter: value is a SignalFilter (quality is mandatory when min>0),
   -- min is the requested amount, import_from scopes it to the source planet.
+  -- The manifest is keyed by the OPAQUE cargo qkey; DECODE it here -- this is the
+  -- engine-write seam -- so the filter requests the exact (name, quality) variant
+  -- (Task 11, #4d). A bare item-name key decodes to "normal".
   local filters = {}
   for item, qty in state.sorted_pairs(manifest) do
+    local name, quality = qkey.qparse(item)
     local filter = {
-      value = { type = "item", name = item, quality = "normal", comparator = "=" },
+      value = { type = "item", name = name, quality = quality, comparator = "=" },
       min = qty,
       import_from = import_from,
     }
@@ -416,8 +465,9 @@ function schedule.apply_hub_request(platform, manifest, import_from)
     -- the source past its reserve and overshooting the dest). For a request of one
     -- rocket OR MORE the default full-rocket chunking is already right (and a min
     -- payload above capacity can't be met), so leave it unset. Capacity unknown ->
-    -- also leave default (never guess a payload cap).
-    local cap = rocket_capacity(item)
+    -- also leave default (never guess a payload cap). `rocket_capacity` takes the
+    -- bare NAME (weight is quality-independent), so pass the decoded name.
+    local cap = rocket_capacity(name)
     if cap and qty < cap then
       filter.minimum_delivery_count = qty
     end
@@ -430,7 +480,10 @@ end
 -- Apply built `records` to a platform. In 2.0 `LuaSpacePlatform.schedule` is a
 -- read/write `PlatformSchedule` table ({ current, records }) -- NOT a LuaSchedule
 -- with `set_records` -- and the route is installed by ASSIGNING a new table (the
--- only platform mutation the mod is permitted to make; assigning nil clears it).
+-- only platform mutation the mod is permitted to make). Assigning a NON-NIL
+-- PlatformSchedule PRESERVES the player's interrupts (refuel/rearm) -- confirmed
+-- in-engine; only `platform.schedule = nil` drops the whole schedule, interrupts
+-- included (which is why `clear_route` never nils). So this assignment is safe.
 -- A ScheduleRecord carries no cargo, so the source stop's load is realized as the
 -- hub's requester logistic request, applied FIRST: if it can't be applied the
 -- dispatcher records NO assignment, and that must not leave the platform already
@@ -473,11 +526,13 @@ function schedule.write(platform, assignment)
 end
 
 -- Remove the mod's trade route from a platform on cleanup (free / reset), WITHOUT
--- touching the player's interrupts (refuel / rearm). `platform.schedule = nil`
--- would drop the WHOLE schedule, interrupts included; instead clear only the
--- records via the full LuaSchedule (`get_schedule`), which leaves interrupts
--- intact. Falls back to assigning an empty simplified schedule if get_schedule is
--- somehow unavailable (still avoids nil-ing interrupts). No-op on a dead platform.
+-- touching the player's interrupts (refuel / rearm). The ONLY thing that drops
+-- interrupts is `platform.schedule = nil` (confirmed in-engine) -- a non-nil assign
+-- keeps them, same as apply_records/resync_conditions. We avoid nil entirely:
+-- clear only the records via the full LuaSchedule (`get_schedule():set_records({})`),
+-- the idiomatic records-only clear. Falls back to assigning an empty NON-NIL
+-- simplified schedule if get_schedule is somehow unavailable (also keeps interrupts,
+-- since it is non-nil). No-op on a dead platform.
 function schedule.clear_route(platform)
   if not (platform and platform.valid) then
     return

@@ -71,9 +71,14 @@ Wait-condition `type` tokens: **[confirmed, 2.0.77]** `WaitCondition` is
 and multiple conditions in one record combine via the per-condition `compare_type`.
 Departure is gated on the **MANIFEST items only**, via per-item **`"item_count"`**
 conditions (each carries a `condition = {comparator, first_signal={type="item",
-name=…}, constant}`), NOT the whole-hold `"full"`/`"empty"`: a platform hub also
+name, quality}, constant}` — the `first_signal` carries the QUALITY variant decoded
+from the cargo qkey, Task 11 #4d, so the item_count reads the exact quality the mod
+shipped; a bare item-name key decodes to `"normal"`), NOT the whole-hold
+`"full"`/`"empty"`: a platform hub also
 holds the platform's own fuel/ammo/repair-packs, so `"full"` stalls on a partial
-load (a manifest is `min(surplus, capacity, unmet)`, usually < hold capacity) and
+load (a manifest is `min(surplus, capacity, unmet)`, usually < hold capacity —
+capacity is a SLOT budget since Task 6/7, so the per-item clamp ≈
+`min(surplus, free_slots × stack_size, unmet)` packed slot-aware) and
 `"empty"` never fires while that fuel/ammo sits in the hold. So:
 - **load stop** — `item_count >= qty` per manifest item (AND), `OR time`.
 - **unload stop** — `item_count == 0` per manifest item (AND), `OR time` (native
@@ -94,8 +99,18 @@ platform **hub** as **logistic sections** (`LuaLogisticSections` on the hub's
 requester `LuaLogisticPoint`,
 `hub.get_logistic_point(defines.logistic_member_index.space_platform_hub_requester)`).
 The wrapper (`schedule.apply_hub_request`) sets the hub's requester section to the
-manifest quantities (`section.set_slot(i, {value={type="item", name=item,
-quality="normal"}, min=qty})`); vanilla rockets then launch the goods up.
+manifest quantities (`section.set_slot(i, {value={type="item", name, quality},
+min=qty})`); vanilla rockets then launch the goods up.
+
+> **Quality at the request seam (Task 11, #4d) [provisional — confirm
+> `value.quality` on the hub requester in-engine].** The manifest is keyed by the
+> OPAQUE cargo `qkey(item, quality)`; `apply_hub_request` DECODES it at this
+> engine-write seam, so each filter `value = {type="item", name, quality}` requests
+> the EXACT quality variant (normal- and uncommon-quality iron launch
+> independently). A bare item-name key decodes to `"normal"`. The
+> `minimum_delivery_count` / rocket-capacity sub-rocket cap uses the BARE item
+> name only (`prototypes.item[name].weight` is quality-independent), so the qkey is
+> decoded before `rocket_capacity`.
 
 > **Caveat (still verify in-engine, gates the wrapper):** the hub request is a
 > SINGLE global request, not natively schedule-scoped, so "request only at the
@@ -151,7 +166,9 @@ know which stop the ship is at and whether its hold has drained:
     `current`. Lower-only, so re-clamping through the transit is harmless.
   - **Completion** can't trust `current >= #records` alone (that includes
     travelling to the last stop), so it also requires `platform.speed == 0`
-    (parked) AND an empty hold.
+    (parked) AND that the hub holds **none of OUR cargo** (the manifest + return
+    manifest), checked per-item rather than whole-hub-empty (see the per-item
+    hub-count seam below).
   - **No-progress deadline** uses a window WIDER than the per-stop wait timeout
     (`dispatcher.NO_PROGRESS_WINDOW`), because `current` shows no progress during
     a long inter-planet leg — a legitimately long leg must not be timed out.
@@ -159,9 +176,50 @@ know which stop the ship is at and whether its hold has drained:
   non-zero in transit; the completion check uses it to reject "empty hold while
   still travelling to the final stop". A nil read degrades to the empty-hold guard
   alone. **[provisional — confirm `speed` in-engine.]**
-- **Platform hub cargo-hold inventory:** `platform.hub.get_inventory(defines.inventory.hub_main)`,
-  then `inv.is_empty()` — gates the watchdog's "unload done / completed" check
-  (`hold_empty`). **[provisional — confirm the inventory constant in-engine.]**
+- **Refuel/rearm INTERRUPTS vs. `current` (#5):** the mod writes a SIMPLIFIED
+  schedule (source → dest [→ source]) that **excludes** the player's interrupts.
+  **[STILL-TO-CONFIRM in-engine — gates the GUI/schedule seam flip]** what
+  `platform.schedule.current` reports while a refuel interrupt is active, and
+  whether the engine splices interrupt-`created_by_interrupt` records into
+  `.records` (shifting the index `current` points at). Defensive guard SHIPPED
+  regardless: `watchdog.note_progress` re-points its single hub request off the
+  numeric `current` index (`watchdog.stop_request` keys cargo by index), so it now
+  re-points/commits ONLY when `sched.records[current].station` is one of the
+  assignment's own route stations (`watchdog.station_is_ours` →
+  `a.source_planet`/`a.dest_planet`); a `current` parked on a foreign interrupt
+  stop is ignored (no progress committed) until the ship returns to a route stop.
+  Confirm the interrupt record/`current` behavior in a running game, then flip this
+  note + this §1 entry to `[confirmed]`.
+- **Platform hub per-(item,quality) cargo count:**
+  `platform.hub.get_item_count(name, quality)` — gates the watchdog's "unload done
+  / completed" check (`watchdog.completed` via the pure `manifest_delivered`) AND
+  the delivery-impossible abort (`watchdog.delivery_stalled`). Completion now tests
+  the **manifest cargo per-item** (the items the mod shipped) rather than
+  whole-hub-empty, because a platform hub also holds the ship's OWN
+  fuel/ammo/repair-packs, so a whole-hub
+  `get_inventory(defines.inventory.hub_main).is_empty()` would never read empty for
+  a ship that stocks its own fuel and the delivery would loop/linger to the
+  no-progress timeout instead of completing. `get_item_count` on the hub entity
+  counts across the entity's inventories, which still reads 0 for a delivered
+  manifest item. **Quality (Task 11, #4d):** the manifest is keyed by the cargo
+  `qkey(item, quality)`, so `watchdog.hub_counter` DECODES the qkey and reads
+  `get_item_count(name, quality)` — normal- and uncommon-quality iron complete
+  independently; a bare item-name key decodes to `"normal"`. **[provisional —
+  confirm the two-arg `LuaEntity.get_item_count(name, quality)` on the hub
+  in-engine.]** (The earlier whole-hub `get_inventory(hub_main).is_empty()` read —
+  `watchdog.hold_empty` — was retired 2026-06 for this reason.)
+- **Platform hub slot budget — per-platform capacity (#3, Task 6):**
+  `hub.get_inventory(defines.inventory.hub_main)` → `LuaInventory`, then `#inv`
+  is the number of cargo slots. This is the per-platform **SLOT BUDGET** the
+  slot-aware manifest packer (Task 7) fills (`ceil(load / stack_size)` slots per
+  item). `dispatcher.capacity_of(entry)` reads it and falls back to
+  `dispatcher.DEFAULT_CAPACITY` slots when the hub/inventory can't be read
+  (degrade safely, never error). **NOTE — this changes the units of
+  `ship.capacity` from item-count to SLOT-count**: cargo bays enlarge the hub
+  inventory, so a freighter reports more slots than a bare hub (replacing the old
+  flat-1000 item stub). **[provisional — confirm
+  `get_inventory(defines.inventory.hub_main)` is the cargo hold and `#inv` is its
+  slot count in-engine.]**
 
 > **Caveat:** these are READ-only progress checks; the only WRITE the watchdog
 > makes is lowering a load stop's request on re-clamp (via the hub logistic
@@ -169,27 +227,48 @@ know which stop the ship is at and whether its hold has drained:
 
 ---
 
-## 2. Launchable stock accessor — surplus basis  → gates Task 1
+## 2. Launchable stock accessor — surplus basis  → gates Task 1 / Task 4 (#7)
 
-**[provisional — confirm the exact accessor + in-flight caveat before Task 1's IO wrapper]**
+**[provisional — confirm the per-node network accessor + in-flight caveat before the IO wrapper flips to [confirmed]]**
 
 "Surplus" is computed against **what the planet can currently launch**, i.e. the
-on-surface logistic-network item count reachable by rocket silos.
+logistic-network item count reachable by rocket silos.
 
-**Accessor:** the planet surface's logistic network item count. Candidates to
-confirm in-engine:
+**Accessor (Task 4, #7) — the trade node's OWN logistic network:**
+`pad.logistic_network` (the `LuaLogisticNetwork` the cargo-landing-pad entity
+belongs to), then `network.get_item_count(item, quality)`.
+`stock.read_launchable_stock` scopes to THIS network, NOT the whole-surface
+aggregate.
 
-- `LuaForce.get_item_count(item, surface)` / `surface`-scoped force item count, or
-- the surface's logistic network(s): `surface.find_logistic_network_by_position`
-  / `force.logistic_networks[surface_name]`, then
-  `network.get_item_count(item)` / `network.get_contents()`.
+- **Per-quality stock (Task 9, #4b) [provisional — confirm
+  `LuaLogisticNetwork.get_item_count(item, quality)` in-engine]:** the cargo key
+  is a `qkey(item, quality)`, so the reader `qparse`s it and reads launchable
+  stock PER QUALITY — `network.get_item_count(name, quality)` (and the fallback
+  surface-sum likewise). Normal- and uncommon-quality iron are independent stock
+  pools; a bare item-name key decodes to `"normal"` so legacy reads still
+  resolve. Confirm the two-arg `(name, quality)` form (vs. a
+  `{name, quality}` ItemID table) in a running game.
 
-The mod needs **"everything on this planet available to launch"**, which is the
-**aggregate of the planet's logistic network contents**, not a single chest.
+- **Why per-node, not surface-wide:** a planet may host **two or more
+  DISCONNECTED logistic networks**. Summing every network on the surface (the
+  pre-#7 behavior) over-counts — the mod would promise surplus a silo on a
+  different network can't launch, producing impossible dispatches that fall back
+  to the no-progress timeout.
+- **Fallback (degrade safely, never error):** when the per-node accessor is
+  unavailable — no/invalid pad entity, or the pad isn't on a network — the reader
+  falls back to the old surface-sum: `force.logistic_networks[surface.name]`, then
+  `network.get_item_count(item)` summed over all networks (order-independent
+  commutative reduction, so plain `pairs` is fine).
 
-> **Caveat (must verify, gates Task 1):** pin ONE definition and stick to it.
-> Recommended: the planet/force **logistic-network item count** for the surface.
-> Record which call returns it once confirmed.
+> **Caveat — silo-vs-pad network (must verify in-engine, gates the wrapper):**
+> exports launch from rocket **SILOS**, which may sit on a **different** logistic
+> network than the landing **PAD**. Scoping surplus to the pad's network removes
+> the over-count on disconnected-network planets, but can **under-count** if a
+> launching silo isn't on the pad's network. An under-count is the safe direction:
+> the re-clamp / `load_impossible` paths cover it (a too-low surplus just means a
+> smaller/skipped manifest, never an impossible dispatch). **Flag for playtest
+> (#7):** on a real two-network planet, confirm the pad's network is the one the
+> silos draw from, or revisit (e.g. union the silos' networks) if exports starve.
 
 > **Caveat — in-flight / committed items:** the raw stock number does **not**
 > subtract items already committed to an in-flight launch or a rocket being
@@ -201,7 +280,9 @@ The mod needs **"everything on this planet available to launch"**, which is the
 > **Caveat — rocket capacity / silo availability:** a high stock number does not
 > guarantee it can all launch this trip (silo count, rocket capacity, fuel). The
 > mod does not model this; partial fills self-correct next tick (Task 6). The
-> per-stop `load` is clamped to `min(surplus, ship_capacity, unmet)` in Task 4.
+> per-stop `load` is clamped to `min(surplus, ship_capacity, unmet)` in Task 4
+> (capacity is a SLOT budget since Task 6/7; the per-item clamp ≈
+> `min(surplus, free_slots × stack_size, unmet)`, packed slot-aware).
 
 `scripts/stock.lua` caches reads per dispatcher tick (tagged with `game.tick`),
 so one tick never pays for the same item twice and a stale value never leaks
@@ -233,17 +314,35 @@ Its requests live as **logistic sections** on its `LuaLogisticPoint`:
 **On-hand (what's already delivered):** the pad's inventory.
 
 - `pad.get_inventory(defines.inventory.cargo_landing_pad_main)` → `LuaInventory`,
-  then `inventory.get_item_count(item)`. The code commits to
-  `cargo_landing_pad_main` as the provisional choice; confirm this is the right
-  `defines.inventory.*` constant for the landing pad's hold in-engine.
+  then `inventory.get_item_count(name, quality)` (Task 9, #4b — per quality). The
+  code commits to `cargo_landing_pad_main` as the provisional choice; confirm
+  this is the right `defines.inventory.*` constant for the landing pad's hold
+  in-engine.
+
+**Quality (Task 9, #4b) [provisional — confirm in-engine]:** an item name alone is
+no longer a unique demand key — `iron-plate` at normal vs. uncommon quality are
+distinct requests.
+
+- **Request quality:** each request filter carries the quality variant on
+  `filter.value.quality` (a quality-name string; nil/absent → `"normal"` via
+  `qkey`). `demand.reader` keys each request by `qkey(name, quality)`, so two
+  qualities of one item are two distinct demand rows. Confirm the filter
+  `value.quality` shape on the cargo-landing-pad requester in-engine.
+- **Per-quality on-hand:** `inv.get_item_count(name, quality)` — so a
+  normal-quality on-hand never masks an uncommon-quality shortfall. Confirm the
+  two-arg `(name, quality)` form (vs. a `{name, quality}` ItemID table) in a
+  running game.
 
 `demand.unmet(item) = requested - on_hand - already_inbound_from_fleet`, clamped
 at 0 (Task 2). The pure unmet/sort math is engine-independent and can be written
-and tested now; only the two reads above wait on this confirmation.
+and tested now; only the reads above wait on this confirmation.
 
 > **Caveat:** the per-slot `source via fleet` toggle + priority are **mod
 > overlay state** in `storage.nodes`, NOT native pad data — the native pad only
-> tells us item + requested count. The overlay is keyed by item name.
+> tells us item + requested count. The overlay is keyed by item NAME (a flag /
+> priority applies to ALL qualities of an item), so `demand.build_open` `qparse`s
+> each demand `qkey` back to its bare name before `source_via_fleet` / `priority`
+> (Task 9, #4b). Same rule as the reserve floor in §2 / `stock.surplus`.
 
 ---
 
@@ -341,6 +440,14 @@ ships), but correctness rests on the signature compare, not the event.
   `planet.prototype.localised_name` is the checkbox caption. **[confirmed]** The
   decision (collapse "all ticked" -> nil) lives in the pure
   `fleet.allowed_from_selection`; the writer is `fleet.set_allowed_planets`.
+- Per-item stack size — capacity packing (#3, Task 6): `prototypes.item[name].stack_size`
+  (uint). The slot-aware packer (Task 7) converts an item-count load into slots via
+  `ceil(load / stack_size)`. `dispatcher.stack_size_of(name)` reads it (tagging each
+  demanded item in `build_snapshot` so the pure planner only copies the value) and
+  falls back to `dispatcher.DEFAULT_STACK_SIZE` when `prototypes` is absent (the
+  pure-Lua test runner) or the item has no prototype. **[provisional — confirm
+  `prototypes.item[name].stack_size`; `prototypes` is the 2.0 replacement for the
+  old `game.item_prototypes`.]**
 - Top-bar shortcut prototype + sprite in `data.lua` (Task 8). **[confirmed
   surface.]**
 - Technology researched-state read: `force.technologies["interplanetary-trade-logistics"].researched`
@@ -415,6 +522,27 @@ Audit results recorded during Task 11:
   overrides) `table.sort` first.
 - **Locale complete.** Every GUI/tech/shortcut/setting key resolves in the
   `[planet-express]` / `[mod-setting-*]` sections; no reachable `Unknown key:`.
+
+---
+
+## Implementation notes (edge-case hardening)
+
+The edge-case-hardening pass (real slot-aware capacity, item quality, the
+delivery-impossible abort, network-scoped surplus, manifest-delivered completion)
+added new IO seams, all already recorded above:
+
+- per-node logistic network for surplus + per-quality `network.get_item_count(item, quality)` (§2);
+- hub slot budget `get_inventory(defines.inventory.hub_main)` `#inv` + `prototypes.item[name].stack_size` (§1 / §5);
+- per-`(item, quality)` hub `get_item_count(name, quality)` and the pad-request `value.quality` read (§1 / §3);
+- `set_slot` filter `value.quality` and `item_count` `first_signal.quality` (§1).
+
+**Every one of these stays `[provisional]` and is deliberately NOT flipped here.**
+A flip to `[confirmed]` requires an in-engine check, which is Post-Completion (a
+human in a running game), not part of the autonomous code/doc pass. They await the
+in-engine seam confirmations and the playtest scenarios listed in the
+edge-case-hardening plan's **Post-Completion** section (and mirrored in the
+checklist below). The pure calc layer around each seam is complete and unit-tested
+(`lua tests/calc_test.lua`, 443 assertions).
 
 ---
 

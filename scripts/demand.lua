@@ -21,6 +21,7 @@
 --     running engine.
 
 local state = require("scripts.state")
+local qkey = require("scripts.qkey")
 
 local demand = {}
 
@@ -72,21 +73,30 @@ end
 
 -- Build the node's open demand from already-read rows. PURE: this is the
 -- testable core. `rows` is a list of plain tables
---   { item = <name>, requested = N, on_hand = N, inbound = N }
--- (on_hand / inbound default to 0). Returns a list of
---   { item = <name>, unmet = N, priority = P }
+--   { item = <qkey>, requested = N, on_hand = N, inbound = N }
+-- where `item` is the compound `qkey(item, quality)` key (on_hand / inbound
+-- default to 0). Returns a list of
+--   { item = <qkey>, unmet = N, priority = P }
 -- for every row that is fleet-eligible AND has unmet > 0, sorted
 -- DETERMINISTICALLY: priority desc, then unmet (largest shortfall) desc, then
--- item name asc as the final stable tie-break (multiplayer determinism --
--- never rely on `rows` order or `pairs` order).
+-- qkey asc as the final stable tie-break (multiplayer determinism -- never rely
+-- on `rows` order or `pairs` order).
+--
+-- The fleet-flag + priority OVERLAY is keyed by bare item NAME (a reserve / opt-
+-- out / priority applies to ALL qualities of an item -- per the plan's
+-- Decisions), so the qkey is `qparse`d back to its name before
+-- `source_via_fleet` / `priority`. A bare item-name key (legacy / quality-
+-- agnostic) decodes to the same name, so old rows still resolve. Still PURE:
+-- `qkey.qparse` is plain string math, no engine globals.
 function demand.build_open(node, rows)
   local out = {}
   for _, row in ipairs(rows) do
-    local item = row.item
-    if demand.source_via_fleet(node, item) then
+    local key = row.item
+    local name = qkey.qparse(key)
+    if demand.source_via_fleet(node, name) then
       local unmet = demand.compute_unmet(row.requested, row.on_hand, row.inbound)
       if unmet > 0 then
-        out[#out + 1] = { item = item, unmet = unmet, priority = demand.priority(node, item) }
+        out[#out + 1] = { item = key, unmet = unmet, priority = demand.priority(node, name) }
       end
     end
   end
@@ -107,18 +117,25 @@ end
 -- ---------------------------------------------------------------------------
 
 -- [provisional] Read the pad's native request slots and on-hand inventory into
--- demand rows. Returns a list of { item, requested, on_hand } -- the `inbound`
--- term is layered in by `open_demand` from the assignment bookkeeping (it is
--- mod state, not native pad data). Confirm the exact logistic-point /
+-- demand rows. Returns a list of { item = <qkey>, requested, on_hand } -- the
+-- `inbound` term is layered in by `open_demand` from the assignment bookkeeping
+-- (it is mod state, not native pad data). Confirm the exact logistic-point /
 -- inventory accessors in-engine before flipping §3 to [confirmed].
+--
+-- QUALITY (Task 9, #4b): each request filter carries the quality variant
+-- (`filter.value.quality`, a quality-name string; nil/absent -> "normal"), so
+-- the same item at two qualities is two DISTINCT rows keyed by
+-- `qkey(name, quality)`. On-hand is read per quality
+-- (`inv.get_item_count(name, quality)`) so a normal-quality on-hand never
+-- masks an uncommon-quality shortfall (and vice versa).
 local function read_native_demand(node)
   local pad = node and node.entity
   if not (pad and pad.valid) then
     return {}
   end
 
-  -- requested counts, keyed by item name, from the pad's requester logistic
-  -- sections. A cargo landing pad's requester point is
+  -- requested counts, keyed by qkey(item, quality), from the pad's requester
+  -- logistic sections. A cargo landing pad's requester point is
   -- `defines.logistic_member_index.cargo_landing_pad_requester` (confirmed against
   -- the 2.0 API defines, §3). `logistic_container` is a different member index and
   -- returns no point here -- which would leave every pad reporting zero demand.
@@ -135,7 +152,8 @@ local function read_native_demand(node)
           local value = filter.value
           local name = value and value.name
           if name and filter.min and filter.min > 0 then
-            requested[name] = (requested[name] or 0) + filter.min
+            local key = qkey.qkey(name, value.quality)
+            requested[key] = (requested[key] or 0) + filter.min
           end
         end
       end
@@ -145,11 +163,12 @@ local function read_native_demand(node)
   local inv = pad.get_inventory(defines.inventory.cargo_landing_pad_main)
 
   local rows = {}
-  for item, req in pairs(requested) do
+  for key, req in pairs(requested) do
+    local name, quality = qkey.qparse(key)
     rows[#rows + 1] = {
-      item = item,
+      item = key,
       requested = req,
-      on_hand = inv and inv.get_item_count(item) or 0,
+      on_hand = inv and inv.get_item_count(name, quality) or 0,
     }
   end
   return rows

@@ -33,13 +33,14 @@
 --     only DETECTS "stuck" via the timeout, it never refuels.
 --
 -- Design split (per the plan's pure-function seam):
---   * `reclamp_amount`, `schedule_signature`, and `expired` are PURE over plain
---     tables/scalars -- no engine globals -- so they load and run under plain
---     `lua` and are unit-tested. The signature is order-stable (multiplayer
+--   * `reclamp_amount`, `schedule_signature`, `expired`, and `manifest_delivered`
+--     (completion over an injected hub count_fn) are PURE over plain tables/scalars
+--     -- no engine globals -- so they load and run under plain `lua` and are
+--     unit-tested. The signature is order-stable (multiplayer
 --     determinism: iterate records in order, requests via the sorted helper) per
 --     docs/api-notes.md §4.
 --   * everything else (the `run` loop, platform-validity / live-schedule /
---     arrival / hold-empty reads, the request rewrite) is thin IO, marked
+--     arrival / manifest-delivered reads, the request rewrite) is thin IO, marked
 --     [provisional] against the engine seams, and verified by manual playtest
 --     (the Post-Completion checklist: asteroid loss, fuel starvation, mid-flight
 --     edit).
@@ -48,6 +49,8 @@ local state = require("scripts.state")
 local fleet = require("scripts.fleet")
 local stock = require("scripts.stock")
 local schedule = require("scripts.schedule")
+local demand = require("scripts.demand")
+local qkey = require("scripts.qkey")
 
 local watchdog = {}
 
@@ -116,6 +119,65 @@ function watchdog.advanced(prev, current)
   return prev == nil or current > prev
 end
 
+-- Pure: has the ship delivered all of OUR cargo? True when the hub holds zero of
+-- every item in BOTH the forward `manifest` and the `return_manifest`
+-- (`count_fn(item)` returns the hub count of that item). This deliberately ignores
+-- the platform's own fuel/ammo/repair-packs and any other non-manifest cargo: a
+-- ship that stocks its own fuel would never read whole-hub-empty, so completion
+-- gates on the MANIFEST cargo, not the whole hold. An empty manifest (nothing to
+-- deliver) is trivially delivered. Iterates via the sorted helper for determinism
+-- (the boolean is order-independent, but keep iteration stable). Pure over the
+-- injected `count_fn` + plain manifest tables.
+function watchdog.manifest_delivered(count_fn, manifest, return_manifest)
+  local function all_zero(m)
+    for item in state.sorted_pairs(m or {}) do
+      if (count_fn(item) or 0) > 0 then
+        return false
+      end
+    end
+    return true
+  end
+  return all_zero(manifest) and all_zero(return_manifest)
+end
+
+-- Pure: should a parked delivery be ABORTED as impossible? True when the ship
+-- STILL holds some of OUR cargo (`count_fn(item) > 0` for a manifest/return item)
+-- AND the drop planet's RAW request for EVERY held item is 0 -- i.e. the
+-- destination genuinely no longer wants any of it. `request_fn(item)` is the RAW
+-- native unmet (`max(0, requested - on_hand)`, EXCLUDING fleet inbound) -- NOT
+-- `demand.open_demand`, which nets out THIS assignment's own `inbound_commit` and
+-- so reads ~0 for the whole unload window of any in-flight cargo; gating on it
+-- would abort HEALTHY deliveries (review finding). If ANY held item is still
+-- wanted (raw request > 0) the delivery is healthy -> false. If the ship holds
+-- NONE of our cargo (the pad already pulled it) -> false: that is `completed`'s
+-- job, checked FIRST in the run loop. Iterates via the sorted helper for
+-- determinism (the boolean is order-independent). Pure over the injected fns +
+-- plain manifest tables.
+function watchdog.delivery_impossible(a, request_fn, count_fn)
+  if not a then
+    return false
+  end
+  local held_any = false
+  local function scan(m)
+    for item in state.sorted_pairs(m or {}) do
+      if (count_fn(item) or 0) > 0 then
+        held_any = true
+        if (request_fn(item) or 0) > 0 then
+          return true -- a still-held item is still wanted -> healthy, not impossible
+        end
+      end
+    end
+    return false
+  end
+  if scan(a.manifest) then
+    return false
+  end
+  if scan(a.return_manifest) then
+    return false
+  end
+  return held_any
+end
+
 -- Pure: which hub request the ship should be holding at schedule stop `current`,
 -- and the planet to import it from. The hub request is a SINGLE global request
 -- (api-notes §1) re-pointed as the ship advances stops, because a ScheduleRecord
@@ -135,6 +197,38 @@ function watchdog.stop_request(a, current)
     return a.return_manifest, a.dest_planet
   end
   return {}, nil
+end
+
+-- Pure: is `station` one of THIS assignment's OWN route stations (its source or
+-- destination planet)? The mod writes a SIMPLIFIED schedule (source -> dest [->
+-- source]) that EXCLUDES the player's refuel/rearm interrupts; when such an
+-- interrupt fires, the engine can splice in its own record(s) and shift
+-- `platform.schedule.current` onto a station the mod never wrote. The watchdog
+-- re-points its single hub request off the numeric `current` index
+-- (`stop_request` keys by index), so acting on a foreign interrupt stop would
+-- request the WRONG leg's cargo. This guard lets the run loop ignore any `current`
+-- whose record station is not one of ours. A nil station (unreadable record) or
+-- nil assignment is treated as NOT ours (defensive -- never act blindly). Pure
+-- over `a` + the station string. (Interrupt behavior is still-to-confirm in-engine
+-- -- see docs/api-notes.md §1; this guard is correct defensive hygiene regardless.)
+function watchdog.station_is_ours(a, station)
+  if not (a and station) then
+    return false
+  end
+  return station == a.source_planet or station == a.dest_planet
+end
+
+-- Pure: is the ship's CURRENT schedule stop one of THIS assignment's OWN route
+-- stations? Resolves the station at `records[current]` and defers to
+-- `station_is_ours`. Shared by BOTH `note_progress` and `maybe_reclamp` so neither
+-- re-points the single hub request off a foreign interrupt stop -- both key cargo
+-- by the numeric `current` index, so a spliced refuel/rearm record that shifts
+-- `current` onto a station the mod never wrote would otherwise re-point to the
+-- WRONG leg's cargo. A nil records / current / station -> NOT ours (defensive --
+-- never act blindly). Pure over `a` + the records list + the index.
+function watchdog.current_is_ours(a, records, current)
+  local rec = records and current and records[current]
+  return watchdog.station_is_ours(a, rec and rec.station)
 end
 
 -- Order-stable serialization of a schedule's records (docs/api-notes.md §4).
@@ -279,30 +373,49 @@ function watchdog.player_edited(a, platform)
   return live ~= a.schedule_signature
 end
 
--- [provisional] Is the platform's cargo hold empty (native unload done)? Confirm
--- the hub inventory accessor in-engine. False if it can't be read.
-function watchdog.hold_empty(platform)
+-- [provisional] Per-(item,quality) hub cargo count, bound to this platform.
+-- Returns a `count_fn(key) -> count` where `key` is a manifest cargo qkey: this is
+-- an engine-read seam, so it DECODES the qkey and reads
+-- `hub.get_item_count(name, quality)` (api-notes §1, Task 11 #4d) -- normal- and
+-- uncommon-quality iron count independently, so completion/abort test the exact
+-- variant the mod shipped. A bare item-name key decodes to "normal". Returns nil
+-- when the hub can't be read (then completion never fires -- we don't "complete" a
+-- ship whose hold we can't read). Used by `completed`/`delivery_stalled` to test
+-- the MANIFEST cargo specifically rather than the whole hold. Confirm the two-arg
+-- `get_item_count(name, quality)` in-engine.
+function watchdog.hub_counter(platform)
   local hub = platform and platform.valid and platform.hub
-  if not (hub and hub.valid and hub.get_inventory) then
-    return false
+  if not (hub and hub.valid and hub.get_item_count) then
+    return nil
   end
-  local inv = hub.get_inventory(defines.inventory.hub_main)
-  return inv ~= nil and inv.is_empty()
+  return function(key)
+    local name, quality = qkey.qparse(key)
+    return hub.get_item_count(name, quality)
+  end
 end
 
 -- [provisional] Has the ship delivered and finished its mod route? v1 definition:
--- the final stop is its current destination, it is no longer moving, AND its hold
--- is empty (native pull done). `schedule.current` is the index of the current
--- DESTINATION (the stop the ship is travelling toward OR parked at), NOT an
--- arrival flag, so `current >= #records` alone can't mean "arrived at the last
--- stop". The empty-hold check is the real completion guard (a ship in transit to
--- the final stop still holds its cargo, so it won't read empty until the native
--- drop finishes); the `speed == 0` check additionally rejects the edge where the
--- hold is already empty WHILE still travelling to the final stop (e.g. a return
--- leg that failed to load) -- a parked ship has zero speed. `speed` degrades
--- safely: an unreadable (nil) speed falls back to the empty-hold guard alone.
--- Confirm `schedule.current`, the hold accessor, and `speed` in-engine.
-function watchdog.completed(platform, _a)
+-- the final stop is its current destination, it is no longer moving, AND its hub
+-- no longer holds any of OUR cargo (the manifest + return manifest -- NOT the whole
+-- hold, which also carries the platform's own fuel/ammo). `schedule.current` is the
+-- index of the current DESTINATION (the stop the ship is travelling toward OR
+-- parked at), NOT an arrival flag, so `current >= #records` alone can't mean
+-- "arrived at the last stop". The manifest-delivered check is the real completion
+-- guard (a ship in transit to the final stop still holds its cargo, so it won't read
+-- delivered until the native drop finishes); the `speed == 0` check additionally
+-- rejects the edge where the cargo is already gone WHILE still travelling to the
+-- final stop (e.g. a return leg that failed to load) -- a parked ship has zero
+-- speed. `speed` degrades safely: an unreadable (nil) speed falls back to the
+-- manifest-delivered guard alone. Confirm `schedule.current`, `get_item_count`, and
+-- `speed` in-engine.
+-- Shared "arrived + parked at the final stop" gate for `completed` and
+-- `delivery_stalled`: the final stop is the active destination
+-- (`schedule.current >= #records`) AND the ship is no longer moving
+-- (`speed == 0`). Engine-read-thin over `platform.schedule`/`speed`. `speed`
+-- degrades safely: an unreadable (nil) speed reads as 0 (parked), so the caller
+-- falls through to its own cargo guard. Returns false on any unreadable schedule
+-- seam (never act blindly).
+function watchdog.parked_at_last_stop(platform)
   local sched = platform and platform.valid and platform.schedule
   local records = sched and sched.records
   if not (records and #records > 0) then
@@ -311,10 +424,18 @@ function watchdog.completed(platform, _a)
   if (sched.current or 0) < #records then
     return false -- the final stop is not yet the active destination
   end
-  if (platform.speed or 0) ~= 0 then
-    return false -- still moving toward the final stop, not parked + unloaded
+  return (platform.speed or 0) == 0 -- parked at the final stop, not still moving
+end
+
+function watchdog.completed(platform, a)
+  if not watchdog.parked_at_last_stop(platform) then
+    return false -- not yet arrived + parked at the final stop
   end
-  return watchdog.hold_empty(platform)
+  local count_fn = watchdog.hub_counter(platform)
+  if not count_fn then
+    return false -- can't read the hold -> never complete blindly
+  end
+  return watchdog.manifest_delivered(count_fn, a and a.manifest, a and a.return_manifest)
 end
 
 -- [provisional] Is the platform idle with no active mod schedule? Used to recover
@@ -339,6 +460,64 @@ function watchdog.load_impossible(a, platform)
     and a.manifest ~= nil and next(a.manifest) == nil
 end
 
+-- [provisional] The DROP node's RAW native request as a `request_fn(item) ->
+-- max(0, requested - on_hand)`, for the delivery-impossible abort. CRITICAL: this
+-- is the RAW pad request EXCLUDING fleet inbound -- deliberately NOT
+-- `demand.open_demand` (which nets out this very assignment's `inbound_commit`, so
+-- a destination's *open* demand reads ~0 for the whole unload window and would
+-- abort healthy deliveries). The raw request also self-guards a mid-pull: while
+-- the pad is still draining cargo, `on_hand` is low so raw unmet stays > 0. The
+-- drop node is the DESTINATION for a one-way trip (last stop = the unload) and the
+-- SOURCE for a two-way return drop (last stop = the return drop), mirroring
+-- `stop_request`'s forward/return split. Reuses the `demand.reader` §3 seam and the
+-- pure `compute_unmet` (inbound forced to 0 = raw). Returns nil when the node or
+-- its request can't be read, so the caller never aborts blindly.
+--
+-- QUALITY (Task 11, #4d): `demand.reader` already keys each row by
+-- `qkey(name, quality)` (Task 9 -- the per-quality pad-request read decodes there,
+-- the engine-read seam), so `raw` is qkey-keyed. `delivery_impossible` calls this
+-- `request_fn` with the manifest's cargo qkeys, so the lookup is qkey-to-qkey: the
+-- raw request resolves per (name, quality) WITHOUT a second decode here (normal-
+-- and uncommon-quality iron net independently).
+function watchdog.dest_request_fn(a)
+  local two_way = a and a.return_manifest and next(a.return_manifest) ~= nil
+  local node_id = two_way and a.source or (a and a.dest)
+  local node = storage and storage.nodes and storage.nodes[node_id]
+  if not node then
+    return nil
+  end
+  local raw = {}
+  for _, row in ipairs(demand.reader(node) or {}) do
+    raw[row.item] = demand.compute_unmet(row.requested, row.on_hand, 0)
+  end
+  return function(key)
+    return raw[key] or 0
+  end
+end
+
+-- [provisional] Should a parked, no-longer-wanted cargo be aborted? Gated
+-- CONCRETELY: the ship must be parked at the LAST stop (`schedule.current >=
+-- #records` AND `speed == 0`) -- the same "arrived + stopped" gate as `completed`,
+-- which the run loop checks FIRST so a genuine pad-pull COMPLETES (idles, no
+-- residue) instead. Only then does the pure `delivery_impossible` decide, over the
+-- drop node's RAW request (`dest_request_fn`) and the live hub count
+-- (`hub_counter`). The `current >= #records` gate scopes this to the ONE-WAY
+-- delivery (last stop) and the two-way RETURN drop (last stop), NOT a two-way
+-- forward turnaround (stop 2 of 3) -- that case waits its per-stop timeout, residue
+-- self-heals at the stop-3 drop. Returns false on any unreadable seam (never abort
+-- blindly). Confirm `schedule.current` / `speed` / the pad request read in-engine.
+function watchdog.delivery_stalled(a, platform)
+  if not watchdog.parked_at_last_stop(platform) then
+    return false -- not yet arrived + parked at the final stop
+  end
+  local count_fn = watchdog.hub_counter(platform)
+  local request_fn = watchdog.dest_request_fn(a)
+  if not (count_fn and request_fn) then
+    return false -- can't read the hold or the drop request -> never abort blindly
+  end
+  return watchdog.delivery_impossible(a, request_fn, count_fn)
+end
+
 -- [provisional] Re-issue the active stop's cargo request as `manifest` (scoped to
 -- the `import_from` planet). Cargo is the hub's requester logistic request
 -- (api-notes.md §1), NOT a schedule-record field, so the re-clamp lowers it and
@@ -359,6 +538,17 @@ function watchdog.note_progress(a, platform, tick)
   local sched = platform and platform.valid and platform.schedule
   local current = sched and sched.current
   if not watchdog.advanced(a.progress_index, current) then
+    return
+  end
+  -- Interrupt guard: only re-point/commit on a stop that is one of OUR route
+  -- stations. A refuel/rearm INTERRUPT can splice in its own record(s) (the
+  -- simplified schedule the mod wrote excludes interrupts), shifting `current` onto
+  -- a station we never wrote; re-pointing the single hub request off that foreign
+  -- index (stop_request keys by index) would request the wrong leg's cargo. Skip
+  -- WITHOUT committing progress, so the advance is re-detected and handled once the
+  -- ship returns to a route stop. (Interrupt behavior still-to-confirm in-engine --
+  -- docs/api-notes.md §1; defensive hygiene regardless.)
+  if not watchdog.current_is_ours(a, sched.records, current) then
     return
   end
   -- Re-point the single global hub request to whatever this stop should load
@@ -474,6 +664,14 @@ end
 function watchdog.maybe_reclamp(a, platform, id)
   local sched = platform and platform.valid and platform.schedule
   local current = sched and sched.current
+  -- Interrupt guard (same as note_progress): re-clamp only when `current` is one of
+  -- OUR route stops. A refuel/rearm interrupt can splice in its own record(s) and
+  -- shift `current` onto a station the mod never wrote; the `current == 1`/`== 2`
+  -- branches below key the re-clamp off that numeric index, so acting on a foreign
+  -- stop would re-clamp the WRONG leg's cargo against the wrong reserve.
+  if not watchdog.current_is_ours(a, sched and sched.records, current) then
+    return
+  end
   if current == 1 then
     -- forward leg: source surplus honors the SOURCE reserve
     reclamp_leg(a, platform, id, a.source, a.source_planet, a.manifest, function(m)
@@ -545,6 +743,19 @@ function watchdog.run(tick)
           -- so the next dispatch re-evaluates (and won't re-dispatch while dry).
           state.debug_log("watchdog abort a#" .. tostring(id)
             .. ": source can't supply the forward manifest -- nothing to load")
+          watchdog.free_assignment(id, nil, fleet.IDLE, tick)
+        elseif watchdog.delivery_stalled(a, platform) then
+          -- Parked at the last stop, still holding manifest cargo, and the drop
+          -- planet's RAW request for everything it holds is 0 -- the destination no
+          -- longer wants this cargo (the request was removed/satisfied mid-flight).
+          -- `completed` was tested first, so a genuine pad-pull already won; here
+          -- the pad simply will not pull. Don't loop or sit out the no-progress
+          -- deadline: free the ship to idle (silent). By definition the dest's raw
+          -- demand is already 0, so there is nothing to "re-open" -- the only residue
+          -- is the leftover cargo aboard the idled ship (bounded; reused/cleared on
+          -- the next dispatch).
+          state.debug_log("watchdog abort a#" .. tostring(id)
+            .. ": destination no longer requests the delivered cargo -- idling (residue aboard)")
           watchdog.free_assignment(id, nil, fleet.IDLE, tick)
         end
       end

@@ -24,6 +24,7 @@
 
 local state = require("scripts.state")
 local fleet = require("scripts.fleet")
+local qkey = require("scripts.qkey")
 
 local viewmodel = {}
 
@@ -224,32 +225,45 @@ end
 -- ---------------------------------------------------------------------------
 
 -- Build the "This planet now" readout for a single trade node from a plain
--- `world` snapshot:
+-- `world` snapshot. Each input row is keyed by the compound cargo `qkey`
+-- (`item@quality`):
 --   world = {
---     demand   = { { item, unmet, priority }, ... },  -- this node's open demand
---     surplus  = { { item, qty }, ... },              -- guarded exportable surplus
---     inbound  = { { item, qty }, ... } }             -- fleet cargo en route here
--- Returns the same three lists, each in a STABLE order so the panel renders
--- identically on every client: demand by priority desc, then unmet desc, then
--- item asc (matching demand.build_open); surplus and inbound by item asc. Pure:
--- no `storage`, no `game`; the input is not mutated.
+--     demand   = { { item = <qkey>, unmet, priority }, ... },  -- open demand
+--     surplus  = { { item = <qkey>, qty }, ... },              -- exportable
+--     inbound  = { { item = <qkey>, qty }, ... } }             -- fleet en route
+-- Each output row DECODES the qkey into a bare `item` NAME + `quality` so the
+-- dumb Trade-tab view shows real items ("iron-plate", not "iron-plate@normal").
+-- Returns the three lists in a STABLE order so the panel renders identically on
+-- every client: demand by priority desc, then unmet desc, then name asc, quality
+-- asc; surplus and inbound by name asc, quality asc. A bare item-name key
+-- (legacy / quality-agnostic) decodes to the same name at "normal" quality. Pure:
+-- no `storage`, no `game`; the input is not mutated (qparse is plain string math).
 function viewmodel.build_node_readout(world)
   world = world or {}
+
+  -- name asc, then quality asc -- a deterministic order independent of the qkey's
+  -- "@" byte position, so two qualities of one item always sort adjacent.
+  local function by_name(a, b)
+    if a.item ~= b.item then
+      return a.item < b.item
+    end
+    return a.quality < b.quality
+  end
 
   local function by_item(list)
     local out = {}
     for _, r in ipairs(list or {}) do
-      out[#out + 1] = { item = r.item, qty = r.qty }
+      local name, quality = qkey.qparse(r.item)
+      out[#out + 1] = { item = name, quality = quality, qty = r.qty }
     end
-    table.sort(out, function(a, b)
-      return tostring(a.item) < tostring(b.item)
-    end)
+    table.sort(out, by_name)
     return out
   end
 
   local demand = {}
   for _, d in ipairs(world.demand or {}) do
-    demand[#demand + 1] = { item = d.item, unmet = d.unmet, priority = d.priority or 0 }
+    local name, quality = qkey.qparse(d.item)
+    demand[#demand + 1] = { item = name, quality = quality, unmet = d.unmet, priority = d.priority or 0 }
   end
   table.sort(demand, function(a, b)
     if a.priority ~= b.priority then
@@ -258,7 +272,7 @@ function viewmodel.build_node_readout(world)
     if a.unmet ~= b.unmet then
       return a.unmet > b.unmet
     end
-    return tostring(a.item) < tostring(b.item)
+    return by_name(a, b)
   end)
 
   return {
@@ -286,8 +300,22 @@ local function norm(s)
   return s
 end
 
+-- Does `manifest` (a `{ [qkey] = qty }` cargo map) carry the bare item NAME
+-- `item`? The filter the player types is a bare name, but the manifest is keyed
+-- by `qkey(item, quality)`, so a direct `manifest[item]` lookup would miss every
+-- quality variant. Decode each key to its name so `iron-plate` matches
+-- `iron-plate@normal` (and every other quality of iron-plate). A bare item-name
+-- key (legacy) decodes to itself, so old manifests still match.
 local function manifest_has(manifest, item)
-  return manifest ~= nil and manifest[item] ~= nil
+  if manifest == nil then
+    return false
+  end
+  for key in pairs(manifest) do
+    if qkey.qparse(key) == item then
+      return true
+    end
+  end
+  return false
 end
 
 -- Narrow a built view model by an optional `{ planet, item, state }` filter.
@@ -338,7 +366,10 @@ function viewmodel.apply_filters(view, filters)
     if planet and w.dest_planet ~= planet then
       ok = false
     end
-    if ok and item and w.item ~= item then
+    -- `w.item` is a cargo qkey; decode to its bare name so a free-text `iron-plate`
+    -- filter matches a waiting `iron-plate@normal` row (a bare name decodes to
+    -- itself).
+    if ok and item and qkey.qparse(w.item) ~= item then
       ok = false
     end
     if ok then
@@ -440,9 +471,14 @@ function viewmodel.gather(tick)
       for _, sid in ipairs(state.sorted_keys(snapshot.nodes)) do
         if sid ~= did then
           local snode = snapshot.nodes[sid]
+          -- `d.item` is a cargo qkey; the stock read + committed surplus are
+          -- qkey-keyed (per-quality), but the reserve floor is keyed by bare item
+          -- NAME (a reserve applies to ALL qualities -- same rule as stock.surplus
+          -- / demand.build_open), so decode the qkey before reserves.reserve.
+          local sname = qkey.qparse(d.item)
           local com = (committed[sid] and committed[sid][d.item]) or 0
           local raw = stock.stock_count(snode.node, d.item)
-            - reserves.reserve(snode.node, d.item) - com
+            - reserves.reserve(snode.node, sname) - com
           if raw < 0 then
             raw = 0
           end

@@ -17,6 +17,7 @@
 local viewmodel = require("scripts.viewmodel")
 local fleet = require("scripts.fleet")
 local registry = require("scripts.registry")
+local qkey = require("scripts.qkey")
 
 local monitor = {}
 
@@ -41,7 +42,10 @@ local STATE_OPTIONS = { "any", fleet.IDLE, fleet.ENROUTE, fleet.LOADING, fleet.U
 -- small render helpers
 -- ---------------------------------------------------------------------------
 
--- Render a manifest table { [item]=qty } as a short stable string.
+-- Render a manifest table { [qkey]=qty } as a short stable string. Each cargo
+-- key is a compound `qkey(item, quality)`; `qkey.label` decodes it for display so
+-- the panel shows "iron-plate x50" (or "iron-plate (uncommon) x50"), never the
+-- raw "iron-plate@normal x50". Sorted by qkey for a stable, deterministic order.
 local function manifest_caption(manifest)
   if not manifest then
     return "-"
@@ -54,7 +58,7 @@ local function manifest_caption(manifest)
   end
   table.sort(keys)
   for _, k in ipairs(keys) do
-    parts[#parts + 1] = k .. " x" .. tostring(manifest[k])
+    parts[#parts + 1] = qkey.label(k) .. " x" .. tostring(manifest[k])
   end
   if #parts == 0 then
     return "-"
@@ -165,7 +169,8 @@ local function render_body(body, view)
     local t = body.add({ type = "table", column_count = 4 })
     for _, w in ipairs(view.waiting) do
       t.add({ type = "label", caption = tostring(w.dest_planet) })
-      t.add({ type = "label", caption = tostring(w.item) })
+      -- `w.item` is a cargo qkey; decode it for display (see manifest_caption).
+      t.add({ type = "label", caption = qkey.label(w.item) })
       t.add({ type = "label", caption = "x" .. tostring(w.unmet) })
       t.add({ type = "label", caption = reason_caption(w.reason) })
     end
