@@ -859,6 +859,105 @@ describe("dispatcher.pick_ship -- eligibility, determinism, pin override", funct
     "pinned ship busy -> falls back to lowest-id eligible")
 end)
 
+describe("dispatcher.pick_ship -- prefers a ship already at the source (no deadhead)", function()
+  local function ship(id, planet)
+    return { id = id, planet = planet, capacity = 1000,
+      entry = { enrolled = true, state = fleet.IDLE } }
+  end
+  -- a HIGHER-id ship parked at the source beats a lower-id ship elsewhere
+  assert_eq(dispatcher.pick_ship({ ship(2, "vulcanus"), ship(9, "nauvis") }, {}, "nauvis", "vulcanus").id, 9,
+    "at-source ship (id 9) beats lower-id ship elsewhere (id 2)")
+  -- none at the source -> lowest id (unchanged fallback)
+  assert_eq(dispatcher.pick_ship({ ship(5, "gleba"), ship(2, "fulgora") }, {}, "nauvis", "vulcanus").id, 2,
+    "none at source -> lowest id")
+  -- several at the source -> lowest id AMONG them
+  assert_eq(dispatcher.pick_ship({ ship(8, "nauvis"), ship(3, "nauvis"), ship(1, "vulcanus") }, {},
+    "nauvis", "vulcanus").id, 3, "lowest id among the at-source ships")
+  -- an in-transit ship (planet=nil) gets no preference
+  assert_eq(dispatcher.pick_ship({ ship(2, nil), ship(7, "nauvis") }, {}, "nauvis", "vulcanus").id, 7,
+    "in-transit ship (nil planet) loses to the at-source ship")
+  -- pin still overrides the co-location preference
+  assert_eq(dispatcher.pick_ship({ ship(2, "vulcanus"), ship(9, "nauvis") }, {}, "nauvis", "vulcanus", 2).id, 2,
+    "pin overrides the at-source preference")
+end)
+
+describe("dispatcher.covers -- reciprocity test for direction-aware routing", function()
+  local snapshot = { nodes = {
+    [1] = { id = 1, demand = { { item = "X", unmet = 100 } },
+      surplus = { ["Y"] = 50 }, unmet_by_item = { ["X"] = 100 } },
+    [2] = { id = 2, demand = { { item = "Y", unmet = 80 } },
+      surplus = { ["X"] = 200 }, unmet_by_item = { ["Y"] = 80 } },
+  } }
+  assert_eq(dispatcher.covers(snapshot, 2, 1), true, "node 2's X surplus covers node 1's X demand")
+  assert_eq(dispatcher.covers(snapshot, 1, 2), true, "node 1's Y surplus covers node 2's Y demand (reciprocal)")
+  -- guard-suppressed: a node importing the item can't be a source for it
+  local imp = { nodes = {
+    [1] = { id = 1, demand = { { item = "X", unmet = 100 } }, surplus = {}, unmet_by_item = { ["X"] = 100 } },
+    [2] = { id = 2, demand = {}, surplus = { ["X"] = 200 }, unmet_by_item = {} },
+  } }
+  assert_eq(dispatcher.covers(imp, 2, 1), true, "2 covers 1")
+  assert_eq(dispatcher.covers(imp, 1, 2), false, "1 has nothing 2 demands -> not reciprocal")
+end)
+
+describe("dispatcher.plan -- direction flip: load where the idle ship sits (no deadhead)", function()
+  -- reciprocal trade: A(id1) wants X (B has it) + has Y; B(id2) wants Y + has X.
+  -- The ONLY idle ship sits at A. best_source picks B->A (which would deadhead the
+  -- ship A->B empty); the flip starts the route at A so the first leg carries Y.
+  local snapshot = {
+    two_way = true,
+    nodes = {
+      [1] = { id = 1, planet = "aaa", demand = { { item = "X", unmet = 100, stack_size = 50 } },
+        surplus = { ["Y"] = 200 }, unmet_by_item = { ["X"] = 100 } },
+      [2] = { id = 2, planet = "bbb", demand = { { item = "Y", unmet = 100, stack_size = 50 } },
+        surplus = { ["X"] = 200 }, unmet_by_item = { ["Y"] = 100 } },
+    },
+    ships = { { id = 1, capacity = 1000, planet = "aaa", entry = { enrolled = true, state = fleet.IDLE } } },
+  }
+  local plans = dispatcher.plan(snapshot)
+  assert_eq(#plans, 1, "one assignment planned")
+  assert_eq(plans[1].source_planet, "aaa", "route flipped to START at the ship's planet (A) -- no deadhead")
+  assert_eq(plans[1].dest_planet, "bbb", "delivers to B")
+  assert_eq(plans[1].manifest, { ["Y"] = 100 }, "first leg carries Y (what B wants), loaded at A where the ship is")
+  assert_eq(plans[1].return_manifest, { ["X"] = 100 }, "return leg brings X back to A (what A wants)")
+end)
+
+describe("dispatcher.plan -- one-way trade does NOT flip (source stays fixed)", function()
+  -- A(id1) wants X (only B has it); B wants nothing back. The idle ship sits at A,
+  -- but with no reciprocal cargo the route can't flip -- the ship deadheads to B.
+  local snapshot = {
+    two_way = true,
+    nodes = {
+      [1] = { id = 1, planet = "aaa", demand = { { item = "X", unmet = 100, stack_size = 50 } },
+        surplus = {}, unmet_by_item = { ["X"] = 100 } },
+      [2] = { id = 2, planet = "bbb", demand = {}, surplus = { ["X"] = 200 }, unmet_by_item = {} },
+    },
+    ships = { { id = 1, capacity = 1000, planet = "aaa", entry = { enrolled = true, state = fleet.IDLE } } },
+  }
+  local plans = dispatcher.plan(snapshot)
+  assert_eq(#plans, 1, "one assignment planned")
+  assert_eq(plans[1].source_planet, "bbb", "no flip: source stays B (the only planet with the surplus)")
+  assert_eq(plans[1].dest_planet, "aaa", "delivers X to A")
+  assert_eq(plans[1].manifest, { ["X"] = 100 }, "carries X")
+  assert_eq(plans[1].return_manifest, nil, "no reciprocal cargo -> no return leg")
+end)
+
+describe("dispatcher.plan -- no flip when the ship is already at the source", function()
+  local snapshot = {
+    two_way = true,
+    nodes = {
+      [1] = { id = 1, planet = "aaa", demand = { { item = "X", unmet = 100, stack_size = 50 } },
+        surplus = { ["Y"] = 200 }, unmet_by_item = { ["X"] = 100 } },
+      [2] = { id = 2, planet = "bbb", demand = { { item = "Y", unmet = 100, stack_size = 50 } },
+        surplus = { ["X"] = 200 }, unmet_by_item = { ["Y"] = 100 } },
+    },
+    ships = { { id = 1, capacity = 1000, planet = "bbb", entry = { enrolled = true, state = fleet.IDLE } } },
+  }
+  local plans = dispatcher.plan(snapshot)
+  assert_eq(#plans, 1, "one assignment planned")
+  assert_eq(plans[1].source_planet, "bbb", "ship already at B (the source) -> normal direction, no flip")
+  assert_eq(plans[1].manifest, { ["X"] = 100 }, "loads X at B (no deadhead either way)")
+end)
+
 describe("dispatcher.plan -- wide load, re-export, deterministic assignment", function()
   -- one source has both items the dest needs; ample-capacity ship loads WIDE.
   local snapshot = {

@@ -279,19 +279,42 @@ function dispatcher.best_source(snapshot, dest)
   return best
 end
 
+-- Pure: does node `source_id` hold ANY exportable surplus for an item node
+-- `dest_id` still demands? The reciprocity test for direction-aware routing:
+-- `covers(snapshot, dest_id, src_id)` true means the dest could itself act as a
+-- source for the src, so the trade is reciprocal and the route may be flipped to
+-- start at whichever planet an idle ship sits on. Pure over the snapshot.
+function dispatcher.covers(snapshot, source_id, dest_id)
+  local source = snapshot.nodes and snapshot.nodes[source_id]
+  local dest = snapshot.nodes and snapshot.nodes[dest_id]
+  if not (source and dest and dest.demand) then
+    return false
+  end
+  for _, d in ipairs(dest.demand) do
+    if dispatcher.exportable(source, d.item) > 0 then
+      return true
+    end
+  end
+  return false
+end
+
 -- ---------------------------------------------------------------------------
 -- pure ship selection
 -- ---------------------------------------------------------------------------
 
 -- Choose an idle eligible ship for the route source_planet -> dest_planet. A
 -- manual `pin` (a fleet key set on the Trade tab, Task 9) overrides auto-pick
--- when that ship is free and eligible; otherwise the lowest-id eligible,
--- not-yet-used ship is taken (deterministic). Returns the ship entry from `ships`
--- or nil (caller then lets the demand wait for the next tick). Pure over plain
--- ship tables.
+-- when that ship is free and eligible; otherwise auto-pick PREFERS a ship already
+-- parked at `source_planet` (its `planet` field, stamped by build_snapshot) so the
+-- first leg loads immediately instead of flying there empty (no deadhead), then
+-- falls back to the lowest-id eligible ship (deterministic). Returns the ship
+-- entry from `ships` or nil (caller then lets the demand wait for the next tick).
+-- Pure over plain ship tables: a ship with no `planet` (in transit, or the test
+-- runner) simply gets no co-location preference, so behavior matches the old
+-- lowest-id pick.
 --
--- `ships` is a list of { id, entry, capacity }; `used` is a set of ship ids
--- already committed this tick.
+-- `ships` is a list of { id, entry, capacity, planet }; `used` is a set of ship
+-- ids already committed this tick.
 function dispatcher.pick_ship(ships, used, source_planet, dest_planet, pin)
   local function eligible(s)
     return not used[s.id] and fleet.idle_eligible(s.entry, source_planet, dest_planet)
@@ -305,10 +328,17 @@ function dispatcher.pick_ship(ships, used, source_planet, dest_planet, pin)
     end
   end
 
-  local best = nil
+  -- Prefer a ship already at the source (at_source beats elsewhere regardless of
+  -- id); within the same co-location class, lowest id wins (stable + deterministic).
+  local best, best_at = nil, false
   for _, s in ipairs(ships) do
-    if eligible(s) and (best == nil or s.id < best.id) then
-      best = s
+    if eligible(s) then
+      local at = (s.planet ~= nil and s.planet == source_planet)
+      if best == nil
+        or (at and not best_at)
+        or (at == best_at and s.id < best.id) then
+        best, best_at = s, at
+      end
     end
   end
   return best
@@ -379,7 +409,8 @@ end
 --                           surplus = { [qkey]=qty },        -- working (mutated)
 --                           unmet_by_item = { [qkey]=qty },  -- guard input
 --                           pin = <fleet key>|nil } },       -- Trade-tab "Preferred ship"
---   ships = { { id, entry, capacity }, ... },
+--   ships = { { id, entry, capacity, planet }, ... },  -- planet: where the ship
+--                           is parked now (nil in transit), for no-deadhead pick
 -- }
 --
 -- Returns a list of plans: { source_id, source_planet, dest_id, dest_planet,
@@ -409,12 +440,33 @@ function dispatcher.plan(snapshot)
         -- only this force's ships may fly the route (force isolation)
         local route_ships = dispatcher.ships_for_force(snapshot.ships, dest.force)
         local ship = dispatcher.pick_ship(route_ships, used, src.planet, dest.planet, dest.pin)
+
+        -- Direction-aware (no-deadhead) routing. best_source + the iteration order
+        -- pick src->dest, and the ship flies to the SOURCE first (empty). If the
+        -- chosen ship is NOT already at the source but the trade is RECIPROCAL (the
+        -- dest holds exportable surplus the source demands) and an idle ship sits at
+        -- the DEST, FLIP the route to start at that ship's planet: same two planets,
+        -- same goods, reversed leg order -- but the first leg now carries cargo
+        -- instead of deadheading. A node pin forces a specific ship, so never flip
+        -- under a pin. The flip keeps within-tick bookkeeping correct: it just
+        -- relabels which node is source vs dest for this assignment.
+        local s_id, s_planet, d_id, d_planet = src.id, src.planet, dest_id, dest.planet
+        if ship and dest.pin == nil and ship.planet ~= src.planet
+          and dispatcher.covers(snapshot, dest_id, src.id) then
+          local at_dest = dispatcher.pick_ship(route_ships, used, dest.planet, src.planet, nil)
+          if at_dest and at_dest.planet == dest.planet then
+            ship = at_dest
+            s_id, s_planet, d_id, d_planet = dest_id, dest.planet, src.id, src.planet
+          end
+        end
+
         if ship then
-          local source = snapshot.nodes[src.id]
-          -- candidate items in the destination's priority order, each capped by
-          -- the source's guarded exportable surplus.
+          local source = snapshot.nodes[s_id]
+          local dnode = snapshot.nodes[d_id]
+          -- candidate items in the (chosen-direction) destination's priority order,
+          -- each capped by the source's guarded exportable surplus.
           local items = {}
-          for _, d in ipairs(dest.demand) do
+          for _, d in ipairs(dnode.demand) do
             local avail = dispatcher.exportable(source, d.item)
             if avail > 0 then
               -- carry stack_size through (set by build_snapshot) so Task 7's
@@ -425,7 +477,7 @@ function dispatcher.plan(snapshot)
           end
 
           local manifest = schedule.build_manifest(items, ship.capacity)
-          local rkey = dispatcher.route_key(src.id, dest_id)
+          local rkey = dispatcher.route_key(s_id, d_id)
           local within_global = (max_global <= 0)
             or (active_global + committed_global < max_global)
           local within_route = (max_route <= 0)
@@ -443,7 +495,7 @@ function dispatcher.plan(snapshot)
             -- credit the DEST node for the forward manifest so a later
             -- destination this tick can't re-ship what's already inbound here, and
             -- (when its unmet hits 0) close the export-re-open hole on that item.
-            credit_inbound(dest, manifest)
+            credit_inbound(dnode, manifest)
 
             -- Two-way return leg: the empty ship loads wide at the destination
             -- on its way home with whatever the source still needs. Same guard,
@@ -451,10 +503,10 @@ function dispatcher.plan(snapshot)
             -- later destination this tick can't double-claim it.
             local return_manifest = nil
             if two_way then
-              local ret = dispatcher.return_manifest(snapshot, src.id, dest_id, ship.capacity)
+              local ret = dispatcher.return_manifest(snapshot, s_id, d_id, ship.capacity)
               if next(ret) ~= nil then
                 for item, qty in pairs(ret) do
-                  dest.surplus[item] = (dest.surplus[item] or 0) - qty
+                  dnode.surplus[item] = (dnode.surplus[item] or 0) - qty
                 end
                 -- demand-side bookkeeping for the return leg (mirror of
                 -- demand.inbound_for): the return cargo is delivered to the SOURCE
@@ -467,13 +519,13 @@ function dispatcher.plan(snapshot)
             end
 
             plans[#plans + 1] = {
-              source_id = src.id,
-              source_planet = src.planet,
-              dest_id = dest_id,
-              dest_planet = dest.planet,
+              source_id = s_id,
+              source_planet = s_planet,
+              dest_id = d_id,
+              dest_planet = d_planet,
               -- The DEST node's force key, carried onto the assignment in commit so
               -- the Monitor can scope the shipment to the receiving force.
-              dest_force = dest.force,
+              dest_force = dnode.force,
               ship_id = ship.id,
               ship = ship,
               manifest = manifest,
@@ -551,6 +603,18 @@ function dispatcher.planet_name(node)
     return nil
   end
   return s and s.name or nil
+end
+
+-- [provisional] The planet a platform is currently parked at, or nil while it is
+-- travelling. `LuaSpacePlatform.space_location` is the space-location prototype it
+-- is stopped at (nil in transit), whose `.name` matches the planet/surface name
+-- the dispatcher routes on (planets are space locations of the same name). Used
+-- ONLY as the no-deadhead preference in ship selection, so a nil (in-transit, or
+-- unreadable) location simply yields no preference -- never a wrong route. Confirm
+-- `space_location` (+ its `.name`) in-engine before flipping the api-notes seam.
+function dispatcher.ship_planet(platform)
+  local loc = platform and platform.valid and platform.space_location
+  return loc and loc.name or nil
 end
 
 -- [provisional] A platform's cargo capacity as a SLOT BUDGET: the number of slots
@@ -692,6 +756,7 @@ function dispatcher.build_snapshot(_tick)
         entry = entry,
         capacity = dispatcher.capacity_of(entry),
         force = dispatcher.force_key(platform.force),
+        planet = dispatcher.ship_planet(platform), -- no-deadhead ship pick
       }
     end
   end

@@ -247,6 +247,17 @@ know which stop the ship is at and whether its hold has drained:
   `get_inventory(defines.inventory.hub_main)` is the cargo hold and `#inv` is its
   slot count in-engine.]**
 
+- **Platform current planet — no-deadhead ship pick:**
+  `platform.space_location` is the `LuaSpaceLocationPrototype` the platform is
+  stopped at (nil while travelling); its `.name` matches the planet/surface name
+  the dispatcher routes on (a planet is a space location of the same name).
+  `dispatcher.ship_planet(platform)` reads it and stamps `ship.planet` on the
+  snapshot, so `pick_ship` can prefer an idle ship already AT the source planet and
+  `plan` can flip a reciprocal route to start where the ship sits (avoiding an empty
+  first leg). Read-only and advisory: a nil/unreadable location simply yields no
+  preference (never a wrong route). **[provisional — confirm `space_location` and
+  its `.name` on a parked platform in-engine.]**
+
 > **Caveat:** these are READ-only progress checks; the only WRITE the watchdog
 > makes is lowering a load stop's request on re-clamp (via the hub logistic
 > request) — never an `insert`.
