@@ -2381,6 +2381,77 @@ describe("state.sorted_pairs: custom comparator path", function()
   assert_eq(state.sorted_keys(tbl, desc), { 3, 2, 1 }, "sorted_keys honors the custom comparator")
 end)
 
+describe("state.migrate_fleet_keys: re-keys fleet + rewrites assignment .ship", function()
+  local state = require("scripts.state")
+  -- v2 migration is PURE: a stub key_of maps each entry to its new force-qualified
+  -- key, the fleet table is re-keyed, and any assignment pointing at the old key is
+  -- rewritten to the new one.
+  local fleet = {
+    [42] = { platform = "p42", enrolled = true },
+    [7]  = { platform = "p7", enrolled = false },
+  }
+  local assignments = {
+    [100] = { ship = 42, source = 1, dest = 2 },
+    [101] = { ship = 7, source = 3, dest = 4 },
+  }
+  local key_of = function(entry)
+    if entry.platform == "p42" then return "1/42" end
+    if entry.platform == "p7" then return "1/7" end
+    return nil
+  end
+  local new_fleet = state.migrate_fleet_keys(fleet, assignments, key_of)
+  assert_eq(new_fleet["1/42"], { platform = "p42", enrolled = true }, "entry re-keyed to force-qualified key")
+  assert_eq(new_fleet["1/7"], { platform = "p7", enrolled = false }, "second entry re-keyed")
+  assert_eq(new_fleet[42], nil, "old numeric key no longer present")
+  assert_eq(new_fleet[7], nil, "old numeric key (2) no longer present")
+  assert_eq(assignments[100].ship, "1/42", "assignment .ship rewritten to new key")
+  assert_eq(assignments[101].ship, "1/7", "second assignment .ship rewritten")
+end)
+
+describe("state.migrate_fleet_keys: invalid-platform entry dropped, assignment left", function()
+  local state = require("scripts.state")
+  -- An entry whose key_of returns nil (invalid platform handle, no force to resolve)
+  -- is DROPPED; its assignment keeps the old key for the watchdog's destroyed-ship
+  -- path to free. A valid sibling still migrates normally.
+  local fleet = {
+    [9]  = { platform = "ghost" },        -- invalid: key_of -> nil
+    [10] = { platform = "live", enrolled = true },
+  }
+  local assignments = {
+    [200] = { ship = 9 },   -- points at the dropped entry
+    [201] = { ship = 10 },  -- points at the surviving entry
+  }
+  local key_of = function(entry)
+    if entry.platform == "live" then return "1/10" end
+    return nil
+  end
+  local new_fleet = state.migrate_fleet_keys(fleet, assignments, key_of)
+  assert_eq(new_fleet["1/10"], { platform = "live", enrolled = true }, "valid entry migrated")
+  assert_true(new_fleet[9] == nil, "ghost entry dropped (not under old key)")
+  assert_true(next(new_fleet) ~= nil, "surviving entry present")
+  assert_eq(assignments[200].ship, 9, "dropped entry's assignment left referencing old key")
+  assert_eq(assignments[201].ship, "1/10", "surviving entry's assignment rewritten")
+end)
+
+describe("state.migrate_fleet_keys: idempotent on already-migrated input", function()
+  local state = require("scripts.state")
+  -- Running the migration again with a key_of that returns the SAME string the
+  -- entry is already keyed under leaves the fleet shape and assignments unchanged.
+  local fleet = {
+    ["1/42"] = { platform = "p42" },
+  }
+  local assignments = {
+    [300] = { ship = "1/42" },
+  }
+  local key_of = function(_entry) return "1/42" end
+  local new_fleet = state.migrate_fleet_keys(fleet, assignments, key_of)
+  assert_eq(new_fleet["1/42"], { platform = "p42" }, "entry stays under the same key")
+  local count = 0
+  for _ in pairs(new_fleet) do count = count + 1 end
+  assert_eq(count, 1, "exactly one entry (no duplication)")
+  assert_eq(assignments[300].ship, "1/42", "assignment .ship unchanged on idempotent re-run")
+end)
+
 describe("watchdog.raise_alert caps the stored backlog (oldest evicted)", function()
   local watchdog = require("scripts.watchdog")
   local saved_storage = storage

@@ -125,11 +125,17 @@ local function render_body(body, view)
   else
     local t = body.add({ type = "table", column_count = 4 })
     for _, r in ipairs(view.roster) do
+      -- The fleet key is a force-qualified string ("<force>/<index>"); a "/" is
+      -- awkward to round-trip through an element-name suffix, so carry the raw key
+      -- in the button's `tags` instead and read it back from there in the click
+      -- handler. The name keeps a stable index-only suffix purely to make the
+      -- button greppable/unique within the table.
       local btn = t.add({
         type = "button",
         name = SHIP_BTN_PREFIX .. tostring(r.ship_id),
         caption = "#" .. tostring(r.ship_id),
         tooltip = { "planet-express.monitor-recenter" },
+        tags = { pe_ship_key = r.ship_id },
       })
       btn.style.width = 60
       t.add({ type = "label", caption = r.state or "-" })
@@ -349,9 +355,11 @@ function monitor.on_gui_click(event)
     return
   end
   if el.name:sub(1, #SHIP_BTN_PREFIX) == SHIP_BTN_PREFIX then
-    local ship_id = tonumber(el.name:sub(#SHIP_BTN_PREFIX + 1))
-    if ship_id then
-      recenter_on_ship(player, ship_id)
+    -- Fleet keys are force-qualified strings now (not numeric), so read the raw
+    -- key from the button's tags rather than parsing it out of the name suffix.
+    local ship_key = el.tags and el.tags.pe_ship_key
+    if ship_key ~= nil then
+      recenter_on_ship(player, ship_key)
     end
   end
 end

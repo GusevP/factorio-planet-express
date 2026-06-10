@@ -11,15 +11,16 @@
 --     address or wall-clock -- those are non-deterministic)
 --   * a debug-log helper gated by a runtime setting
 --
--- Migrations: stubbed at 0.0.1. There is no schema change to migrate yet, so
--- `on_configuration_changed` only ensures the schema exists. The first real
--- migration goes where marked below.
+-- Migrations: `on_configuration_changed` ensures the schema exists and runs any
+-- versioned migration branch needed to bring an older save up to
+-- `SCHEMA_VERSION`. v2 re-keys `storage.fleet` to the force-qualified fleet key.
 
 local state = {}
 
 -- Current storage schema version. Bump + add a migration branch in
 -- `state.on_configuration_changed` when the shape below changes.
-state.SCHEMA_VERSION = 1
+--   v2: fleet keyed by "<force key>/<platform index>" (was bare platform index).
+state.SCHEMA_VERSION = 2
 
 -- ---------------------------------------------------------------------------
 -- storage initialization
@@ -45,15 +46,75 @@ function state.init()
   storage.next_assignment_id = storage.next_assignment_id or 1
 end
 
--- on_configuration_changed: keep schema current. STUB at 0.0.1 -- no data
--- migration needed yet, only backfill.
+-- ---------------------------------------------------------------------------
+-- migrations (pure, so they are unit-tested without an engine)
+-- ---------------------------------------------------------------------------
+
+-- v2: re-key the fleet from the bare platform index to the force-qualified fleet
+-- key. PURE: takes the live `fleet`/`assignments` tables plus a `key_of(entry)`
+-- resolver (the only engine-touching part, injected by the caller) and returns
+-- the re-keyed fleet table while rewriting each assignment's `.ship` from the old
+-- key to the new one.
+--
+-- An entry whose `key_of(entry)` returns nil (its platform handle is invalid, so
+-- no force can be resolved) is DROPPED -- it is a ghost anyway. Its assignment is
+-- left referencing the old key: the watchdog's destroyed-ship path frees it (the
+-- `fleet.get(a.ship)` lookup misses and the assignment is re-opened), so we do
+-- not need to touch it here.
+--
+-- The re-key build writes into a fresh map keyed by the new key; that is
+-- order-independent (keyed writes, no decision over the set), so plain `pairs`
+-- is correct here and introduces no nondeterminism.
+function state.migrate_fleet_keys(fleet_tbl, assignments_tbl, key_of)
+  local new_fleet = {}
+  local old_to_new = {}
+  for old_key, entry in pairs(fleet_tbl or {}) do
+    local new_key = key_of(entry)
+    if new_key ~= nil then
+      new_fleet[new_key] = entry
+      old_to_new[old_key] = new_key
+    end
+  end
+  for _, a in pairs(assignments_tbl or {}) do
+    if a and a.ship ~= nil then
+      local mapped = old_to_new[a.ship]
+      if mapped ~= nil then
+        a.ship = mapped
+      end
+    end
+  end
+  return new_fleet
+end
+
+-- on_configuration_changed: keep schema current (backfill + versioned
+-- migrations). Reads the PRE-migration version: `state.init` preserves an
+-- existing `storage.schema_version` (the `or` guard), so the `< 2` branch sees
+-- the old value before the unconditional bump below.
+--
+-- ORDERING (load-bearing): control.lua runs this BEFORE `registry.rebuild()`.
+-- The fleet re-key MUST happen first so rebuild re-adds platforms under the new
+-- key format (`registry.add_platform` -> `registry.fleet_key`) instead of
+-- duplicating the same ships under stale numeric keys. Do not reorder control.lua.
 function state.on_configuration_changed(_event)
   state.init()
 
-  -- === FIRST REAL MIGRATION GOES HERE ===
-  -- When storage shape changes, bump SCHEMA_VERSION and add:
-  --   if storage.schema_version < 2 then ... ; storage.schema_version = 2 end
-  -- For now (v1) the schema is unchanged, so there is nothing to migrate.
+  -- v2: force-qualify the fleet keys. Resolve each entry's new key from its live
+  -- platform handle (mirrors `registry.fleet_key`); an invalid handle yields nil
+  -- and the entry is dropped by `migrate_fleet_keys`. The resolver is the only
+  -- engine-touching part; the migration itself is pure.
+  if storage.schema_version < 2 then
+    local function key_of(entry)
+      local platform = entry and entry.platform
+      if not (platform and platform.valid) then
+        return nil
+      end
+      local force = platform.force
+      local fk = force and (force.index or force.name)
+      return tostring(fk) .. "/" .. tostring(platform.index)
+    end
+    storage.fleet = state.migrate_fleet_keys(storage.fleet, storage.assignments, key_of)
+  end
+
   storage.schema_version = state.SCHEMA_VERSION
 end
 

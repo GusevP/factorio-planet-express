@@ -93,6 +93,28 @@ end
 -- fleet platforms (space platforms)
 -- ---------------------------------------------------------------------------
 
+-- The bare per-force identifier stamped on a fleet entry (consumed by the
+-- Monitor's force scoping). Equals `dispatcher.force_key(force)` by construction;
+-- duplicated inline here (a one-liner) rather than requiring `dispatcher`, which
+-- would close a require cycle (dispatcher -> registry -> dispatcher). KISS: the
+-- coupling is not worth a shared module for a single `index or name`.
+local function force_key_of(force)
+  if not force then
+    return nil
+  end
+  return force.index or force.name
+end
+
+-- Force-qualified fleet key. `platform.index` is per-force on a multi-force map
+-- (not proven globally unique in 2.0), so two forces' platforms could otherwise
+-- collide on the same numeric key. Qualifying by force makes the key total and
+-- stable: a string "<force key>/<platform index>". `state.sorted_keys` already
+-- orders mixed/string keys deterministically, so iteration stays total.
+function registry.fleet_key(platform)
+  local force = platform and platform.valid and platform.force
+  return tostring(force_key_of(force)) .. "/" .. tostring(platform.index)
+end
+
 -- Add (or refresh) a fleet platform entry. Idempotent: an existing platform
 -- keeps its enrollment/limits/state (player opt-in persists), only its live
 -- platform handle is refreshed. New platforms start un-enrolled and idle -- the
@@ -102,32 +124,34 @@ function registry.add_platform(platform)
   if not (platform and platform.valid) then
     return nil
   end
-  local id = platform.index
-  if id == nil then
+  if platform.index == nil then
     return nil
   end
-  local entry = storage.fleet[id]
+  local key = registry.fleet_key(platform)
+  local entry = storage.fleet[key]
   if entry then
     entry.platform = platform
+    entry.force = force_key_of(platform.force)
     return entry
   end
   entry = {
     platform = platform,
+    force = force_key_of(platform.force), -- bare force key (Monitor scoping)
     enrolled = false,
     allowed_planets = nil, -- nil/"all" => serves every planet (see fleet.lua)
     state = "idle",
     assignment = nil,
   }
-  storage.fleet[id] = entry
-  state.debug_log("registry: platform added id#" .. id)
+  storage.fleet[key] = entry
+  state.debug_log("registry: platform added " .. key)
   return entry
 end
 
--- Drop a fleet platform entry by its platform index.
-function registry.remove_platform(platform_id)
-  if platform_id and storage.fleet[platform_id] then
-    storage.fleet[platform_id] = nil
-    state.debug_log("registry: platform removed id#" .. platform_id)
+-- Drop a fleet platform entry by its (force-qualified) fleet key.
+function registry.remove_platform(fleet_key)
+  if fleet_key and storage.fleet[fleet_key] then
+    storage.fleet[fleet_key] = nil
+    state.debug_log("registry: platform removed " .. tostring(fleet_key))
   end
 end
 
@@ -206,7 +230,7 @@ function registry.on_entity_removed(entity)
   elseif entity.name == registry.HUB_NAME then
     local platform = entity.surface and entity.surface.platform
     if platform then
-      registry.remove_platform(platform.index)
+      registry.remove_platform(registry.fleet_key(platform))
     end
   end
 end
