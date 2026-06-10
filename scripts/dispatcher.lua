@@ -108,6 +108,21 @@ function dispatcher.exportable(node, item)
   return (node.surplus and node.surplus[item]) or 0
 end
 
+-- Net above-reserve surplus after the supply-side committed bookkeeping is
+-- subtracted, re-clamped against min-trip. `stock.surplus` already applies the
+-- min-trip floor to the pre-committed (stock - reserve) value, but the NET value
+-- (raw minus what's already in flight) can fall back below min-trip -- e.g. raw
+-- 100 passes min-trip 50, minus committed 60 leaves 40, a below-threshold dribble
+-- that shouldn't be dispatched. Re-applying min-trip to the smaller net value
+-- suppresses it. Pure (plain numbers in/out): unit-tested. `committed` nil ⇒ 0.
+function dispatcher.net_surplus(raw, committed, min_trip)
+  local net = (raw or 0) - (committed or 0)
+  if net < min_trip then
+    return 0
+  end
+  return net
+end
+
 -- ---------------------------------------------------------------------------
 -- pure concurrency accounting (max-ships caps, Task 10)
 -- ---------------------------------------------------------------------------
@@ -636,11 +651,16 @@ function dispatcher.build_snapshot(_tick)
   end
 
   local committed = dispatcher.committed_surplus_by_node()
+  local min_trip = stock.min_trip()
   for node_id, ns in pairs(nodes) do
     local com = committed[node_id]
     for item in pairs(demanded_items) do
+      -- `stock.surplus` already min-trip-suppresses the pre-committed value; net
+      -- it against in-flight bookkeeping and re-clamp so a post-commit remainder
+      -- below min-trip is dropped rather than dispatched as a dribble (see
+      -- dispatcher.net_surplus).
       local raw = stock.surplus(ns.node, item)
-      local s = raw - (com and com[item] or 0)
+      local s = dispatcher.net_surplus(raw, com and com[item] or 0, min_trip)
       if s > 0 then
         ns.surplus[item] = s
       end

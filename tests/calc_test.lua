@@ -671,6 +671,21 @@ describe("dispatcher.exportable -- thrash guard", function()
   assert_eq(dispatcher.exportable(hub, "uranium-235"), 12, "received-only stock is exportable (re-export)")
 end)
 
+describe("dispatcher.net_surplus -- min-trip re-clamp on the post-committed value", function()
+  -- raw already passes min-trip (stock.surplus floors it pre-commit); the NET
+  -- value after subtracting in-flight bookkeeping can fall back below min-trip
+  -- and must be suppressed rather than dispatched as a dribble.
+  assert_eq(dispatcher.net_surplus(100, 0, 50), 100, "no commitment, above min-trip -> full net")
+  assert_eq(dispatcher.net_surplus(100, 20, 50), 80, "net 80 >= min-trip 50 -> net survives")
+  assert_eq(dispatcher.net_surplus(100, 50, 50), 50, "net exactly at min-trip -> survives (inclusive)")
+  assert_eq(dispatcher.net_surplus(100, 60, 50), 0, "net 40 < min-trip 50 -> suppressed dribble")
+  assert_eq(dispatcher.net_surplus(100, 100, 50), 0, "net 0 (fully committed) -> 0")
+  assert_eq(dispatcher.net_surplus(100, 120, 50), 0, "over-committed (negative net) -> clamped to 0")
+  assert_eq(dispatcher.net_surplus(40, 0, 50), 0, "raw below min-trip with no commit -> still suppressed")
+  assert_eq(dispatcher.net_surplus(100, nil, 50), 100, "nil committed treated as 0")
+  assert_eq(dispatcher.net_surplus(80, nil, 50), 80, "nil committed, above min-trip -> full raw")
+end)
+
 describe("dispatcher.best_source -- most coverage, nearest tie-break, id tie-break", function()
   -- dest needs iron 100 + copper 100. nauvis covers both (200), vulcanus only
   -- iron (100). Most-coverage picks nauvis even though vulcanus also qualifies.
