@@ -2032,9 +2032,15 @@ describe("schedule.engine_records -- apples-to-apples signature compare with a r
     "commit-time engine_records signature == hand-rolled readback signature (no first-tick false positive)")
 end)
 
-describe("watchdog.schedule_signature -- wait payload + allows_unloading sensitivity", function()
-  -- Engine-shape records (station + wait_conditions + allows_unloading), an
-  -- item_count condition carrying a CircuitCondition payload.
+describe("watchdog.schedule_signature -- payload + allows_unloading are NOT signed (engine round-trip safety)", function()
+  -- The 2.0 schedule readback does NOT return the item_count CircuitCondition
+  -- payload or `allows_unloading` verbatim, so signing them (the reverted Task 5
+  -- behavior) falsely withdrew EVERY mod ship the tick after dispatch -- which
+  -- cleared its hub request and stalled all deliveries (playtest 2026-06-10). The
+  -- signature therefore IGNORES them: a wait-quantity / unload-flag / comparator /
+  -- signal tweak does NOT change the signature (resync_conditions re-asserts those
+  -- instead), while a re-route (station) or a condition type/ticks/compare_type
+  -- change DOES.
   local function recs(constant, allows)
     return {
       {
@@ -2050,32 +2056,26 @@ describe("watchdog.schedule_signature -- wait payload + allows_unloading sensiti
     }
   end
 
-  -- changed wait constant -> signature differs (player edited the load quantity)
-  check(watchdog.schedule_signature(recs(500, false)) ~= watchdog.schedule_signature(recs(400, false)),
-    "changed item_count constant -> signature differs")
-
-  -- toggled allows_unloading -> signature differs (player flipped the unload flag)
-  check(watchdog.schedule_signature(recs(500, false)) ~= watchdog.schedule_signature(recs(500, true)),
-    "toggled allows_unloading -> signature differs")
-
-  -- changed comparator -> signature differs (>= vs =)
-  local ge = recs(500, false)
-  local eq = recs(500, false)
-  eq[1].wait_conditions[1].condition.comparator = "="
-  check(watchdog.schedule_signature(ge) ~= watchdog.schedule_signature(eq),
-    "changed comparator -> signature differs")
-
-  -- changed first_signal.name -> signature differs
+  -- payload / allows_unloading changes are INVISIBLE to the signature (no false withdraw)
+  assert_eq(watchdog.schedule_signature(recs(500, false)), watchdog.schedule_signature(recs(400, false)),
+    "changed item_count constant -> signature UNCHANGED (payload not signed)")
+  assert_eq(watchdog.schedule_signature(recs(500, false)), watchdog.schedule_signature(recs(500, true)),
+    "toggled allows_unloading -> signature UNCHANGED (not signed)")
   local renamed = recs(500, false)
   renamed[1].wait_conditions[1].condition.first_signal.name = "copper-plate"
-  check(watchdog.schedule_signature(recs(500, false)) ~= watchdog.schedule_signature(renamed),
-    "changed first_signal.name -> signature differs")
+  assert_eq(watchdog.schedule_signature(recs(500, false)), watchdog.schedule_signature(renamed),
+    "changed first_signal.name -> signature UNCHANGED (payload not signed)")
 
-  -- changed first_signal.quality -> signature differs
-  local requality = recs(500, false)
-  requality[1].wait_conditions[1].condition.first_signal.quality = "uncommon"
-  check(watchdog.schedule_signature(recs(500, false)) ~= watchdog.schedule_signature(requality),
-    "changed first_signal.quality -> signature differs")
+  -- but the ROUTE SHAPE is signed: station, condition type, ticks, compare_type
+  local rerouted = recs(500, false); rerouted[1].station = "vulcanus"
+  check(watchdog.schedule_signature(recs(500, false)) ~= watchdog.schedule_signature(rerouted),
+    "changed station -> signature differs (re-route detected)")
+  local retimed = recs(500, false); retimed[1].wait_conditions[2].ticks = 1800
+  check(watchdog.schedule_signature(recs(500, false)) ~= watchdog.schedule_signature(retimed),
+    "changed wait ticks -> signature differs")
+  local retyped = recs(500, false); retyped[1].wait_conditions[1].type = "full"
+  check(watchdog.schedule_signature(recs(500, false)) ~= watchdog.schedule_signature(retyped),
+    "changed condition type -> signature differs")
 end)
 
 describe("watchdog.schedule_signature -- explicit-vs-absent defaults serialize identically", function()
