@@ -84,45 +84,84 @@ script.on_event(defines.events.on_pre_surface_deleted, function(event)
   registry.on_pre_surface_deleted(event.surface_index)
 end)
 
--- Dispatcher heartbeat (Task 5/6/10): on each tick of the configurable interval,
--- match open demand to above-reserve supply, run the watchdog, and refresh the
--- Monitor. The dispatcher and watchdog share one handler (firing on the same tick
--- is harmless -- deterministic order -- and `on_nth_tick` allows only one handler
--- per period, so they MUST share when their periods coincide).
+-- Dispatch + watchdog cadences (Task 11). The dispatcher runs on its configurable
+-- interval (`dispatcher.interval()`); the watchdog runs on its own constant cadence
+-- (`watchdog.INTERVAL`). `on_nth_tick` allows only ONE handler per period, so:
+--   * when the two periods are EQUAL we register a single shared handler that runs
+--     both (dispatcher.run before watchdog.run -- preserve order, co-firing is
+--     harmless and deterministic);
+--   * when they DIFFER we register two independent handlers -- a dispatch handler
+--     and a watchdog handler.
+-- `monitor.refresh_all()` runs in EVERY handler: the Monitor must refresh on both
+-- dispatch decisions and watchdog state changes, and either cadence can be the
+-- faster one (the dispatch-interval setting can be set below watchdog.INTERVAL).
 --
--- The interval is a runtime-global setting (Task 10). `on_nth_tick` is keyed by
--- period, so changing the interval means unregistering the old period and
--- registering the new one; `register_dispatch_tick` does exactly that and is
--- called on init/config-change/load and whenever the setting changes. The setting
--- is synced across peers, so every client registers the same period
--- (determinism).
-local current_dispatch_interval = nil
+-- Determinism: both periods are peer-identical -- watchdog.INTERVAL is a module
+-- constant and dispatcher.interval() reads a SYNCED runtime-global setting -- so
+-- the registrar computes the same period set on every client and registers
+-- identically. (The replicated game state never feeds the registration.)
+--
+-- The registrar tracks the SET of periods it currently has registered. Before
+-- registering the new set it clears every orphaned period (`on_nth_tick(p, nil)`),
+-- so the 2->1 transition (dispatch interval changed to equal watchdog.INTERVAL --
+-- the old separate dispatch period must stop firing) and the 1->2 transition (they
+-- diverge again) never leave a stale period firing. Re-run on
+-- init/config-change/load and whenever the dispatch-interval setting changes.
+local registered_periods = {} -- set of period -> true currently registered
 
-local function dispatch_heartbeat(event)
+local function dispatch_only_handler(event)
+  dispatcher.run(event.tick)
+  monitor.refresh_all()
+end
+
+local function watchdog_only_handler(event)
+  watchdog.run(event.tick)
+  monitor.refresh_all()
+end
+
+local function shared_handler(event)
   dispatcher.run(event.tick)
   watchdog.run(event.tick)
   monitor.refresh_all()
 end
 
-local function register_dispatch_tick()
-  local iv = dispatcher.interval()
-  if iv == current_dispatch_interval then
-    return
+local function register_ticks()
+  local dispatch_period = dispatcher.interval()
+  local watchdog_period = watchdog.INTERVAL
+
+  -- Desired period -> handler. When the two periods coincide the set has ONE
+  -- period whose handler runs both runs.
+  local desired = {}
+  if dispatch_period == watchdog_period then
+    desired[dispatch_period] = shared_handler
+  else
+    desired[dispatch_period] = dispatch_only_handler
+    desired[watchdog_period] = watchdog_only_handler
   end
-  if current_dispatch_interval ~= nil then
-    script.on_nth_tick(current_dispatch_interval, nil)
+
+  -- Clear orphaned periods (registered last time but not wanted now).
+  for period in pairs(registered_periods) do
+    if desired[period] == nil then
+      script.on_nth_tick(period, nil)
+    end
   end
-  current_dispatch_interval = iv
-  script.on_nth_tick(iv, dispatch_heartbeat)
+
+  -- Register the desired set.
+  local new_registered = {}
+  for period, handler in pairs(desired) do
+    script.on_nth_tick(period, handler)
+    new_registered[period] = true
+  end
+  registered_periods = new_registered
 end
 
--- Register on every load so the handler exists before the first tick, and re-read
--- the interval whenever a runtime setting changes.
-register_dispatch_tick()
+-- Register on every load so the handlers exist before the first tick, and re-read
+-- the dispatch interval whenever its runtime setting changes.
+register_ticks()
 
 script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
   if event.setting == dispatcher.INTERVAL_SETTING then
-    register_dispatch_tick()
+    register_ticks()
   end
 end)
 

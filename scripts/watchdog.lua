@@ -54,9 +54,11 @@ local qkey = require("scripts.qkey")
 
 local watchdog = {}
 
--- Watchdog cadence, in ticks. Placeholder at this task; Task 10 may make it a
--- setting. Kept independent of the dispatcher interval so the two seams are
--- greppable; both firing on the same tick is harmless (deterministic).
+-- Watchdog cadence, in ticks -- the REAL period control.lua registers the
+-- watchdog `run` loop on (a constant, so it is peer-identical). Kept independent
+-- of the dispatcher interval so the two seams are greppable; both firing on the
+-- same tick is harmless (deterministic), and control.lua shares one handler when
+-- the periods coincide.
 watchdog.INTERVAL = 300 -- 5s at 60 UPS
 
 -- Alert kinds recorded in `storage.alerts` for the monitor GUI (Task 8).
