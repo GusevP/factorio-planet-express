@@ -69,17 +69,18 @@ end
 -- before flipping §2 to [confirmed].
 --
 -- QUALITY (Task 9, #4b): the cargo key is a `qkey(item, quality)`, so the
--- launchable stock is read PER QUALITY (`network.get_item_count(name, quality)`)
--- -- normal-quality iron and uncommon-quality iron are independent stock pools.
--- A bare item-name key decodes to "normal" so legacy/quality-agnostic reads
--- still resolve.
+-- launchable stock is read PER QUALITY via a SINGLE `ItemWithQualityID` table
+-- (`network.get_item_count{name, quality}`) -- normal-quality iron and uncommon-
+-- quality iron are independent stock pools. The old two-arg `(name, quality)` form
+-- crashed in-engine (2.0 `get_item_count` takes 0 or 1 args). A bare item-name key
+-- decodes to "normal" so legacy/quality-agnostic reads still resolve.
 local function read_launchable_stock(node, key)
   local name, quality = qkey.qparse(key)
   local pad = node.entity
   if pad and pad.valid then
     local network = pad.logistic_network
     if network then
-      return network.get_item_count(name, quality)
+      return network.get_item_count({ name = name, quality = quality })
     end
   end
 
@@ -103,7 +104,7 @@ local function read_launchable_stock(node, key)
   end
   local total = 0
   for _, network in pairs(networks) do
-    total = total + network.get_item_count(name, quality)
+    total = total + network.get_item_count({ name = name, quality = quality })
   end
   return total
 end

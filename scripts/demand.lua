@@ -125,9 +125,11 @@ end
 -- QUALITY (Task 9, #4b): each request filter carries the quality variant
 -- (`filter.value.quality`, a quality-name string; nil/absent -> "normal"), so
 -- the same item at two qualities is two DISTINCT rows keyed by
--- `qkey(name, quality)`. On-hand is read per quality
--- (`inv.get_item_count(name, quality)`) so a normal-quality on-hand never
--- masks an uncommon-quality shortfall (and vice versa).
+-- `qkey(name, quality)`. On-hand is read per quality via a SINGLE
+-- `ItemWithQualityID` table (`inv.get_item_count{name, quality}`) so a normal-
+-- quality on-hand never masks an uncommon-quality shortfall (and vice versa). The
+-- old two-arg `(name, quality)` form crashed in-engine (2.0 `get_item_count` takes
+-- 0 or 1 args).
 local function read_native_demand(node)
   local pad = node and node.entity
   if not (pad and pad.valid) then
@@ -168,7 +170,7 @@ local function read_native_demand(node)
     rows[#rows + 1] = {
       item = key,
       requested = req,
-      on_hand = inv and inv.get_item_count(name, quality) or 0,
+      on_hand = inv and inv.get_item_count({ name = name, quality = quality }) or 0,
     }
   end
   return rows

@@ -467,13 +467,14 @@ end
 -- [provisional] Per-(item,quality) hub cargo count, bound to this platform.
 -- Returns a `count_fn(key) -> count` where `key` is a manifest cargo qkey: this is
 -- an engine-read seam, so it DECODES the qkey and reads
--- `hub.get_item_count(name, quality)` (api-notes §1, Task 11 #4d) -- normal- and
+-- `hub.get_item_count{name, quality}` (api-notes §1, Task 11 #4d) -- normal- and
 -- uncommon-quality iron count independently, so completion/abort test the exact
 -- variant the mod shipped. A bare item-name key decodes to "normal". Returns nil
 -- when the hub can't be read (then completion never fires -- we don't "complete" a
 -- ship whose hold we can't read). Used by `completed`/`delivery_stalled` to test
--- the MANIFEST cargo specifically rather than the whole hold. Confirm the two-arg
--- `get_item_count(name, quality)` in-engine.
+-- the MANIFEST cargo specifically rather than the whole hold. 2.0 `get_item_count`
+-- takes a SINGLE `ItemWithQualityID` ({name, quality}) -- the old two-arg
+-- `(name, quality)` form crashed in-engine (Expected 0 or 1 arguments).
 function watchdog.hub_counter(platform)
   local hub = platform and platform.valid and platform.hub
   if not (hub and hub.valid and hub.get_item_count) then
@@ -481,7 +482,7 @@ function watchdog.hub_counter(platform)
   end
   return function(key)
     local name, quality = qkey.qparse(key)
-    return hub.get_item_count(name, quality)
+    return hub.get_item_count({ name = name, quality = quality })
   end
 end
 

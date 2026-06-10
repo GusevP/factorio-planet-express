@@ -214,7 +214,7 @@ know which stop the ship is at and whether its hold has drained:
     station is not one of the assignment's own), accepting weaker detection of
     player-added foreign stops.
 - **Platform hub per-(item,quality) cargo count:**
-  `platform.hub.get_item_count(name, quality)` — gates the watchdog's "unload done
+  `platform.hub.get_item_count{name, quality}` — gates the watchdog's "unload done
   / completed" check (`watchdog.completed` via the pure `manifest_delivered`) AND
   the delivery-impossible abort (`watchdog.delivery_stalled`). Completion now tests
   the **manifest cargo per-item** (the items the mod shipped) rather than
@@ -226,10 +226,13 @@ know which stop the ship is at and whether its hold has drained:
   counts across the entity's inventories, which still reads 0 for a delivered
   manifest item. **Quality (Task 11, #4d):** the manifest is keyed by the cargo
   `qkey(item, quality)`, so `watchdog.hub_counter` DECODES the qkey and reads
-  `get_item_count(name, quality)` — normal- and uncommon-quality iron complete
+  `get_item_count{name, quality}` — normal- and uncommon-quality iron complete
   independently; a bare item-name key decodes to `"normal"`. **[provisional —
-  confirm the two-arg `LuaEntity.get_item_count(name, quality)` on the hub
-  in-engine.]** (The earlier whole-hub `get_inventory(hub_main).is_empty()` read —
+  2.0 `get_item_count` takes a SINGLE `ItemWithQualityID` (`{name, quality}`); the
+  earlier two-arg `(name, quality)` form CRASHED in playtest 2026-06-10 ("Expected
+  0 or 1 arguments but 2 were given"), corrected per the 2.0 docs, re-confirm the
+  table form completes a delivery in-engine.]** (The earlier whole-hub
+  `get_inventory(hub_main).is_empty()` read —
   `watchdog.hold_empty` — was retired 2026-06 for this reason.)
 - **Platform hub slot budget — per-platform capacity (#3, Task 6):**
   `hub.get_inventory(defines.inventory.hub_main)` → `LuaInventory`, then `#inv`
@@ -259,18 +262,19 @@ logistic-network item count reachable by rocket silos.
 
 **Accessor (Task 4, #7) — the trade node's OWN logistic network:**
 `pad.logistic_network` (the `LuaLogisticNetwork` the cargo-landing-pad entity
-belongs to), then `network.get_item_count(item, quality)`.
+belongs to), then `network.get_item_count{name, quality}`.
 `stock.read_launchable_stock` scopes to THIS network, NOT the whole-surface
 aggregate.
 
-- **Per-quality stock (Task 9, #4b) [provisional — confirm
-  `LuaLogisticNetwork.get_item_count(item, quality)` in-engine]:** the cargo key
-  is a `qkey(item, quality)`, so the reader `qparse`s it and reads launchable
-  stock PER QUALITY — `network.get_item_count(name, quality)` (and the fallback
-  surface-sum likewise). Normal- and uncommon-quality iron are independent stock
-  pools; a bare item-name key decodes to `"normal"` so legacy reads still
-  resolve. Confirm the two-arg `(name, quality)` form (vs. a
-  `{name, quality}` ItemID table) in a running game.
+- **Per-quality stock (Task 9, #4b) [provisional — 2.0
+  `LuaLogisticNetwork.get_item_count` takes a SINGLE `ItemWithQualityID`
+  (`{name, quality}`), confirmed against the 2.0 docs; the earlier two-arg
+  `(item, quality)` form crashed in playtest 2026-06-10, re-confirm the table form
+  in a running game]:** the cargo key is a `qkey(item, quality)`, so the reader
+  `qparse`s it and reads launchable stock PER QUALITY —
+  `network.get_item_count{name, quality}` (and the fallback surface-sum likewise).
+  Normal- and uncommon-quality iron are independent stock pools; a bare item-name
+  key decodes to `"normal"` so legacy reads still resolve.
 
 - **Why per-node, not surface-wide:** a planet may host **two or more
   DISCONNECTED logistic networks**. Summing every network on the surface (the
@@ -337,7 +341,7 @@ Its requests live as **logistic sections** on its `LuaLogisticPoint`:
 **On-hand (what's already delivered):** the pad's inventory.
 
 - `pad.get_inventory(defines.inventory.cargo_landing_pad_main)` → `LuaInventory`,
-  then `inventory.get_item_count(name, quality)` (Task 9, #4b — per quality). The
+  then `inventory.get_item_count{name, quality}` (Task 9, #4b — per quality). The
   code commits to `cargo_landing_pad_main` as the provisional choice; confirm
   this is the right `defines.inventory.*` constant for the landing pad's hold
   in-engine.
@@ -351,10 +355,12 @@ distinct requests.
   `qkey`). `demand.reader` keys each request by `qkey(name, quality)`, so two
   qualities of one item are two distinct demand rows. Confirm the filter
   `value.quality` shape on the cargo-landing-pad requester in-engine.
-- **Per-quality on-hand:** `inv.get_item_count(name, quality)` — so a
-  normal-quality on-hand never masks an uncommon-quality shortfall. Confirm the
-  two-arg `(name, quality)` form (vs. a `{name, quality}` ItemID table) in a
-  running game.
+- **Per-quality on-hand:** `inv.get_item_count{name, quality}` — so a
+  normal-quality on-hand never masks an uncommon-quality shortfall. 2.0
+  `get_item_count` takes a SINGLE `ItemWithQualityID` table; the earlier two-arg
+  `(name, quality)` form CRASHED in playtest 2026-06-10 ("Expected 0 or 1 arguments
+  but 2 were given") — corrected per the 2.0 docs, re-confirm the table form reads
+  on-hand correctly in a running game.
 
 `demand.unmet(item) = requested - on_hand - already_inbound_from_fleet`, clamped
 at 0 (Task 2). The pure unmet/sort math is engine-independent and can be written
@@ -586,9 +592,9 @@ The edge-case-hardening pass (real slot-aware capacity, item quality, the
 delivery-impossible abort, network-scoped surplus, manifest-delivered completion)
 added new IO seams, all already recorded above:
 
-- per-node logistic network for surplus + per-quality `network.get_item_count(item, quality)` (§2);
+- per-node logistic network for surplus + per-quality `network.get_item_count{name, quality}` (§2);
 - hub slot budget `get_inventory(defines.inventory.hub_main)` `#inv` + `prototypes.item[name].stack_size` (§1 / §5);
-- per-`(item, quality)` hub `get_item_count(name, quality)` and the pad-request `value.quality` read (§1 / §3);
+- per-`(item, quality)` hub `get_item_count{name, quality}` and the pad-request `value.quality` read (§1 / §3);
 - `set_slot` filter `value.quality` and `item_count` `first_signal.quality` (§1).
 
 **Every one of these stays `[provisional]` and is deliberately NOT flipped here.**
