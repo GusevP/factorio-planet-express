@@ -804,8 +804,17 @@ function watchdog.run(tick)
       watchdog.free_assignment(id, watchdog.ALERT_DESTROYED, fleet.IDLE, tick)
     elseif watchdog.player_edited(a, platform) then
       watchdog.free_assignment(id, watchdog.ALERT_PLAYER_EDIT, fleet.WITHDRAWN, tick)
-    elseif watchdog.completed(platform, a) then
-      watchdog.free_assignment(id, nil, fleet.IDLE, tick) -- silent: normal delivery
+    elseif watchdog.parked_at_last_stop(platform) then
+      -- ROUNDTRIP DONE. The ship has arrived and parked at its FINAL stop, so its
+      -- job is over. The landing pad auto-delivers the carried cargo to the planet
+      -- whenever a platform is in orbit -- on a schedule or idle alike -- so we do
+      -- NOT wait for the hub to read empty (a delivered item can overlap the
+      -- platform's own construction/fuel stock and never clear) and we do NOT worry
+      -- about under-unload: free the ship now and the pad finishes pulling on its
+      -- own. Any over-delivery residue / own stock rides along (bounded); the
+      -- dispatcher re-evaluates this idle ship next tick. Freeing also clears the
+      -- mod route + hub request, so the cyclic schedule can't loop it around again.
+      watchdog.free_assignment(id, nil, fleet.IDLE, tick)
     else
       -- Reset the no-progress clock on stop advances BEFORE testing the deadline,
       -- so a ship that just progressed is never falsely timed out.
@@ -823,26 +832,11 @@ function watchdog.run(tick)
           state.debug_log("watchdog abort a#" .. tostring(id)
             .. ": source can't supply the forward manifest -- nothing to load")
           watchdog.free_assignment(id, nil, fleet.IDLE, tick)
-        elseif watchdog.delivery_stalled(a, platform) then
-          -- Parked at the last stop, still holding manifest cargo, and the drop
-          -- planet's RAW request for everything it holds is 0 -- the destination no
-          -- longer wants this cargo (the request was removed/satisfied mid-flight).
-          -- `completed` was tested first, so a genuine pad-pull already won; here
-          -- the pad simply will not pull. Don't loop or sit out the no-progress
-          -- deadline: free the ship to idle (silent). By definition the dest's raw
-          -- demand is already 0, so there is nothing to "re-open" -- the only residue
-          -- is the leftover cargo aboard the idled ship (bounded; reused/cleared on
-          -- the next dispatch).
-          state.debug_log("watchdog abort a#" .. tostring(id)
-            .. ": destination no longer requests the delivered cargo -- idling (residue aboard)")
-          watchdog.free_assignment(id, nil, fleet.IDLE, tick)
         else
-          -- The assignment SURVIVES this iteration: derive and publish its live
-          -- loading/unloading phase. This write is in the surviving path only -- the
-          -- load_impossible / delivery_stalled branches above already freed the
-          -- ship to IDLE, and that IDLE state write must win, not race a stale
-          -- phase. `parked` is `speed == 0` AND `current_is_ours` (a foreign /
-          -- unreadable stop reads as not-parked so phase_for yields ENROUTE).
+          -- The assignment SURVIVES this iteration (in transit, or loading at a
+          -- source / turnaround stop): publish the live loading/unloading phase.
+          -- `parked` is `speed == 0` AND `current_is_ours` (a foreign / unreadable
+          -- stop reads as not-parked so phase_for yields ENROUTE).
           local sched = platform.schedule
           local current = sched and sched.current
           local parked = (platform.speed or 0) == 0
