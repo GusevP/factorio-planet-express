@@ -62,14 +62,53 @@ local function deep_equal(a, b)
   return true
 end
 
+-- Small one-level serializer for failure messages: a `table: 0x...` address is
+-- useless when a manifest deep-compare fails, so dump the (shallow) key/value
+-- pairs in sorted order instead. Scalars fall through to tostring().
+local function dump(v)
+  if type(v) ~= "table" then
+    return tostring(v)
+  end
+  local keys = {}
+  for k in pairs(v) do
+    keys[#keys + 1] = k
+  end
+  table.sort(keys, function(a, b)
+    local ta, tb = type(a), type(b)
+    if ta ~= tb then
+      return ta < tb
+    end
+    return a < b
+  end)
+  local parts = {}
+  for _, k in ipairs(keys) do
+    local val = v[k]
+    -- one level of nesting is enough for the tables this suite compares
+    parts[#parts + 1] = string.format("%s=%s",
+      tostring(k), type(val) == "table" and "{...}" or tostring(val))
+  end
+  return "{ " .. table.concat(parts, ", ") .. " }"
+end
+
 local assert_eq = function(got, want, msg)
   check(deep_equal(got, want), string.format(
     "%s\n      got:  %s\n      want: %s",
-    msg or "values differ", tostring(got), tostring(want)))
+    msg or "values differ", dump(got), dump(want)))
 end
 
 local assert_true = function(v, msg)
   check(v == true, msg or "expected true")
+end
+
+-- Monotonic tick source for stock-cache blocks. Hand-picked tick literals risk
+-- two blocks reusing the same tick and silently serving a stale cache entry from
+-- an earlier block; this counter guarantees every begin_tick() argument is unique
+-- and strictly increasing across the whole run. Starts high so it never collides
+-- with any remaining literal.
+local _next_tick = 1000000
+local function fresh_tick()
+  _next_tick = _next_tick + 1
+  return _next_tick
 end
 
 -- Expose helpers so later task blocks can be split into files if desired; for
@@ -80,6 +119,8 @@ local T = {
   assert_eq = assert_eq,
   assert_true = assert_true,
   deep_equal = deep_equal,
+  dump = dump,
+  fresh_tick = fresh_tick,
 }
 
 -- ---------------------------------------------------------------------------
@@ -159,7 +200,7 @@ describe("stock per-tick cache", function()
 
   local node = { cache_key = "nauvis", values = { ["iron-plate"] = 500 } }
 
-  stock.begin_tick(1000)
+  stock.begin_tick(fresh_tick())
   assert_eq(stock.stock_count(node, "iron-plate"), 500, "first read returns stock")
   assert_eq(stock.stock_count(node, "iron-plate"), 500, "second read same tick returns stock")
   assert_eq(hits["nauvis/iron-plate"], 1, "reader hit only once within a tick")
@@ -170,7 +211,7 @@ describe("stock per-tick cache", function()
   assert_eq(hits["nauvis/iron-plate"], 1, "still only one reader hit (no recompute mid-tick)")
 
   -- advance the tick -> cache invalidated -> recompute picks up the new value
-  stock.begin_tick(1001)
+  stock.begin_tick(fresh_tick())
   assert_eq(stock.stock_count(node, "iron-plate"), 999, "new tick recomputes")
   assert_eq(hits["nauvis/iron-plate"], 2, "reader hit again on the new tick")
 
@@ -180,6 +221,7 @@ end)
 
 describe("stock.surplus end-to-end (stubbed reader, no engine)", function()
   local saved_reader = stock.reader
+  local saved_min_trip = stock.MIN_TRIP
   stock.reader = function(node, item)
     return node.values[item] or 0
   end
@@ -190,19 +232,19 @@ describe("stock.surplus end-to-end (stubbed reader, no engine)", function()
     values = { ["iron-plate"] = 500, ["coal"] = 80 },
     reserves = { default = 100, items = { ["coal"] = 100 } },
   }
-  stock.begin_tick(2000)
+  stock.begin_tick(fresh_tick())
   assert_eq(stock.surplus(node, "iron-plate"), 400, "stock 500 - default reserve 100 = 400")
   assert_eq(stock.surplus(node, "coal"), 0, "stock 80 below per-item reserve 100 -> 0")
   assert_eq(stock.surplus(node, "stone"), 0, "missing item (zero stock) -> 0")
 
   -- min-trip suppression through the full path
   stock.MIN_TRIP = 50
-  stock.begin_tick(2001) -- new tick so the cache recomputes against the new threshold path
+  stock.begin_tick(fresh_tick()) -- new tick so the cache recomputes against the new threshold path
   node.values["iron-plate"] = 130 -- surplus 30, below min-trip 50
   assert_eq(stock.surplus(node, "iron-plate"), 0, "surplus 30 below min-trip 50 -> 0")
 
   stock.reader = saved_reader
-  stock.MIN_TRIP = 1
+  stock.MIN_TRIP = saved_min_trip
 end)
 
 -- ---------------------------------------------------------------------------
@@ -575,7 +617,9 @@ describe("schedule.build_records -- zero manifest -> no schedule", function()
 end)
 
 describe("schedule.write -- thin wrapper over the pure builder", function()
-  -- stub writer captures what would hit the engine
+  -- stub writer captures what would hit the engine; save the real one so we don't
+  -- clobber the module default (apply_records) on restore.
+  local saved_writer = schedule.writer
   local captured = nil
   schedule.writer = function(_platform, records)
     captured = records
@@ -599,7 +643,7 @@ describe("schedule.write -- thin wrapper over the pure builder", function()
   assert_eq(none, nil, "empty trip -> write returns nil")
   assert_eq(captured, nil, "writer not called for an empty trip")
 
-  schedule.writer = nil
+  schedule.writer = saved_writer
 end)
 
 -- ---------------------------------------------------------------------------
@@ -940,6 +984,93 @@ describe("dispatcher.plan -- guard blocks importing-and-exporting the same item"
     ships = { { id = 1, capacity = 1000, entry = { enrolled = true, state = fleet.IDLE } } },
   }
   assert_eq(#dispatcher.plan(snapshot), 0, "thrash guard: a node importing iron is never an iron source")
+end)
+
+describe("dispatcher.unserved_reason -- one branch per gate (diagnostic over the snapshot)", function()
+  -- helper: contains-substring assertion (the reason strings are human prose).
+  local function reason_has(reason, needle, msg)
+    assert_true(type(reason) == "string" and reason:find(needle, 1, true) ~= nil, msg)
+  end
+
+  -- BRANCH 1: no exportable source. Demand exists; the only other node has no
+  -- surplus, so best_source returns nil.
+  local no_source = {
+    nodes = {
+      [1] = { id = 1, planet = "dest", force = "A",
+        demand = { { item = "iron-plate", unmet = 100, priority = 0 } },
+        surplus = {}, unmet_by_item = {} },
+      [2] = { id = 2, planet = "src", force = "A", surplus = {}, unmet_by_item = {} },
+    },
+    ships = { { id = 1, capacity = 1000, force = "A", entry = { enrolled = true, state = fleet.IDLE } } },
+  }
+  reason_has(dispatcher.unserved_reason(no_source, no_source.nodes[1]),
+    "no exportable source", "no-source branch names the missing source")
+
+  -- BRANCH 2: source exists, but no idle eligible ship for the dest's force.
+  local no_ship = {
+    nodes = {
+      [1] = { id = 1, planet = "dest", force = "A",
+        demand = { { item = "iron-plate", unmet = 100, priority = 0 } },
+        surplus = {}, unmet_by_item = {} },
+      [2] = { id = 2, planet = "src", force = "A",
+        surplus = { ["iron-plate"] = 500 }, unmet_by_item = {} },
+    },
+    -- the only ship belongs to a DIFFERENT force, so ships_for_force drops it
+    ships = { { id = 1, capacity = 1000, force = "B", entry = { enrolled = true, state = fleet.IDLE } } },
+  }
+  reason_has(dispatcher.unserved_reason(no_ship, no_ship.nodes[1]),
+    "NO idle eligible ship", "no-ship branch names the ship gate")
+
+  -- BRANCH 3: source + ship both exist, but the ship has ZERO slots -> the
+  -- manifest re-pack loads nothing. stack_size IS threaded into that re-pack
+  -- (the demand row carries one); with 0 slots it cannot matter, proving the
+  -- branch is reached, and the next case proves stack_size doesn't FALSELY trip it.
+  local nothing_loads = {
+    nodes = {
+      [1] = { id = 1, planet = "dest", force = "A",
+        demand = { { item = "iron-plate", unmet = 100, priority = 0, stack_size = 100 } },
+        surplus = {}, unmet_by_item = {} },
+      [2] = { id = 2, planet = "src", force = "A",
+        surplus = { ["iron-plate"] = 500 }, unmet_by_item = {} },
+    },
+    ships = { { id = 1, capacity = 0, force = "A", entry = { enrolled = true, state = fleet.IDLE } } },
+  }
+  reason_has(dispatcher.unserved_reason(nothing_loads, nothing_loads.nodes[1]),
+    "nothing loads", "nothing-loads branch fires when capacity (slots) is 0")
+
+  -- stack_size threading (positive): a ship with slots > 0 and a stacked demand
+  -- DOES load (re-pack uses stack_size to convert slots->items), so the reason is
+  -- the would-dispatch tail, NOT a false "nothing loads".
+  local loads_ok = {
+    nodes = {
+      [1] = { id = 1, planet = "dest", force = "A",
+        demand = { { item = "iron-plate", unmet = 100, priority = 0, stack_size = 100 } },
+        surplus = {}, unmet_by_item = {} },
+      [2] = { id = 2, planet = "src", force = "A",
+        surplus = { ["iron-plate"] = 500 }, unmet_by_item = {} },
+    },
+    ships = { { id = 1, capacity = 5, force = "A", entry = { enrolled = true, state = fleet.IDLE } } },
+  }
+  local ok_reason = dispatcher.unserved_reason(loads_ok, loads_ok.nodes[1])
+  assert_true(type(ok_reason) == "string" and ok_reason:find("nothing loads", 1, true) == nil,
+    "stack_size threaded: a stacked manifest loads (not a false nothing-loads)")
+  reason_has(ok_reason, "would dispatch", "loadable + free ship + uncapped route -> would-dispatch tail")
+
+  -- BRANCH 4: source + ship + loadable manifest, but the route is AT CAP.
+  local at_cap = {
+    nodes = {
+      [1] = { id = 1, planet = "dest", force = "A",
+        demand = { { item = "iron-plate", unmet = 100, priority = 0, stack_size = 100 } },
+        surplus = {}, unmet_by_item = {} },
+      [2] = { id = 2, planet = "src", force = "A",
+        surplus = { ["iron-plate"] = 500 }, unmet_by_item = {} },
+    },
+    ships = { { id = 1, capacity = 5, force = "A", entry = { enrolled = true, state = fleet.IDLE } } },
+    max_ships_route = 1,
+    active_by_route = { [dispatcher.route_key(2, 1)] = 1 },
+  }
+  reason_has(dispatcher.unserved_reason(at_cap, at_cap.nodes[1]),
+    "AT CAP", "route-cap branch fires when the route is saturated")
 end)
 
 -- ---------------------------------------------------------------------------
@@ -1823,6 +1954,41 @@ describe("state.sorted_keys: deterministic order for mixed number/string keys", 
   assert_eq(keys, { 1, 2, "a", "b" }, "numbers before strings, each ascending")
 end)
 
+describe("state.sorted_pairs: key+value round-trip in sorted order", function()
+  local state = require("scripts.state")
+  -- sorted_pairs is the determinism backbone used by every decision loop; pin a
+  -- full key AND value round-trip in the default (mixed-type) order, not just keys.
+  local tbl = { [2] = "two", ["b"] = "bee", [1] = "one", ["a"] = "ay" }
+  local seen_keys, seen_vals = {}, {}
+  for k, v in state.sorted_pairs(tbl) do
+    seen_keys[#seen_keys + 1] = k
+    seen_vals[#seen_vals + 1] = v
+  end
+  assert_eq(seen_keys, { 1, 2, "a", "b" }, "keys yielded in default sorted order")
+  assert_eq(seen_vals, { "one", "two", "ay", "bee" }, "each yielded value matches its key")
+
+  -- empty table -> zero iterations (the loop body never runs)
+  local count = 0
+  for _ in state.sorted_pairs({}) do
+    count = count + 1
+  end
+  assert_eq(count, 0, "empty table -> no iterations")
+end)
+
+describe("state.sorted_pairs: custom comparator path", function()
+  local state = require("scripts.state")
+  -- a comparator over the KEYS drives the order; here all-numeric keys descending.
+  local tbl = { [1] = "a", [2] = "b", [3] = "c" }
+  local desc = function(x, y) return x > y end
+  local order = {}
+  for k in state.sorted_pairs(tbl, desc) do
+    order[#order + 1] = k
+  end
+  assert_eq(order, { 3, 2, 1 }, "custom comparator reverses the iteration order")
+  -- sorted_keys honors the same comparator (the helper sorted_pairs delegates to)
+  assert_eq(state.sorted_keys(tbl, desc), { 3, 2, 1 }, "sorted_keys honors the custom comparator")
+end)
+
 describe("watchdog.raise_alert caps the stored backlog (oldest evicted)", function()
   local watchdog = require("scripts.watchdog")
   local saved_storage = storage
@@ -1967,6 +2133,7 @@ describe("stock.surplus -- per-quality stock pool, reserve floor shared by item 
   local q = qkey.qkey
   -- stub reader keyed by qkey: normal and uncommon iron are INDEPENDENT pools.
   local saved_reader = stock.reader
+  local saved_min_trip = stock.MIN_TRIP
   stock.reader = function(node, key)
     return node.values[key] or 0
   end
@@ -1980,7 +2147,7 @@ describe("stock.surplus -- per-quality stock pool, reserve floor shared by item 
     -- reserve floor configured by bare item NAME -> shared by every quality
     reserves = { default = 0, items = { ["iron-plate"] = 100 } },
   }
-  stock.begin_tick(9000)
+  stock.begin_tick(fresh_tick())
   -- reserve-decode: both qualities subtract the SAME name-keyed floor (100) but
   -- draw from their own per-quality stock pool.
   assert_eq(stock.surplus(node, q("iron-plate", "normal")), 400,
@@ -1991,7 +2158,7 @@ describe("stock.surplus -- per-quality stock pool, reserve floor shared by item 
   assert_eq(stock.stock_count(node, q("iron-plate", "normal")), 500, "normal pool cached independently")
   assert_eq(stock.stock_count(node, q("iron-plate", "uncommon")), 300, "uncommon pool cached independently")
   stock.reader = saved_reader
-  stock.MIN_TRIP = 1
+  stock.MIN_TRIP = saved_min_trip
 end)
 
 -- ---------------------------------------------------------------------------
