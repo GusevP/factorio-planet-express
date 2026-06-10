@@ -477,18 +477,20 @@ function schedule.apply_hub_request(platform, manifest, import_from)
   return true
 end
 
--- Apply built `records` to a platform. In 2.0 `LuaSpacePlatform.schedule` is a
--- read/write `PlatformSchedule` table ({ current, records }) -- NOT a LuaSchedule
--- with `set_records` -- and the route is installed by ASSIGNING a new table (the
--- only platform mutation the mod is permitted to make). Assigning a NON-NIL
--- PlatformSchedule PRESERVES the player's interrupts (refuel/rearm) -- confirmed
--- in-engine; only `platform.schedule = nil` drops the whole schedule, interrupts
--- included (which is why `clear_route` never nils). So this assignment is safe.
--- A ScheduleRecord carries no cargo, so the source stop's load is realized as the
+-- Apply built `records` to a platform. CRITICAL: `platform.schedule = {...}`
+-- assigns a `PlatformSchedule`, which is the SIMPLIFIED schedule that EXCLUDES
+-- groups and interrupts -- so that assignment WIPES the player's refuel/rearm
+-- interrupts (playtest 2026-06-10 confirmed the loss; the earlier "preserves
+-- interrupts" note was wrong). Instead write the records through the FULL
+-- `LuaSchedule` (`get_schedule():set_records`), which touches only the records --
+-- interrupts and groups have their own `get/set_interrupts` API and are left
+-- intact -- then `go_to_station(1)` to start the ship heading to the source stop in
+-- automatic mode. The simplified assignment remains only as a last-resort fallback
+-- when `get_schedule` is unavailable (that path DOES drop interrupts). A
+-- ScheduleRecord carries no cargo, so the source stop's load is realized as the
 -- hub's requester logistic request, applied FIRST: if it can't be applied the
--- dispatcher records NO assignment, and that must not leave the platform already
--- moving on an untracked schedule (so the schedule is never installed and the
--- demand retries next tick). The watchdog re-issues the request at later stops.
+-- dispatcher records NO assignment, and the schedule is never installed (demand
+-- retries next tick). The watchdog re-issues the request at later stops.
 local function apply_records(platform, records)
   if not (platform and platform.valid) then
     return false
@@ -498,11 +500,16 @@ local function apply_records(platform, records)
        platform, first and first.requests or {}, first and first.import_from) == false then
     return false
   end
-  -- current = 1: start heading to the first (source) stop.
-  platform.schedule = {
-    current = 1,
-    records = schedule.engine_records(records),
-  }
+  local eng = schedule.engine_records(records)
+  local sched = platform.get_schedule and platform.get_schedule()
+  if sched and sched.set_records then
+    sched.set_records(eng)                                  -- records only: interrupts preserved
+    if sched.go_to_station then
+      sched.go_to_station(1)                                -- head to the source stop, automatic mode
+    end
+  else
+    platform.schedule = { current = 1, records = eng }      -- fallback (drops interrupts)
+  end
   return true
 end
 
@@ -526,13 +533,12 @@ function schedule.write(platform, assignment)
 end
 
 -- Remove the mod's trade route from a platform on cleanup (free / reset), WITHOUT
--- touching the player's interrupts (refuel / rearm). The ONLY thing that drops
--- interrupts is `platform.schedule = nil` (confirmed in-engine) -- a non-nil assign
--- keeps them, same as apply_records/resync_conditions. We avoid nil entirely:
--- clear only the records via the full LuaSchedule (`get_schedule():set_records({})`),
--- the idiomatic records-only clear. Falls back to assigning an empty NON-NIL
--- simplified schedule if get_schedule is somehow unavailable (also keeps interrupts,
--- since it is non-nil). No-op on a dead platform.
+-- touching the player's interrupts (refuel / rearm). Clear only the records via the
+-- full `LuaSchedule` (`get_schedule():set_records({})`) -- the records-only clear
+-- that leaves interrupts/groups intact (they have their own get/set_interrupts API).
+-- The simplified `platform.schedule = {...}` assignment is the fallback ONLY when
+-- get_schedule is unavailable; note it WIPES interrupts (a PlatformSchedule excludes
+-- them), so it is genuinely a last resort. No-op on a dead platform.
 function schedule.clear_route(platform)
   if not (platform and platform.valid) then
     return
@@ -545,22 +551,26 @@ function schedule.clear_route(platform)
   end
 end
 
--- Re-sync the live schedule's wait conditions (and requests) to the given
--- manifests, KEEPING the current stop. Called after a re-clamp lowers a manifest:
--- the load condition is derived from the manifest (item >= qty), so without this
--- it would still demand the old, higher count while the request was lowered --
--- stranding the ship until timeout. Rebuilds the same route structure with the new
--- quantities and reassigns (which preserves the player's interrupts). No-op on a
--- dead platform.
+-- Re-sync the live schedule's wait conditions to the given manifests, KEEPING the
+-- current stop. Called after a re-clamp lowers a manifest: the load condition is
+-- derived from the manifest (item >= qty), so without this it would still demand the
+-- old, higher count while the request was lowered -- stranding the ship until
+-- timeout. Writes the rebuilt records through the full `LuaSchedule`
+-- (`set_records`) so the player's interrupts survive (the simplified
+-- `platform.schedule` assignment would wipe them); `set_records` replaces only the
+-- records and leaves `current` (the active stop) where it is. Falls back to the
+-- simplified assignment only if get_schedule is unavailable. No-op on a dead platform.
 function schedule.resync_conditions(platform, source, dest, manifest, ret, timeout)
-  if not (platform and platform.valid and platform.schedule) then
+  if not (platform and platform.valid) then
     return
   end
-  local current = platform.schedule.current or 1
-  platform.schedule = {
-    current = current,
-    records = schedule.engine_records(schedule.records_for(source, dest, manifest, ret, timeout)),
-  }
+  local eng = schedule.engine_records(schedule.records_for(source, dest, manifest, ret, timeout))
+  local sched = platform.get_schedule and platform.get_schedule()
+  if sched and sched.set_records then
+    sched.set_records(eng)                                  -- records only: interrupts preserved, current kept
+  elseif platform.schedule then
+    platform.schedule = { current = platform.schedule.current or 1, records = eng } -- fallback (drops interrupts)
+  end
 end
 
 return schedule
