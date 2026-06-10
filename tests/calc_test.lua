@@ -1357,6 +1357,67 @@ describe("watchdog.schedule_signature -- compare_type default round-trips engine
     "an explicit non-default compare_type still changes the signature")
 end)
 
+describe("watchdog.signable_records -- interrupt/temporary records ignored by the signature", function()
+  -- Two mod-written stops (the engine-agnostic shape, no requests field needed
+  -- here -- the signature ignores requests on the engine-records readback path).
+  local function ours()
+    return {
+      { station = "nauvis", wait_conditions = { { type = "full", compare_type = "and" } } },
+      { station = "vulcanus", wait_conditions = { { type = "empty", compare_type = "and" } } },
+    }
+  end
+  -- The signature of the clean (mod-written) schedule -- what dispatcher.commit
+  -- would store, since the mod never writes temporary/interrupt records.
+  local stored = watchdog.schedule_signature(ours())
+
+  -- A refuel/rearm interrupt splices a TEMPORARY record into the live schedule.
+  local with_temporary = ours()
+  table.insert(with_temporary, 2,
+    { station = "nauvis-orbit", temporary = true,
+      wait_conditions = { { type = "time", ticks = 600, compare_type = "and" } } })
+  assert_eq(watchdog.schedule_signature(watchdog.signable_records(with_temporary)), stored,
+    "a temporary=true record spliced in -> signature unchanged (not a player edit)")
+
+  -- An interrupt-created (but NOT temporary) record spliced in is likewise ignored.
+  local with_interrupt = ours()
+  table.insert(with_interrupt, 1,
+    { station = "fuel-depot", created_by_interrupt = true,
+      wait_conditions = { { type = "full", compare_type = "and" } } })
+  assert_eq(watchdog.schedule_signature(watchdog.signable_records(with_interrupt)), stored,
+    "a created_by_interrupt=true record spliced in -> signature unchanged")
+
+  -- BOTH spliced at once -> still unchanged (filter drops either marker).
+  local with_both = ours()
+  table.insert(with_both, 2,
+    { station = "ammo-depot", created_by_interrupt = true, temporary = true,
+      wait_conditions = {} })
+  assert_eq(watchdog.schedule_signature(watchdog.signable_records(with_both)), stored,
+    "an interrupt+temporary record spliced in -> signature unchanged")
+
+  -- A PLAIN record the player adds (neither marker) DOES change the signature.
+  local with_plain = ours()
+  table.insert(with_plain, 2,
+    { station = "gleba", wait_conditions = { { type = "full", compare_type = "and" } } })
+  check(watchdog.schedule_signature(watchdog.signable_records(with_plain)) ~= stored,
+    "a plain (non-temporary, non-interrupt) record added -> signature CHANGES (player edit)")
+
+  -- Editing a station / wait on a signable record is still detected through the filter.
+  local rerouted = ours()
+  rerouted[2].station = "fulgora"
+  check(watchdog.schedule_signature(watchdog.signable_records(rerouted)) ~= stored,
+    "editing a signable record's station -> signature CHANGES")
+  local retimed = ours()
+  retimed[1].wait_conditions[1].compare_type = "or"
+  check(watchdog.schedule_signature(watchdog.signable_records(retimed)) ~= stored,
+    "editing a signable record's wait condition -> signature CHANGES")
+
+  -- signable_records itself: drops exactly the marked records, keeps order/identity.
+  assert_eq(#watchdog.signable_records(with_both), 2, "signable_records drops the marked record")
+  assert_eq(watchdog.signable_records(with_both)[1].station, "nauvis", "first signable record kept in order")
+  assert_eq(watchdog.signable_records(with_both)[2].station, "vulcanus", "second signable record kept in order")
+  assert_eq(#watchdog.signable_records(nil), 0, "nil records -> empty signable list")
+end)
+
 describe("watchdog.manifest_delivered -- completion over OUR cargo only (not whole hold)", function()
   -- count_fn from a plain hold table; items not present read as 0 (delivered).
   local function counter(hold)

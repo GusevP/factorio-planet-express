@@ -117,13 +117,20 @@ min=qty})`); vanilla rockets then launch the goods up.
 > source stop / only the return manifest at the dest" is realized by the mod
 > **re-issuing** the hub request as the ship advances stops. This lifecycle is now
 > implemented: `watchdog.note_progress` re-points the request on every stop
-> advance via the pure `watchdog.stop_request(a, current)` selector — forward
-> manifest at the source (stop 1, then refined by the re-clamp), **cleared during
-> the destination unload** (stop 2), the **return manifest** at the return-load
-> stop (stop 3), cleared on the drop (stop 4) — and `watchdog.free_assignment`
-> clears it when the assignment completes / times out / is withdrawn so a freed
-> ship stops launching cargo. Confirm the exact `LuaLogisticSections`
-> add/clear/`set_slot` calls in a running game.
+> advance via the pure `watchdog.stop_request(a, current)` selector. The shipped
+> route is a **THREE-stop turnaround on the same two planets** (one-way is the
+> first two stops): forward manifest at the source (**stop 1**, then refined by
+> the re-clamp); at the destination **TURNAROUND (stop 2)** the request becomes
+> the **return manifest** (loaded there while the pad pulls the forward cargo via
+> `allows_unloading`) for a two-way trip, or is **cleared** for a one-way unload;
+> cleared again on the return **drop** back at the source (**stop 3**) — and
+> `watchdog.free_assignment` clears it when the assignment completes / times out /
+> is withdrawn so a freed ship stops launching cargo. (Previously this note
+> described a FOUR-stop two-way re-point lifecycle; the shipped route is the
+> three-stop turnaround — see `schedule.records_for` in `scripts/schedule.lua` and
+> `watchdog.stop_request`, which keys the return manifest at `current == 2`.)
+> Confirm the exact `LuaLogisticSections` add/clear/`set_slot` calls in a running
+> game.
 >
 > Three details the wrapper now bakes in (re-confirm in-engine):
 > - **Dedicated mod section.** `schedule.apply_hub_request` never writes
@@ -161,8 +168,9 @@ know which stop the ship is at and whether its hold has drained:
   it is NOT by itself an "arrived" flag.]** Consequences the watchdog now bakes
   in (the per-`current` reads themselves stay [provisional — confirm in-engine]):
   - **Re-clamp** runs the WHOLE time the ship is on a load stop, not once "on
-    arrival": `current == 1` (forward) / `current == 3` (return) each re-clamp
-    every watchdog tick, because the single instant of arrival can't be read from
+    arrival": `current == 1` (forward load at the source) / `current == 2` (return
+    load at the destination TURNAROUND, three-stop route) each re-clamp every
+    watchdog tick, because the single instant of arrival can't be read from
     `current`. Lower-only, so re-clamping through the transit is harmless.
   - **Completion** can't trust `current >= #records` alone (that includes
     travelling to the last stop), so it also requires `platform.speed == 0`
@@ -190,6 +198,21 @@ know which stop the ship is at and whether its hold has drained:
   stop is ignored (no progress committed) until the ship returns to a route stop.
   Confirm the interrupt record/`current` behavior in a running game, then flip this
   note + this §1 entry to `[confirmed]`.
+  - **Player-edit signature filter (#5, Task 4) [provisional — confirm both flags
+    in-engine].** Interrupt-spliced platform schedule records carry
+    `created_by_interrupt = true` (it is part of the 2.0 `ScheduleRecord` shape,
+    listed above) and temporary stops carry `temporary = true`. The watchdog's
+    player-edit signature must NOT count these engine-inserted records, or a
+    refuel/rearm interrupt would mismatch the stored signature and falsely withdraw
+    a healthy ship before the `current_is_ours` guards run. So the readback path
+    signs `schedule_signature(watchdog.signable_records(sched.records))`, which
+    drops any record where `rec.temporary == true or rec.created_by_interrupt ==
+    true`; the commit-time sign is unaffected (the mod never writes
+    temporary/interrupt records). The Post-Completion playtest confirms BOTH flags
+    on a real interrupt; **documented fallback if either is disproved**: filter on
+    `not watchdog.station_is_ours(a, rec.station)` instead (drop records whose
+    station is not one of the assignment's own), accepting weaker detection of
+    player-added foreign stops.
 - **Platform hub per-(item,quality) cargo count:**
   `platform.hub.get_item_count(name, quality)` — gates the watchdog's "unload done
   / completed" check (`watchdog.completed` via the pure `manifest_delivered`) AND

@@ -266,6 +266,32 @@ function watchdog.schedule_signature(records)
   return table.concat(parts, "|")
 end
 
+-- Pure: drop the records the ENGINE splices into a live schedule so the player-edit
+-- signature compares only the records the mod actually wrote. A refuel/rearm
+-- INTERRUPT (or a temporary stop) makes the engine insert its own record(s) into
+-- `platform.schedule.records`; those carry `created_by_interrupt = true` (the marker
+-- api-notes §1 records on the 2.0 ScheduleRecord shape) and temporary stops carry
+-- `temporary = true`. Signing the raw live records would then mismatch the stored
+-- signature and falsely withdraw a HEALTHY ship as a "player edit" the moment an
+-- interrupt fires -- before `current_is_ours` ever guards it. So `read_signature`
+-- signs `schedule_signature(signable_records(sched.records))` and these spliced
+-- records are filtered out, while records the player adds at OUR stations / new
+-- stations still change the signature. `schedule_signature` itself stays unchanged
+-- (this is a pre-filter, not a signature change). Commit-time signing in
+-- `dispatcher.commit` is UNAFFECTED: the mod never writes temporary/interrupt
+-- records, so the commit-time record list is already free of them and filtering it
+-- is a no-op (the readback filter is what closes the asymmetry). Pure over the §1
+-- plain record tables.
+function watchdog.signable_records(records)
+  local out = {}
+  for _, rec in ipairs(records or {}) do
+    if not (rec.temporary == true or rec.created_by_interrupt == true) then
+      out[#out + 1] = rec
+    end
+  end
+  return out
+end
+
 -- ---------------------------------------------------------------------------
 -- alerts + freeing (IO over storage; verified by playtest)
 -- ---------------------------------------------------------------------------
@@ -356,7 +382,11 @@ function watchdog.read_signature(platform)
   if not (sched and sched.records) then
     return nil
   end
-  return watchdog.schedule_signature(sched.records)
+  -- Filter out engine-spliced refuel/rearm interrupt + temporary records before
+  -- signing (see `watchdog.signable_records`), else a mid-route interrupt would
+  -- mismatch the stored signature and falsely withdraw a healthy ship as a "player
+  -- edit" before the `current_is_ours` guards run.
+  return watchdog.schedule_signature(watchdog.signable_records(sched.records))
 end
 
 -- Did the player (or another mod) change a schedule the mod owns? Compares the
