@@ -85,6 +85,13 @@ local function read_launchable_stock(node, key)
   -- is order-independent (a commutative reduction, NOT a game-affecting decision
   -- iteration), so plain `pairs` is fine here.
   local surface, force = node.surface, node.force
+  -- Guard `surface.valid` (Task 6): a node whose surface was deleted has an
+  -- invalid `LuaSurface`, so reading `.name` off it below would error. Plain test
+  -- tables have no `.valid` field (absent => nil), so `== false` only short-circuits
+  -- on a real dead engine handle and the pure-Lua test runner is unaffected.
+  if surface and surface.valid == false then
+    return 0
+  end
   if not (surface and force and force.logistic_networks) then
     return 0
   end
@@ -118,8 +125,12 @@ local cache = { tick = nil, values = {} }
 -- or "?".
 local function cache_key(node, item)
   local sid = node.cache_key
-  if sid == nil and node.surface then
-    sid = node.surface.index or node.surface.name
+  -- Guard `surface.valid` (Task 6): a deleted surface's handle errors on `.index`
+  -- / `.name`. `== false` only fires on a real dead engine handle (plain test
+  -- tables have no `.valid` field), so the test runner keeps using node.surface.
+  local surface = node.surface
+  if sid == nil and surface and surface.valid ~= false then
+    sid = surface.index or surface.name
     local fid = node.force and (node.force.index or node.force.name)
     sid = tostring(sid) .. "@" .. tostring(fid or "?")
   end

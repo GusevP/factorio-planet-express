@@ -132,6 +132,49 @@ function registry.remove_platform(platform_id)
 end
 
 -- ---------------------------------------------------------------------------
+-- surface deletion (called from control.lua on on_pre_surface_deleted)
+-- ---------------------------------------------------------------------------
+
+-- A surface is about to be deleted (Task 6). We hook the PRE event because by
+-- the time `on_surface_deleted` fires the stored `node.surface` handle is
+-- already invalid and can't be matched against `event.surface_index`; in the
+-- pre-event the surface is still valid, so each node's surface index is
+-- readable. Prune every node still on that surface (its pad is going away with
+-- it) plus any fleet entry resolvable to that surface. The validity guards in
+-- `build_snapshot` / `stock.lua` remain the primary defense -- this handler just
+-- stops the ghost lingering until the next rebuild. Build-then-delete by key is
+-- order-independent (a per-entry validity test, not a decision over the set), so
+-- plain `pairs` is fine.
+function registry.on_pre_surface_deleted(surface_index)
+  if surface_index == nil then
+    return
+  end
+
+  local dead_nodes = {}
+  for id, node in pairs(storage.nodes or {}) do
+    local s = node.surface
+    if s and s.valid and s.index == surface_index then
+      dead_nodes[#dead_nodes + 1] = id
+    end
+  end
+  for _, id in ipairs(dead_nodes) do
+    registry.remove_node(id)
+  end
+
+  local dead_ships = {}
+  for key, entry in pairs(storage.fleet or {}) do
+    local platform = entry.platform
+    local s = platform and platform.valid and platform.surface
+    if s and s.valid and s.index == surface_index and entry.assignment == nil then
+      dead_ships[#dead_ships + 1] = key
+    end
+  end
+  for _, key in ipairs(dead_ships) do
+    registry.remove_platform(key)
+  end
+end
+
+-- ---------------------------------------------------------------------------
 -- event entry points (called from control.lua)
 -- ---------------------------------------------------------------------------
 
@@ -179,6 +222,34 @@ end
 function registry.rebuild()
   storage.nodes = storage.nodes or {}
   storage.fleet = storage.fleet or {}
+
+  -- Prune stale ghosts before re-scanning (Task 6). An entry whose live handle
+  -- went invalid (surface deleted, platform/pad gone without a clean
+  -- mine/destroy event) would otherwise linger and get picked as an export
+  -- source or dereferenced on the dispatcher tick. Build-then-delete by key is
+  -- order-independent (validity is per-entry, not a decision over the set), so
+  -- plain `pairs` is fine. A fleet entry that still holds a live assignment is
+  -- LEFT for the watchdog to free first -- prune only unassigned ghosts, so the
+  -- watchdog's destroyed-ship path still re-opens that assignment's demand.
+  local dead_nodes = {}
+  for id, node in pairs(storage.nodes) do
+    if not (node.entity and node.entity.valid) then
+      dead_nodes[#dead_nodes + 1] = id
+    end
+  end
+  for _, id in ipairs(dead_nodes) do
+    storage.nodes[id] = nil
+  end
+
+  local dead_ships = {}
+  for key, entry in pairs(storage.fleet) do
+    if not (entry.platform and entry.platform.valid) and entry.assignment == nil then
+      dead_ships[#dead_ships + 1] = key
+    end
+  end
+  for _, key in ipairs(dead_ships) do
+    storage.fleet[key] = nil
+  end
 
   -- pads live on planet surfaces
   for _, surface in pairs(game.surfaces) do

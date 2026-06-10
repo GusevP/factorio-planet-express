@@ -73,6 +73,17 @@ for _, removed_event in ipairs({
   script.on_event(removed_event, on_registry_removed, registry_entity_filter)
 end
 
+-- A surface (planet) is about to be deleted (Task 6). We hook the PRE event, not
+-- on_surface_deleted: by the time the post event fires the stored node.surface
+-- handle is already invalid and can't be matched against event.surface_index. In
+-- the pre-event the surface is still valid, so the registry can prune every node
+-- (and resolvable fleet entry) on it before its pad goes away with the surface.
+-- The build_snapshot / stock validity guards remain the primary defense; this
+-- just prevents ghosts lingering until the next rebuild.
+script.on_event(defines.events.on_pre_surface_deleted, function(event)
+  registry.on_pre_surface_deleted(event.surface_index)
+end)
+
 -- Dispatcher heartbeat (Task 5/6/10): on each tick of the configurable interval,
 -- match open demand to above-reserve supply, run the watchdog, and refresh the
 -- Monitor. The dispatcher and watchdog share one handler (firing on the same tick

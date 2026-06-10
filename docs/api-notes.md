@@ -450,6 +450,17 @@ ships), but correctness rests on the signature compare, not the event.
   `script_raised_destroy`, plus platform create/destroy events. **[provisional
   — confirm the full 2.0 event set + the platform-specific events in Task 3.]**
   Filter to cargo landing pads (and platform hubs) by `entity.name`/`type`.
+- Surface deletion for the registry (Task 6): `on_pre_surface_deleted` →
+  `registry.on_pre_surface_deleted(event.surface_index)`. **[provisional —
+  confirm `on_pre_surface_deleted` and its `event.surface_index` field in-engine.]**
+  We hook the PRE event (not `on_surface_deleted`) deliberately: in the pre-event
+  the surface is **still valid**, so each stored `node.surface` handle is readable
+  and its `.index` can be matched against `event.surface_index`; by the time
+  `on_surface_deleted` fires those handles are already invalid and unmatchable.
+  The handler prunes every node on the deleted surface (and any unassigned fleet
+  entry resolvable to it). The `build_snapshot` / `stock.lua` `.valid` guards are
+  the primary defense against a dead surface; this handler only stops ghosts
+  lingering until the next `registry.rebuild()`.
 - `LuaGuiElement` for both windows (Tasks 8/9). **[confirmed surface; details
   per task.]**
 - Trade tab relative-GUI anchor (Task 9): the Trade overlay is a

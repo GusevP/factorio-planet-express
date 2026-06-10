@@ -539,6 +539,13 @@ end
 -- in-engine before flipping the api-notes seam to [confirmed].
 function dispatcher.planet_name(node)
   local s = node and node.surface
+  -- Guard `.valid` before `.name` (Task 6): a node whose surface was deleted has
+  -- an invalid `LuaSurface` handle, and reading `.name` off it errors. Plain test
+  -- tables have no `.valid` field (absent => nil), so the guard degrades to the
+  -- old behavior under the pure-Lua test runner.
+  if s and s.valid == false then
+    return nil
+  end
   return s and s.name or nil
 end
 
@@ -625,29 +632,40 @@ function dispatcher.build_snapshot(_tick)
   local demanded_items = {}
 
   for id, node in registry.nodes() do
-    local open = demand.open_demand(node)
-    local unmet_by_item = {}
-    for _, d in ipairs(open) do
-      unmet_by_item[d.item] = d.unmet
-      demanded_items[d.item] = true
-      -- IO read (Task 6): tag each demanded item with its stack size so the pure
-      -- planner can attach it to manifest `items` for the slot-aware packer (Task
-      -- 7). Reading here keeps `plan`/`return_manifest` pure (they only copy the
-      -- snapshot field, never touch `prototypes`). `d.item` is a `qkey` (Task 9),
-      -- but stack_size is a per-NAME physical property (quality-independent), so
-      -- decode to the bare item name before the prototype read.
-      local name = qkey.qparse(d.item)
-      d.stack_size = dispatcher.stack_size_of(name)
+    -- Skip stale nodes (Task 6): a node whose pad entity or surface went invalid
+    -- (surface deleted, pad gone) must not be snapshotted -- it can't load or
+    -- receive cargo, and reading off the dead `LuaSurface` (planet_name, stock
+    -- surface-sum) would error. Skipping it here also kills the
+    -- "padless ghost planet picked as export source" path. The `.valid` field is
+    -- absent on plain test tables (nil), so `== false` only fires on a real dead
+    -- engine handle and the pure-Lua test runner is unaffected.
+    local entity_ok = not (node.entity and node.entity.valid == false)
+    local surface_ok = not (node.surface and node.surface.valid == false)
+    if entity_ok and surface_ok then
+      local open = demand.open_demand(node)
+      local unmet_by_item = {}
+      for _, d in ipairs(open) do
+        unmet_by_item[d.item] = d.unmet
+        demanded_items[d.item] = true
+        -- IO read (Task 6): tag each demanded item with its stack size so the pure
+        -- planner can attach it to manifest `items` for the slot-aware packer (Task
+        -- 7). Reading here keeps `plan`/`return_manifest` pure (they only copy the
+        -- snapshot field, never touch `prototypes`). `d.item` is a `qkey` (Task 9),
+        -- but stack_size is a per-NAME physical property (quality-independent), so
+        -- decode to the bare item name before the prototype read.
+        local name = qkey.qparse(d.item)
+        d.stack_size = dispatcher.stack_size_of(name)
+      end
+      nodes[id] = {
+        id = id,
+        planet = dispatcher.planet_name(node),
+        node = node,
+        force = dispatcher.force_key(node.force),
+        demand = open,
+        unmet_by_item = unmet_by_item,
+        surplus = {},
+      }
     end
-    nodes[id] = {
-      id = id,
-      planet = dispatcher.planet_name(node),
-      node = node,
-      force = dispatcher.force_key(node.force),
-      demand = open,
-      unmet_by_item = unmet_by_item,
-      surplus = {},
-    }
   end
 
   local committed = dispatcher.committed_surplus_by_node()
