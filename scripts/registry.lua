@@ -291,6 +291,45 @@ function registry.rebuild()
     registry.clear_pin(key)
   end
 
+  -- Heal fleet-key DRIFT (v2 self-heal). storage.fleet must be keyed by the
+  -- force-qualified registry.fleet_key; an entry still keyed by the legacy bare
+  -- platform.index (a pre-v2 save whose schema-gated migration never ran -- a
+  -- same-version mod repackage does NOT fire on_configuration_changed, so the
+  -- one-shot migrate_fleet_keys is skipped) makes EVERY fleet_key lookup miss:
+  -- the Fleet tab then can't find the ship to enroll and the dispatcher can't
+  -- match it. Re-key any entry whose stored key != fleet_key(its live platform),
+  -- preserving its enrollment/allow-list, and re-point assignments + pins that
+  -- referenced the old key. Idempotent (a correct key maps to itself), so this is
+  -- a no-op on a healthy index. Build-then-apply by key (order-independent, not a
+  -- decision loop), so plain `pairs` is fine.
+  local rekey = {}
+  for key, entry in pairs(storage.fleet) do
+    local platform = entry.platform
+    if platform and platform.valid then
+      local want = registry.fleet_key(platform)
+      if want ~= key then
+        rekey[#rekey + 1] = { old = key, new = want }
+      end
+    end
+  end
+  for _, r in ipairs(rekey) do
+    local entry = storage.fleet[r.old]
+    storage.fleet[r.old] = nil
+    entry.force = force_key_of(entry.platform.force) -- backfill (pre-v2 entries lacked it)
+    storage.fleet[r.new] = entry
+    for _, a in pairs(storage.assignments or {}) do
+      if a.ship == r.old then
+        a.ship = r.new
+      end
+    end
+    for _, node in pairs(storage.nodes or {}) do
+      if node.pin_ship == r.old then
+        node.pin_ship = r.new
+      end
+    end
+    state.debug_log("registry: re-keyed fleet " .. tostring(r.old) .. " -> " .. r.new)
+  end
+
   -- pads live on planet surfaces
   for _, surface in pairs(game.surfaces) do
     local pads = surface.find_entities_filtered({ name = registry.PAD_NAME })
