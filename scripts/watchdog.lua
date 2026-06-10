@@ -376,6 +376,10 @@ function watchdog.free_assignment(id, reason, ship_state, tick)
       ship = a.ship,
       source = a.source_planet,
       dest = a.dest_planet,
+      -- The assignment's force key (Task 8): lets the Monitor scope this alert to
+      -- the owning force. Nil on pre-Task-8 assignments -> the alert is visible to
+      -- all viewers (apply_force_scope keeps nil-force rows for everyone).
+      force = a.force,
     })
   end
   state.debug_log(string.format(

@@ -25,6 +25,7 @@
 -- ship starts/stops being dispatched).
 
 local fleet = require("scripts.fleet")
+local common = require("scripts.gui.common")
 
 local fleet_tab = {}
 
@@ -163,6 +164,12 @@ function fleet_tab.open(player, entity)
   if not fleet.tech_researched(player.force) then
     return
   end
+  -- Force isolation: only the OWNING force may enroll / restrict a platform.
+  -- Compare by the force KEY (index/name), not userdata equality, so a researched
+  -- force can't enroll a friendly FOREIGN force's platform just by opening its hub.
+  if common.force_key(entity.force) ~= common.force_key(player.force) then
+    return
+  end
   local id = platform.index
   local entry = id and fleet.get(id)
   if not entry then
@@ -224,11 +231,15 @@ function fleet_tab.on_gui_closed(event)
 end
 
 -- The open Fleet frame for an event element, or nil when the element isn't ours.
+-- Resolved by walking the element's OWN ancestry (common.ancestor_frame), not a
+-- `gui.relative[FRAME]` by-name fetch: that proves the event element really
+-- descends from our frame, so a foreign element merely COPYING our element name
+-- can't drive a write (enroll / allow-list) into the platform our frame edits.
 local function frame_of(el)
   if not (el and el.valid) then
     return nil
   end
-  return el.gui and el.gui.relative and el.gui.relative[FRAME] or nil
+  return common.ancestor_frame(el, FRAME)
 end
 
 -- Checkboxes: enroll + reserve-for-manual-use, both persisted to storage.fleet

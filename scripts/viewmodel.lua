@@ -387,6 +387,71 @@ function viewmodel.apply_filters(view, filters)
 end
 
 -- ---------------------------------------------------------------------------
+-- pure force scoping (the testable seam between gather's stamps and build)
+-- ---------------------------------------------------------------------------
+
+-- Keep a row iff it belongs to the viewing force. A row's `force` stamp matching
+-- `force_key` is in-scope; a row with a NIL stamp is visible to EVERY viewer --
+-- that covers pre-existing saves (fleet/assignment/alert rows created before the
+-- stamp existed) so the Monitor never goes mysteriously empty after the upgrade
+-- (those rows self-heal as assignments complete and alerts age out of the cap).
+local function in_force_scope(row_force, force_key)
+  return row_force == nil or row_force == force_key
+end
+
+-- Scope a plain gathered `world` to `force_key`, returning a NEW world holding
+-- only the rows this force may see (plus nil-stamped rows, visible to all). PURE:
+-- plain table in, plain table out, no `storage`/`game` -- so the calc test drives
+-- it directly with a hand-built two-force world. A nil `force_key` (no viewing
+-- force resolvable) keeps everything, matching the gather-only behavior.
+--
+-- fleet/assignments are KEYED maps (id -> row), rebuilt by keyed write (order-
+-- independent, plain pairs is fine); waiting/alerts are ordered LISTS, rebuilt
+-- by ipairs so the gather/build's deterministic order is preserved.
+function viewmodel.apply_force_scope(world, force_key)
+  world = world or {}
+  if force_key == nil then
+    return world
+  end
+
+  local fleet_out = {}
+  for id, e in pairs(world.fleet or {}) do
+    if in_force_scope(e.force, force_key) then
+      fleet_out[id] = e
+    end
+  end
+
+  local assignments_out = {}
+  for id, a in pairs(world.assignments or {}) do
+    if in_force_scope(a.force, force_key) then
+      assignments_out[id] = a
+    end
+  end
+
+  local waiting_out = {}
+  for _, w in ipairs(world.waiting or {}) do
+    if in_force_scope(w.force, force_key) then
+      waiting_out[#waiting_out + 1] = w
+    end
+  end
+
+  local alerts_out = {}
+  for _, al in ipairs(world.alerts or {}) do
+    if in_force_scope(al.force, force_key) then
+      alerts_out[#alerts_out + 1] = al
+    end
+  end
+
+  return {
+    fleet = fleet_out,
+    assignments = assignments_out,
+    waiting = waiting_out,
+    alerts = alerts_out,
+    tick = world.tick,
+  }
+end
+
+-- ---------------------------------------------------------------------------
 -- IO: gather the plain `world` from storage + a fresh dispatcher snapshot
 -- (provisional -- engine-touching; verified by manual playtest)
 -- ---------------------------------------------------------------------------
@@ -399,7 +464,12 @@ local demand = require("scripts.demand")
 -- Snapshot `storage` + a fresh dispatcher snapshot into the plain `world` the
 -- pure `build` consumes. Reuses the per-tick stock cache (begin_tick is a no-op
 -- if the dispatcher already opened this tick). Only called in-game.
-function viewmodel.gather(tick)
+--
+-- gather STAMPS a `force` key onto every projected row (fleet entry, assignment,
+-- waiting-demand, alert) but does NOT filter -- the pure `apply_force_scope`
+-- below does the scoping. `force_key` is accepted for symmetry with that step (it
+-- is unused here; gather always stamps every row regardless of the viewer).
+function viewmodel.gather(tick, force_key)
   stock.begin_tick(tick)
   local snapshot = dispatcher.build_snapshot(tick)
   -- Same minimum-trip threshold the stock layer suppresses surplus against, so
@@ -443,6 +513,7 @@ function viewmodel.gather(tick)
       state = entry.state,
       assignment = entry.assignment,
       enrolled = entry.enrolled,
+      force = entry.force, -- force stamp (Task 7) for Monitor scoping
     }
   end
 
@@ -457,6 +528,7 @@ function viewmodel.gather(tick)
       return_manifest = a.return_manifest,
       phase = a.phase,
       deadline_tick = a.deadline_tick,
+      force = a.force, -- force stamp (dispatcher.commit) for Monitor scoping
     }
   end
 
@@ -493,15 +565,30 @@ function viewmodel.gather(tick)
         candidates = candidates,
         min_trip = mt,
         in_transit = (serving[dnode.planet] and serving[dnode.planet][d.item]) == true,
+        force = dnode.force, -- force stamp (build_snapshot) for Monitor scoping
       }
     end
+  end
+
+  -- alerts, projected so each carries a top-level `force` stamp (lifted from the
+  -- alert detail the watchdog records). build keeps the original shape (kind /
+  -- assignment / tick / detail); the extra `force` is read only by the scope step.
+  local alerts = {}
+  for _, al in ipairs(storage.alerts or {}) do
+    alerts[#alerts + 1] = {
+      kind = al.kind,
+      assignment = al.assignment,
+      tick = al.tick,
+      detail = al.detail,
+      force = al.detail and al.detail.force or nil,
+    }
   end
 
   return {
     fleet = fleet_world,
     assignments = assignments_world,
     waiting = waiting,
-    alerts = storage.alerts or {},
+    alerts = alerts,
     tick = tick,
   }
 end

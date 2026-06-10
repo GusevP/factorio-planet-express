@@ -27,6 +27,7 @@ local reserves = require("scripts.reserves")
 local demand = require("scripts.demand")
 local viewmodel = require("scripts.viewmodel")
 local qkey = require("scripts.qkey")
+local common = require("scripts.gui.common")
 
 local trade_tab = {}
 
@@ -109,7 +110,14 @@ local function numeric_field(parent, name, value, width)
   return tf
 end
 
+-- The reserve/priority ceiling: matches the settings-stage maximum for the
+-- mod's numeric settings. A `textfield` with `numeric=true` still accepts a
+-- pasted 30-digit string, which `tonumber` happily turns into ~1e29 -- clamping
+-- here stops that from persisting an absurd reserve that would never be exported.
+local MAX_AMOUNT = 1000000
+
 -- Parse a textfield's content as a non-negative integer, or nil when blank.
+-- Clamped to [0, MAX_AMOUNT] so a pasted oversized string can't persist.
 local function parse_amount(text)
   if text == nil then
     return nil
@@ -125,6 +133,8 @@ local function parse_amount(text)
   n = math.floor(n)
   if n < 0 then
     n = 0
+  elseif n > MAX_AMOUNT then
+    n = MAX_AMOUNT
   end
   return n
 end
@@ -290,6 +300,12 @@ function trade_tab.open(player, entity)
   if not trade_tab.tech_researched(player.force) then
     return
   end
+  -- Force isolation: only the OWNING force may steer a pad's trade. Compare by
+  -- the force KEY (index/name), not userdata equality, so a researched force can't
+  -- edit a friendly FOREIGN force's reserves/imports just because it opened the pad.
+  if common.force_key(entity.force) ~= common.force_key(player.force) then
+    return
+  end
   local node = node_of(entity)
   if not node then
     return
@@ -351,11 +367,17 @@ end
 
 -- Find the editing node + the open frame for any event element under the Trade
 -- frame. Returns (node, frame) or nil when the element isn't ours.
+--
+-- The frame is resolved by walking the element's OWN ancestry (common.ancestor_frame),
+-- not by fetching `gui.relative[FRAME]` by name: the relative lookup alone would
+-- let a foreign element that merely COPIES our element name drive a write into
+-- whatever node OUR open frame happens to be editing. The ancestry walk proves
+-- the event element actually descends from our frame before we touch storage.
 local function context(el)
   if not (el and el.valid) then
     return nil
   end
-  local frame = el.gui and el.gui.relative and el.gui.relative[FRAME]
+  local frame = common.ancestor_frame(el, FRAME)
   if not frame then
     return nil
   end

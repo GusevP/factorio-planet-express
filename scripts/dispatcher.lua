@@ -470,6 +470,9 @@ function dispatcher.plan(snapshot)
               source_planet = src.planet,
               dest_id = dest_id,
               dest_planet = dest.planet,
+              -- The DEST node's force key, carried onto the assignment in commit so
+              -- the Monitor can scope the shipment to the receiving force.
+              dest_force = dest.force,
               ship_id = ship.id,
               ship = ship,
               manifest = manifest,
@@ -783,6 +786,10 @@ function dispatcher.commit(p, tick)
     -- than the per-stop wait `TIMEOUT`.
     deadline_tick = tick + dispatcher.NO_PROGRESS_WINDOW,
     deadline_window = dispatcher.NO_PROGRESS_WINDOW,
+    -- The dest node's force key (Task 8). Stamped so the fleet Monitor can scope
+    -- the shipment / its alerts to the receiving force (read back in
+    -- viewmodel.gather and watchdog.raise_alert detail).
+    force = p.dest_force,
     -- The per-stop wait-condition timeout used to BUILD the schedule. Stored so the
     -- watchdog can rebuild the wait conditions (after a re-clamp) with the same one.
     wait_timeout = dispatcher.TIMEOUT,

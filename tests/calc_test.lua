@@ -2275,6 +2275,91 @@ describe("build: alerts newest-first, display-capped, full count in summary", fu
   assert_eq(view.summary.alerts, 25, "summary reports the full backlog, not the capped display")
 end)
 
+describe("apply_force_scope: keeps only the viewing force's rows + nil-force rows (Task 8)", function()
+  -- A hand-built two-force world (force "a" vs "b") across every projected list,
+  -- plus one nil-force row in each (a pre-Task-8 save). Scoping to "a" must keep
+  -- a's rows AND the nil-force rows, drop b's; the lists stay in their input order.
+  local world = {
+    fleet = {
+      ["a/1"] = { state = "idle", force = "a" },
+      ["b/1"] = { state = "idle", force = "b" },
+      ["legacy/1"] = { state = "idle", force = nil },
+    },
+    assignments = {
+      [10] = { ship = "a/1", force = "a" },
+      [11] = { ship = "b/1", force = "b" },
+      [12] = { ship = "legacy/1", force = nil },
+    },
+    waiting = {
+      { item = "iron-plate", dest_planet = "pa", unmet = 5, force = "a" },
+      { item = "copper-plate", dest_planet = "pb", unmet = 5, force = "b" },
+      { item = "stone", dest_planet = "pl", unmet = 5, force = nil },
+    },
+    alerts = {
+      { kind = "timeout", assignment = 10, force = "a" },
+      { kind = "timeout", assignment = 11, force = "b" },
+      { kind = "timeout", assignment = 12, force = nil },
+    },
+    tick = 7,
+  }
+
+  local scoped = viewmodel.apply_force_scope(world, "a")
+
+  -- fleet: a's + nil survive, b's gone.
+  assert_eq(scoped.fleet["a/1"] ~= nil, true, "scope a: own fleet kept")
+  assert_eq(scoped.fleet["legacy/1"] ~= nil, true, "scope a: nil-force fleet kept (legacy save)")
+  assert_eq(scoped.fleet["b/1"], nil, "scope a: foreign fleet dropped")
+
+  -- assignments: same rule.
+  assert_eq(scoped.assignments[10] ~= nil, true, "scope a: own assignment kept")
+  assert_eq(scoped.assignments[12] ~= nil, true, "scope a: nil-force assignment kept")
+  assert_eq(scoped.assignments[11], nil, "scope a: foreign assignment dropped")
+
+  -- waiting: only a + nil, order preserved (a row at index 1, nil row at index 2).
+  assert_eq(#scoped.waiting, 2, "scope a: 2 waiting rows kept (own + nil)")
+  assert_eq(scoped.waiting[1].item, "iron-plate", "scope a: own waiting first (order preserved)")
+  assert_eq(scoped.waiting[2].item, "stone", "scope a: nil-force waiting kept")
+
+  -- alerts: only a + nil.
+  assert_eq(#scoped.alerts, 2, "scope a: 2 alerts kept (own + nil)")
+  assert_eq(scoped.alerts[1].assignment, 10, "scope a: own alert kept")
+  assert_eq(scoped.alerts[2].assignment, 12, "scope a: nil-force alert kept")
+
+  -- tick threads through unchanged.
+  assert_eq(scoped.tick, 7, "scope a: tick preserved")
+
+  -- Scoping to "b" is the mirror: b's rows + the nil rows survive, a's gone.
+  local scoped_b = viewmodel.apply_force_scope(world, "b")
+  assert_eq(scoped_b.fleet["b/1"] ~= nil, true, "scope b: own fleet kept")
+  assert_eq(scoped_b.fleet["legacy/1"] ~= nil, true, "scope b: nil-force fleet kept")
+  assert_eq(scoped_b.fleet["a/1"], nil, "scope b: foreign fleet dropped")
+  assert_eq(#scoped_b.waiting, 2, "scope b: 2 waiting rows (own + nil)")
+  assert_eq(scoped_b.waiting[1].item, "copper-plate", "scope b: own waiting kept")
+
+  -- A nil viewing force (no resolvable force) keeps everything (gather-only behavior).
+  local unscoped = viewmodel.apply_force_scope(world, nil)
+  assert_eq(unscoped.fleet["a/1"] ~= nil and unscoped.fleet["b/1"] ~= nil, true,
+    "nil force_key: every row kept")
+end)
+
+describe("apply_force_scope: nil-force rows visible to EVERY viewer (Task 8)", function()
+  -- A world holding ONLY nil-force rows: every viewer (any force key) sees all of
+  -- them -- the pre-existing-save self-heal guarantee.
+  local world = {
+    fleet = { ["legacy/1"] = { state = "idle", force = nil } },
+    assignments = { [1] = { ship = "legacy/1", force = nil } },
+    waiting = { { item = "x", dest_planet = "p", unmet = 1, force = nil } },
+    alerts = { { kind = "timeout", assignment = 1, force = nil } },
+  }
+  for _, fk in ipairs({ "a", "b", "anything" }) do
+    local scoped = viewmodel.apply_force_scope(world, fk)
+    assert_eq(scoped.fleet["legacy/1"] ~= nil, true, "nil-force fleet visible to " .. fk)
+    assert_eq(scoped.assignments[1] ~= nil, true, "nil-force assignment visible to " .. fk)
+    assert_eq(#scoped.waiting, 1, "nil-force waiting visible to " .. fk)
+    assert_eq(#scoped.alerts, 1, "nil-force alert visible to " .. fk)
+  end
+end)
+
 describe("build: ticks_left is nil when the deadline or world tick is absent", function()
   -- no deadline_tick on the assignment -> nil (not a bogus 0, no nil arithmetic).
   local view = viewmodel.build({

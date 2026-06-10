@@ -18,6 +18,7 @@ local viewmodel = require("scripts.viewmodel")
 local fleet = require("scripts.fleet")
 local registry = require("scripts.registry")
 local qkey = require("scripts.qkey")
+local common = require("scripts.gui.common")
 
 local monitor = {}
 
@@ -200,8 +201,19 @@ local function render_body(body, view)
   end
 end
 
+-- The force key of the player a (gui.screen) Monitor frame belongs to. Every
+-- screen frame carries the `player_index` that created it, so the viewing force
+-- is resolvable without per-player state -- it scopes the panel to that force.
+local function viewing_force_key(frame)
+  local player = frame.player_index and game and game.get_player(frame.player_index)
+  return player and common.force_key(player.force) or nil
+end
+
 -- Rebuild the body of an already-open frame from the live world, honoring the
--- frame's current filters.
+-- frame's current filters. The world is gathered, then SCOPED to the viewing
+-- player's force (gather stamps a `force` on every row; apply_force_scope keeps
+-- only this force's rows plus pre-existing nil-force rows) BEFORE the pure build,
+-- so the panel only ever shows this force's ships / shipments / waiting / alerts.
 local function refresh_frame(frame)
   -- BODY lives inside the scroll pane; element name-indexing only finds direct
   -- children, so resolve it through the (named) scroll, not straight off frame.
@@ -211,7 +223,9 @@ local function refresh_frame(frame)
     return
   end
   local tick = game and game.tick or 0
-  local view = viewmodel.build(viewmodel.gather(tick))
+  local force_key = viewing_force_key(frame)
+  local world = viewmodel.apply_force_scope(viewmodel.gather(tick, force_key), force_key)
+  local view = viewmodel.build(world)
   view = viewmodel.apply_filters(view, read_filters(frame))
   render_body(body, view)
 end
@@ -225,6 +239,12 @@ local function frame_of(player)
 end
 
 function monitor.open(player)
+  -- Same tech gate as both tabs: the Monitor is part of the interplanetary-trade
+  -- feature, so it only opens once the force has researched it. (A player whose
+  -- force lacks the tech sees nothing useful -- no enrolled fleet, no nodes.)
+  if not fleet.tech_researched(player.force) then
+    return
+  end
   if frame_of(player) then
     refresh_frame(frame_of(player))
     return
@@ -327,9 +347,18 @@ function monitor.on_shortcut(event)
 end
 
 -- Recenter the player on a ship's platform when its roster button is clicked.
+-- Force-gated: only recenter on a ship belonging to the player's OWN force, so a
+-- crafted/foreign ship key (or a foreign ship that slipped into a nil-force
+-- roster row) can't drag the view onto another force's platform.
 local function recenter_on_ship(player, ship_id)
   local entry = registry and fleet.get(ship_id)
-  local platform = entry and entry.platform
+  if not entry then
+    return
+  end
+  if common.force_key(player.force) ~= entry.force then
+    return
+  end
+  local platform = entry.platform
   local hub = platform and platform.valid and platform.hub
   if hub and hub.valid then
     -- Remote View centered on the hub entity (2.0 replaced LuaPlayer.zoom_to_world
@@ -350,6 +379,13 @@ function monitor.on_gui_click(event)
   if not player then
     return
   end
+  -- The Monitor is a `gui.screen` frame fetched BY NAME elsewhere; an event
+  -- element's name is attacker-controlled, so before acting on a click verify the
+  -- element actually descends from OUR frame (a foreign element merely COPYING
+  -- our CLOSE / ship-button name otherwise drives our handler).
+  if not common.ancestor_frame(el, FRAME) then
+    return
+  end
   if el.name == CLOSE then
     monitor.close(player)
     return
@@ -364,15 +400,19 @@ function monitor.on_gui_click(event)
   end
 end
 
--- Re-render on any filter change (text or dropdown).
+-- Re-render on any filter change (text or dropdown). Resolve the frame by walking
+-- the element's OWN ancestry (not a fixed `el.parent.parent` hop, which a foreign
+-- element of the same name in a different layout could spoof): a copied-name
+-- filter widget elsewhere never finds OUR frame as an ancestor, so it can't drive
+-- a refresh of our panel.
 local function on_filter_changed(event)
   local el = event.element
   if not (el and el.valid) then
     return
   end
   if el.name == FILTER_PLANET or el.name == FILTER_ITEM or el.name == FILTER_STATE then
-    local frame = el.parent and el.parent.parent
-    if frame and frame.name == FRAME then
+    local frame = common.ancestor_frame(el, FRAME)
+    if frame then
       refresh_frame(frame)
     end
   end
