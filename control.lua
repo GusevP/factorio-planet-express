@@ -10,7 +10,6 @@ local registry = require("scripts.registry")
 local dispatcher = require("scripts.dispatcher")
 local watchdog = require("scripts.watchdog")
 local fleet = require("scripts.fleet")
-local schedule = require("scripts.schedule")
 local monitor = require("scripts.gui.monitor")
 local trade_tab = require("scripts.gui.trade_tab")
 local fleet_tab = require("scripts.gui.fleet_tab")
@@ -260,52 +259,6 @@ commands.add_command("pe-status", "Planet Express: print dispatcher diagnostics"
   for _, line in ipairs(dispatcher.diagnose()) do
     out("[planet-express] " .. line)
   end
-end)
-
--- Dev convenience: `/pe-reset` clears every assignment, every ENROLLED ship's mod
--- schedule + hub request, and the alert log, returning the fleet to idle so the
--- next dispatcher tick re-plans every route from a clean slate. Handy while
--- iterating on the mod, where schedules written by an earlier (buggy) build
--- linger across reloads. Only the mod's own state is touched -- un-enrolled
--- (player) ships are left alone. Iteration order is irrelevant (the end state is
--- "all freed + all enrolled ships idle"), so plain `pairs` is fine here.
-commands.add_command("pe-reset", "Planet Express: clear all assignments + fleet schedules and re-dispatch fresh (dev)", function(cmd)
-  local player = cmd.player_index and game.get_player(cmd.player_index)
-  local function out(line)
-    if player then player.print(line) else game.print(line) end
-  end
-
-  local freed = 0
-  if storage.assignments then
-    local ids = {}
-    for id in pairs(storage.assignments) do
-      ids[#ids + 1] = id
-    end
-    for _, id in ipairs(ids) do
-      -- silent free -> clears the hub request + schedule and idles the ship
-      watchdog.free_assignment(id, nil, fleet.IDLE, game.tick)
-      freed = freed + 1
-    end
-  end
-
-  local reset = 0
-  for _, entry in pairs(storage.fleet or {}) do
-    if entry.enrolled == true then
-      local platform = entry.platform
-      if platform and platform.valid then
-        schedule.apply_hub_request(platform, {}, nil) -- clear any stale mod request
-        schedule.clear_route(platform)                -- drop the mod route, KEEP interrupts
-      end
-      entry.assignment = nil
-      entry.state = fleet.IDLE
-      reset = reset + 1
-    end
-  end
-
-  storage.alerts = {}
-  out(string.format(
-    "[planet-express] reset: freed %d assignment(s), idled %d enrolled ship(s). Routes re-plan next dispatch tick.",
-    freed, reset))
 end)
 
 -- In-engine test hook (factorio-test) -- a PERMANENT STUB SEAM, not a live

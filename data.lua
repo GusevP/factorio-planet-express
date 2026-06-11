@@ -49,3 +49,34 @@ data:extend({
     order = "z[planet-express]",
   },
 })
+
+-- Tips and Tricks entries (data stage): a small in-game guide to the mod, shown in
+-- the vanilla Tips and Tricks window. Text-only (no simulation); every entry starts
+-- "unlocked" so the whole guide is browsable at any time without firing popups. The
+-- control stage never touches these -- they are static data. Names/descriptions live
+-- under the [tips-and-tricks-item-*] locale sections.
+local TIP_ICON = "__planet-express__/graphics/tech.png"
+
+local function tip(name, order, indent, is_title)
+  return {
+    type = "tips-and-tricks-item",
+    name = name,
+    category = "planet-express",
+    order = order,
+    indent = indent,
+    is_title = is_title or nil, -- false -> omit (default)
+    starting_status = "unlocked",
+    icon = TIP_ICON,
+    icon_size = 256,
+  }
+end
+
+data:extend({
+  { type = "tips-and-tricks-item-category", name = "planet-express", order = "z[planet-express]" },
+  tip("planet-express", "a", 0, true), -- category title (overview)
+  tip("planet-express-research", "b", 1),
+  tip("planet-express-enroll", "c", 1),
+  tip("planet-express-trade", "d", 1),
+  tip("planet-express-monitor", "e", 1),
+  tip("planet-express-stuck", "f", 1),
+})

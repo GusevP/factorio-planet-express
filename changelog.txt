@@ -1,0 +1,14 @@
+Version: 1.0.0
+Date: 2026-06-11
+  Features:
+    - First public release.
+    - Automatic interplanetary cargo logistics: dispatches your enrolled space platforms to carry surplus goods between planets, sized to live cargo landing pad demand. Uses real rockets and real schedules only — never spawns, destroys, teleports, or hand-inserts anything.
+    - Per-platform enrollment on the Space Platform Hub (Fleet tab), with a per-ship planet allow-list and a "reserve for manual use" opt-out.
+    - Per-planet Trade tab on the Cargo Landing Pad: reserves (keep stock before exporting), per-item priorities, and a preferred-ship pin.
+    - Two-way return trips: a returning ship also carries goods the destination has spare and the source still needs.
+    - Quality-aware cargo: demand, surplus, and shipments are tracked per (item, quality).
+    - Always-visible fleet status panel in the top-left corner (working / idle / stuck), and a full Fleet Monitor with per-ship routes and a per-planet Demand view showing what is delivering, loading, or waiting — and why.
+    - Watchdog that frees stranded or timed-out ships and steps back when you edit a ship's schedule yourself.
+    - In-game Tips and Tricks guide.
+  Info:
+    - Requires Factorio: Space Age. Gated behind the "Interplanetary Trade Logistics" technology.

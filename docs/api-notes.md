@@ -569,6 +569,13 @@ ships), but correctness rests on the signature compare, not the event.
 - Technology researched-state read: `force.technologies["interplanetary-trade-logistics"].researched`
   gates the Trade tab + fleet toggle (Tasks 9/10). **[confirmed]** The minimal
   technology prototype already exists (Task 0 `data.lua`).
+- Tips and Tricks (`data.lua`): a `tips-and-tricks-item-category` + text-only
+  `tips-and-tricks-item` entries (one `is_title` overview + per-feature sub-tips),
+  all `starting_status = "unlocked"` (browsable any time, no popups). Names /
+  descriptions under the `[tips-and-tricks-item-category|name|description]` locale
+  sections. **[confirmed]** against the 2.0 prototype docs: `image`/`simulation` are
+  optional (text-only is valid) and `"unlocked"` is a valid `TipStatus`. Static
+  data only -- the control stage never reads these.
 
 ---
 
