@@ -502,6 +502,38 @@ ships), but correctness rests on the signature compare, not the event.
   in 2.0 (it was a 1.1 API); Space Age replaced world-zoom with Remote View, so
   use `centered_on` (entity) or `set_controller{type=remote, surface, position}`.
   `set_controller` remote takes `surface`/`position` but no `zoom`.
+- Planet box component (`gui/common.lua` `planet_box`): a shared label rendering a
+  planet's icon + localised name, reused by every GUI that references a planet
+  (Monitor roster first; shipments / waiting / Trade & Fleet tabs to follow). The
+  localised name is `game.planets[name].prototype.localised_name` (**[confirmed]**,
+  same as the Fleet tab allow-list below); the icon is the `[planet=<name>]`
+  rich-text tag. **[provisional — confirm the `[planet=<name>]` rich-text tag
+  renders in 2.0; if the tag name is wrong it degrades to visible literal text, not
+  a crash, so it is safe to ship behind a playtest check.]**
+- Monitor roster ship name + current location (`gui/monitor.lua`): each row shows
+  the ship's `platform.name` (the button caption) and the planet it is currently
+  parked at via the existing `dispatcher.ship_planet` seam (`platform.space_location.name`,
+  nil in transit). **[provisional — `platform.name` is read surface-only; the
+  location reuses the same `space_location` seam as ship selection, still to flip.]**
+  Cargo is NOT shown in the roster for now (manifest still rides on the row for the
+  item filter).
+- Item components (`gui/common.lua` `item_box` / `item_chips`): shared item
+  renderers reused across GUIs. `item_box` = icon + localised name (line-per-item
+  views, e.g. Monitor waiting detail); `item_chips` = a compact "[item=…]×N …" run
+  (collapsed waiting summary, future cargo views). The icon is the
+  `[item=<name>,quality=<q>]` rich-text tag (quality omitted for normal); the name is
+  `prototypes.item[name].localised_name`. **[provisional — confirm the
+  `[item=…,quality=…]` rich-text tag and `prototypes.item[name].localised_name` in
+  2.0; the tag degrades to literal text if wrong.]**
+- Monitor Demand section is per-planet COLLAPSIBLE: groups come from the pure
+  `viewmodel.group_demand(shipments, waiting)`, which buckets each planet's inbound
+  cargo into delivering / loading (by the in-flight assignment's phase) / waiting
+  (blocked open demand). Collapsed shows the bucket COUNTS; expanded lists each item.
+  The per-player expanded-planet set persists in
+  `storage.monitor_expanded[player_index]` (survives the body rebuild + save/load),
+  toggled from `on_gui_click` on a per-planet button (planet carried in `tags`).
+  Storage write on a per-player MP-synced input -> deterministic; read only for that
+  player's view. No new engine seam (plain `on_gui_click` + `storage`).
 - Fleet-tab per-ship allow-list (`gui/fleet_tab.lua`): the planet universe comes
   from `game.planets` (a `LuaCustomTable[name -> LuaPlanet]`). `planet.name` is the
   internal name and MATCHES the surface name the dispatcher compares against
@@ -519,6 +551,21 @@ ships), but correctness rests on the signature compare, not the event.
   old `game.item_prototypes`.]**
 - Top-bar shortcut prototype + sprite in `data.lua` (Task 8). **[confirmed
   surface.]**
+- Monitor top-left dock (`gui/monitor.lua`): an always-visible folded status panel
+  is a `player.gui.top` frame holding one status button, built/updated for every
+  player on the dispatcher cadence (`monitor.refresh_all`, plus an immediate nudge
+  on `on_player_created` / `on_research_finished`) and gated by the same
+  `fleet.tech_researched` check as the centered Monitor (no tech -> the dock is
+  torn down). The button click toggles the centered Monitor (`monitor.toggle`).
+  **[provisional — confirm `player.gui.top` is the intended top-left anchor in 2.0
+  (vs. the `mod-gui` lualib button flow), and that mutating `button.style.font_color`
+  / `caption` per refresh is well-behaved there.]** The counts come from the pure
+  `viewmodel.build` summary (`ships_active` = working, `ships_idle`, and
+  `ships_stuck` = enrolled ships the watchdog flagged `stranded`, a DISJOINT roster
+  bucket), so the shaping stays testable; only the frame/button render here is
+  engine-touching. The `stranded` flag itself (`fleet.set_stranded`) is set by the
+  watchdog on an assignment timeout and cleared when the ship next works a stop or
+  completes a delivery -- it is display-only and never gates dispatch.
 - Technology researched-state read: `force.technologies["interplanetary-trade-logistics"].researched`
   gates the Trade tab + fleet toggle (Tasks 9/10). **[confirmed]** The minimal
   technology prototype already exists (Task 0 `data.lua`).

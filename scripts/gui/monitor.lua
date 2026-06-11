@@ -34,6 +34,21 @@ local CLOSE = "planet-express-monitor-close"
 local SCROLL = "planet-express-monitor-scroll"
 local BODY = "planet-express-monitor-body"
 local SHIP_BTN_PREFIX = "planet-express-monitor-ship-"
+-- Per-planet collapse toggle in the Waiting section (one per group). The planet
+-- name is appended for a unique/greppable element name; the handler reads the raw
+-- planet from the button's `tags`, not the name suffix.
+local WAITING_TOGGLE_PREFIX = "planet-express-monitor-waiting-toggle-"
+
+-- The always-visible top-left dock: a small `gui.top` panel with a single
+-- status button. Folded view only -- its button shows "N working · N idle · N
+-- stuck" and clicking it toggles the full centered Monitor (FRAME) above.
+local DOCK = "planet-express-monitor-dock"
+local DOCK_BTN = "planet-express-monitor-dock-btn"
+
+-- Button caption colors: tinted red when something is stuck (blocked > 0), plain
+-- white otherwise. Plain tables (not engine handles) so they cost nothing to hold.
+local DOCK_COLOR_STUCK = { r = 1.0, g = 0.55, b = 0.55 }
+local DOCK_COLOR_OK = { r = 1.0, g = 1.0, b = 1.0 }
 
 -- The state-filter dropdown options. Index 1 is "any"; the rest map to fleet
 -- lifecycle states. Kept in one place so the dropdown and the lookup agree.
@@ -43,27 +58,55 @@ local STATE_OPTIONS = { "any", fleet.IDLE, fleet.ENROUTE, fleet.LOADING, fleet.U
 -- small render helpers
 -- ---------------------------------------------------------------------------
 
--- Render a manifest table { [qkey]=qty } as a short stable string. Each cargo
--- key is a compound `qkey(item, quality)`; `qkey.label` decodes it for display so
--- the panel shows "iron-plate x50" (or "iron-plate (uncommon) x50"), never the
--- raw "iron-plate@normal x50". Sorted by qkey for a stable, deterministic order.
-local function manifest_caption(manifest)
-  if not manifest then
-    return "-"
-  end
-  local parts = {}
-  -- Stable order: iterate in sorted-key order via the determinism helper.
-  for k, qty in state.sorted_pairs(manifest) do
-    parts[#parts + 1] = qkey.label(k) .. " x" .. tostring(qty)
-  end
-  if #parts == 0 then
-    return "-"
-  end
-  return table.concat(parts, ", ")
-end
-
 local function reason_caption(reason)
   return { "planet-express.reason-" .. reason }
+end
+
+-- Status tint for the expanded Demand lines: delivering = green (on its way),
+-- loading = amber (being picked up), waiting = red (nothing on it yet).
+local DEMAND_COLOR = {
+  delivering = { r = 0.6, g = 1.0, b = 0.6 },
+  loading = { r = 1.0, g = 0.85, b = 0.45 },
+  waiting = { r = 1.0, g = 0.6, b = 0.6 },
+}
+
+-- The collapsed Demand summary: "N delivering · N loading · N waiting", omitting
+-- any zero bucket. Each part reuses the bare status word key, prefixed with the
+-- count, joined into one LocalisedString.
+local function demand_summary_caption(counts)
+  local parts = {}
+  local function add(n, word_key)
+    if n and n > 0 then
+      parts[#parts + 1] = { "", tostring(n), " ", { "planet-express." .. word_key } }
+    end
+  end
+  add(counts.delivering, "monitor-demand-delivering")
+  add(counts.loading, "monitor-demand-loading")
+  add(counts.waiting, "monitor-demand-waiting")
+  local cap = { "" }
+  for i, p in ipairs(parts) do
+    if i > 1 then
+      cap[#cap + 1] = "  ·  "
+    end
+    cap[#cap + 1] = p
+  end
+  return cap
+end
+
+-- Per-player set of EXPANDED waiting planets (collapsed is the compact default).
+-- Lives in `storage` because render_body does a full `body.clear()` every refresh,
+-- so element-local state would be wiped; storage also survives save/load. Keyed by
+-- player_index -> { [planet]=true }. Lazy-init (additive -- no migration). Written
+-- only on a toggle click (a per-player, MP-synced input action -> deterministic);
+-- read only to decide what THAT player sees, never a game decision.
+local function expanded_set(player_index)
+  storage.monitor_expanded = storage.monitor_expanded or {}
+  local s = storage.monitor_expanded[player_index]
+  if not s then
+    s = {}
+    storage.monitor_expanded[player_index] = s
+  end
+  return s
 end
 
 -- ---------------------------------------------------------------------------
@@ -104,82 +147,114 @@ end
 local function render_body(body, view)
   body.clear()
 
-  -- one-line network summary
-  local s = view.summary
-  body.add({
-    type = "label",
-    caption = {
-      "planet-express.monitor-summary",
-      s.ships_total, s.ships_idle, s.ships_active, s.shipments, s.waiting, s.alerts,
-    },
-  })
+  -- (The one-line network summary that used to head the body is gone: the
+  -- always-visible top-left dock now carries the working/idle/stuck ship counts,
+  -- and the Shipments/Waiting/Alerts counts it also showed are just the lengths of
+  -- the sections rendered immediately below.)
 
   -- roster
   add_section_header(body, { "planet-express.monitor-roster" })
   if #view.roster == 0 then
     body.add({ type = "label", caption = { "planet-express.monitor-empty" } })
   else
-    local t = body.add({ type = "table", column_count = 4 })
+    -- Two columns: a wide name button (recenters on click) + one info flow reading
+    -- "[from] -> [to] · <status> on [planet]". Cargo is intentionally NOT shown for
+    -- now (the manifest still rides on the row for the item filter; the shared
+    -- `common.item_chips` renderer is ready for an upcoming cargo view).
+    local t = body.add({ type = "table", column_count = 2 })
     for _, r in ipairs(view.roster) do
       -- The fleet key is a force-qualified string ("<force>/<index>"); a "/" is
       -- awkward to round-trip through an element-name suffix, so carry the raw key
       -- in the button's `tags` instead and read it back from there in the click
-      -- handler. The name keeps a stable index-only suffix purely to make the
-      -- button greppable/unique within the table.
+      -- handler. The element name keeps a stable index-only suffix purely to make
+      -- the button greppable/unique within the table; the CAPTION is the ship's
+      -- platform name (falling back to "#<id>" when no live handle resolved one).
       local btn = t.add({
         type = "button",
         name = SHIP_BTN_PREFIX .. tostring(r.ship_id),
-        caption = "#" .. tostring(r.ship_id),
+        caption = r.name or ("#" .. tostring(r.ship_id)),
         tooltip = { "planet-express.monitor-recenter" },
         tags = { pe_ship_key = r.ship_id },
       })
-      btn.style.width = 60
-      t.add({ type = "label", caption = r.state or "-" })
-      t.add({
-        type = "label",
-        caption = (r.from and r.to) and (tostring(r.from) .. " -> " .. tostring(r.to)) or "-",
-      })
-      t.add({ type = "label", caption = manifest_caption(r.manifest) })
-    end
-  end
+      -- No fixed width: let the button size to the name (min 120) so the name is
+      -- always visible; the table column aligns every row to the widest.
+      btn.style.minimal_width = 120
+      btn.style.horizontal_align = "left"
 
-  -- active shipments
-  add_section_header(body, { "planet-express.monitor-shipments" })
-  if #view.shipments == 0 then
-    body.add({ type = "label", caption = { "planet-express.monitor-empty" } })
-  else
-    -- ship / route / phase / manifest. The phase column renders the assignment's
-    -- live lifecycle state (enroute / loading / unloading), derived by the watchdog
-    -- and threaded through viewmodel.gather/build. No header row on this table, so
-    -- the raw state string is rendered inline (no locale key needed).
-    local t = body.add({ type = "table", column_count = 4 })
-    for _, sh in ipairs(view.shipments) do
-      t.add({ type = "label", caption = "#" .. tostring(sh.ship_id) })
-      t.add({
-        type = "label",
-        caption = tostring(sh.from) .. " -> " .. tostring(sh.to),
-      })
-      t.add({ type = "label", caption = sh.phase or "-" })
-      local m = manifest_caption(sh.manifest)
-      if sh.return_manifest and next(sh.return_manifest) then
-        m = m .. "  (return: " .. manifest_caption(sh.return_manifest) .. ")"
+      local info = t.add({ type = "flow", direction = "horizontal" })
+      info.style.vertical_align = "center"
+      -- Route boxes only when the ship has a job (idle/stuck ships have no from/to).
+      if r.from and r.to then
+        common.planet_box(info, r.from)
+        info.add({ type = "label", caption = " → " })
+        common.planet_box(info, r.to)
+        info.add({ type = "label", caption = "  ·  " })
       end
-      t.add({ type = "label", caption = m })
+      -- A stranded ship reads "idle"/"enroute" in `r.state` (the watchdog freed or
+      -- re-dispatched it), but it is counted as STUCK in the summary -- show "stuck"
+      -- here too so the expanded roster agrees with the dock's "N stuck".
+      info.add({ type = "label", caption = r.stranded and "stuck" or (r.state or "-") })
+      -- "on <planet>" only when the ship is actually parked somewhere (in transit
+      -- has no current planet).
+      if r.location then
+        info.add({ type = "label", caption = " on " })
+        common.planet_box(info, r.location)
+      end
     end
   end
 
-  -- waiting demand (+ reason)
+  -- (The "Active shipments" section is gone -- the roster shows every in-flight
+  -- ship. `view.shipments` is reused below by group_demand to bucket each planet's
+  -- inbound cargo by phase.)
+
+  -- demand: per-planet collapsible groups. Collapsed (the compact default) is one
+  -- row per planet -- planet box + "N delivering · N loading · N waiting"; expanding
+  -- shows a line per item (status · icon+name · ×qty · reason-if-waiting). The
+  -- expand state is per-player and persisted (expanded_set), so it survives this
+  -- full-rebuild refresh.
   add_section_header(body, { "planet-express.monitor-waiting" })
-  if #view.waiting == 0 then
+  local groups = viewmodel.group_demand(view.shipments, view.waiting)
+  if #groups == 0 then
     body.add({ type = "label", caption = { "planet-express.monitor-empty" } })
   else
-    local t = body.add({ type = "table", column_count = 4 })
-    for _, w in ipairs(view.waiting) do
-      t.add({ type = "label", caption = tostring(w.dest_planet) })
-      -- `w.item` is a cargo qkey; decode it for display (see manifest_caption).
-      t.add({ type = "label", caption = qkey.label(w.item) })
-      t.add({ type = "label", caption = "x" .. tostring(w.unmet) })
-      t.add({ type = "label", caption = reason_caption(w.reason) })
+    local expanded = expanded_set(body.player_index)
+    for _, g in ipairs(groups) do
+      local is_open = expanded[g.planet] == true
+
+      -- header row: collapse toggle + planet box + the collapsed count summary.
+      local header = body.add({ type = "flow", direction = "horizontal" })
+      header.style.vertical_align = "center"
+      local toggle = header.add({
+        type = "button",
+        name = WAITING_TOGGLE_PREFIX .. tostring(g.planet),
+        caption = is_open and "▼" or "▶",
+        tooltip = { "planet-express.monitor-waiting-toggle" },
+        tags = { pe_waiting_planet = g.planet },
+      })
+      toggle.style.width = 26
+      toggle.style.padding = 0
+      common.planet_box(header, g.planet)
+      header.add({ type = "label", caption = "  " })
+      header.add({ type = "label", caption = demand_summary_caption(g.counts) })
+
+      if is_open then
+        -- expanded: one indented line per item -- status · icon+name · ×qty · reason.
+        local detail = body.add({ type = "flow", direction = "vertical" })
+        detail.style.left_padding = 28
+        for _, it in ipairs(g.items) do
+          local line = detail.add({ type = "flow", direction = "horizontal" })
+          line.style.vertical_align = "center"
+          local tag = line.add({ type = "label", caption = { "planet-express.monitor-demand-" .. it.status } })
+          tag.style.font_color = DEMAND_COLOR[it.status]
+          tag.style.minimal_width = 72
+          common.item_box(line, it.item)
+          line.add({ type = "label", caption = "  ×" .. tostring(it.qty) })
+          if it.reason then
+            line.add({ type = "label", caption = "  ·  " })
+            line.add({ type = "label", caption = reason_caption(it.reason) })
+          end
+        end
+      end
     end
   end
 
@@ -214,7 +289,7 @@ end
 -- player's force (gather stamps a `force` on every row; apply_force_scope keeps
 -- only this force's rows plus pre-existing nil-force rows) BEFORE the pure build,
 -- so the panel only ever shows this force's ships / shipments / waiting / alerts.
-local function refresh_frame(frame)
+local function refresh_frame(frame, world)
   -- BODY lives inside the scroll pane; element name-indexing only finds direct
   -- children, so resolve it through the (named) scroll, not straight off frame.
   local scroll = frame[SCROLL]
@@ -222,12 +297,54 @@ local function refresh_frame(frame)
   if not body then
     return
   end
-  local tick = game and game.tick or 0
+  -- `world` is the shared gather (refresh_all gathers ONCE per tick and threads it
+  -- to every open frame + dock); the on-demand open() path passes none, so gather
+  -- here. gather is force-independent (it stamps but never filters), so one world
+  -- scopes correctly per viewer.
+  world = world or viewmodel.gather(game and game.tick or 0)
   local force_key = viewing_force_key(frame)
-  local world = viewmodel.apply_force_scope(viewmodel.gather(tick), force_key)
-  local view = viewmodel.build(world)
+  local scoped = viewmodel.apply_force_scope(world, force_key)
+  local view = viewmodel.build(scoped)
   view = viewmodel.apply_filters(view, read_filters(frame))
   render_body(body, view)
+end
+
+-- ---------------------------------------------------------------------------
+-- top-left dock (always-visible folded status)
+-- ---------------------------------------------------------------------------
+
+-- Build the dock frame (once) in the player's top-left panel stack. The single
+-- status button carries the folded summary line; clicking it toggles the full
+-- Monitor (handled in on_gui_click). Returns the frame.
+local function build_dock(player)
+  local frame = player.gui.top.add({ type = "frame", name = DOCK, direction = "horizontal" })
+  frame.add({
+    type = "button",
+    name = DOCK_BTN,
+    tooltip = { "planet-express.monitor-dock-tooltip" },
+  })
+  return frame
+end
+
+-- Build-or-update the dock for one player. Gated by the SAME tech as the Monitor:
+-- a force without the research has no fleet to monitor, so the dock is torn down
+-- (or never built). Otherwise the button caption is refreshed from the pure
+-- summary, scoped to this player's force, and tinted when anything is stuck.
+local function render_dock(player, world)
+  local existing = player.gui.top[DOCK]
+  if not fleet.tech_researched(player.force) then
+    if existing then
+      existing.destroy()
+    end
+    return
+  end
+  local frame = existing or build_dock(player)
+  local btn = frame[DOCK_BTN]
+  world = world or viewmodel.gather(game and game.tick or 0)
+  local scoped = viewmodel.apply_force_scope(world, common.force_key(player.force))
+  local s = viewmodel.build(scoped).summary
+  btn.caption = { "planet-express.monitor-dock-summary", s.ships_active, s.ships_idle, s.ships_stuck }
+  btn.style.font_color = (s.ships_stuck > 0) and DOCK_COLOR_STUCK or DOCK_COLOR_OK
 end
 
 -- ---------------------------------------------------------------------------
@@ -318,16 +435,20 @@ function monitor.toggle(player)
   end
 end
 
--- Refresh the panel for every player who has it open. Called on the dispatcher
--- timer (not per tick).
+-- Refresh the always-visible dock for every player, plus the full panel for every
+-- player who has it open. Called on the dispatcher timer (not per tick). The
+-- world is gathered ONCE here and threaded into both renders -- gather builds a
+-- fresh dispatcher snapshot, so doing it per-player would multiply that work.
 function monitor.refresh_all()
   if not game then
     return
   end
+  local world = viewmodel.gather(game.tick or 0)
   for _, player in pairs(game.players) do
+    render_dock(player, world)
     local frame = frame_of(player)
     if frame then
-      refresh_frame(frame)
+      refresh_frame(frame, world)
     end
   end
 end
@@ -379,6 +500,17 @@ function monitor.on_gui_click(event)
   if not player then
     return
   end
+  -- Top-left dock button: toggles the centered Monitor. It lives in its OWN frame
+  -- (gui.top), not the screen FRAME, so handle it BEFORE the FRAME ancestor guard
+  -- below (which would otherwise return early and swallow the click). Same trust
+  -- check, against the dock frame -- a foreign element copying DOCK_BTN's name in
+  -- some other window never finds OUR dock as an ancestor.
+  if el.name == DOCK_BTN then
+    if common.ancestor_frame(el, DOCK) then
+      monitor.toggle(player)
+    end
+    return
+  end
   -- The Monitor is a `gui.screen` frame fetched BY NAME elsewhere; an event
   -- element's name is attacker-controlled, so before acting on a click verify the
   -- element actually descends from OUR frame (a foreign element merely COPYING
@@ -396,6 +528,20 @@ function monitor.on_gui_click(event)
     local ship_key = el.tags and el.tags.pe_ship_key
     if ship_key ~= nil then
       recenter_on_ship(player, ship_key)
+    end
+    return
+  end
+  if el.name:sub(1, #WAITING_TOGGLE_PREFIX) == WAITING_TOGGLE_PREFIX then
+    -- Flip this planet's collapse state (read the planet from tags, not the name
+    -- suffix) and re-render the panel so the group expands/collapses.
+    local planet = el.tags and el.tags.pe_waiting_planet
+    if planet ~= nil then
+      local set = expanded_set(player.index)
+      set[planet] = (not set[planet]) or nil -- toggle; clear to keep the set small
+      local frame = frame_of(player)
+      if frame then
+        refresh_frame(frame)
+      end
     end
   end
 end

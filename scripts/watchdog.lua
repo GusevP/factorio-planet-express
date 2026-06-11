@@ -649,12 +649,20 @@ function watchdog.run(tick)
       -- dispatcher re-evaluates this idle ship next tick. Freeing also clears the
       -- mod route + hub request, so the cyclic schedule can't loop it around again.
       watchdog.free_assignment(id, nil, fleet.IDLE, tick)
+      -- Delivered: a previously-stranded ship has recovered, so clear the flag
+      -- (it just completed a roundtrip -- it is demonstrably not stuck).
+      fleet.set_stranded(a.ship, false)
     else
       -- Reset the no-progress clock on stop advances BEFORE testing the deadline,
       -- so a ship that just progressed is never falsely timed out.
       watchdog.note_progress(a, platform, tick)
       if watchdog.expired(a.deadline_tick, tick) then
         watchdog.free_assignment(id, watchdog.ALERT_TIMEOUT, fleet.IDLE, tick)
+        -- Flag the freed ship STRANDED so the Monitor's "stuck" count surfaces it.
+        -- It was just released to idle, but it made no progress for a full deadline
+        -- (no fuel / no rockets / blocked), so it is stuck, not merely idle. Cleared
+        -- once it next reaches a load/unload stop (below) or completes a delivery.
+        fleet.set_stranded(a.ship, true)
       else
         watchdog.maybe_reclamp(a, platform, id)
         if watchdog.load_impossible(a, platform) then
@@ -678,6 +686,13 @@ function watchdog.run(tick)
           local phase = watchdog.phase_for(a, current, parked)
           fleet.set_state(a.ship, phase)
           a.phase = phase
+          if phase ~= fleet.ENROUTE then
+            -- Parked at one of OUR stops loading/unloading -> real progress, so a
+            -- previously-stranded ship is no longer stuck. ENROUTE alone does NOT
+            -- clear it: a stranded ship re-dispatched reads ENROUTE but still can't
+            -- fly, so it must stay stuck until it physically works a stop.
+            fleet.set_stranded(a.ship, false)
+          end
         end
       end
     end

@@ -2218,6 +2218,7 @@ describe("build: roster/state mapping + summary counts", function()
   assert_eq(view.summary.ships_idle, 1, "1 idle")
   assert_eq(view.summary.ships_active, 1, "1 active (enroute)")
   assert_eq(view.summary.ships_withdrawn, 1, "1 withdrawn")
+  assert_eq(view.summary.ships_stuck, 0, "none stranded -> 0 stuck")
   assert_eq(view.summary.shipments, 1, "1 active shipment")
 
   -- shipment row carries ticks_left = deadline - tick.
@@ -2275,6 +2276,99 @@ describe("build: waiting classification + deterministic sort", function()
   assert_eq(view.waiting[2].dest_planet, "vulcanus", "vulcanus second")
   assert_eq(view.waiting[2].reason, viewmodel.REASON_NO_SHIP, "vulcanus copper no_ship")
   assert_eq(view.summary.waiting, 2, "2 waiting items")
+end)
+
+describe("group_demand: per-planet delivering/loading/waiting buckets", function()
+  -- Two ships to nauvis: one LOADING steel (at source), one ENROUTE with iron
+  -- (delivering). One ship UNLOADING coal at vulcanus (delivering). Plus open
+  -- demand: copper (no_ship) waits at nauvis; an in_transit iron row is excluded;
+  -- stone (no_source) waits at vulcanus.
+  local shipments = {
+    { to = "nauvis", phase = fleet.LOADING, manifest = { ["steel@normal"] = 50 } },
+    { to = "nauvis", phase = fleet.ENROUTE, manifest = { ["iron@normal"] = 200 } },
+    { to = "vulcanus", phase = fleet.UNLOADING, manifest = { ["coal@normal"] = 80 } },
+  }
+  local waiting = {
+    { item = "copper@normal", dest_planet = "nauvis", unmet = 100, reason = "no_ship" },
+    { item = "iron@normal", dest_planet = "nauvis", unmet = 30, reason = "in_transit" },
+    { item = "stone@normal", dest_planet = "vulcanus", unmet = 50, reason = "no_source" },
+  }
+  local groups = viewmodel.group_demand(shipments, waiting)
+
+  assert_eq(#groups, 2, "two planets, sorted")
+  assert_eq(groups[1].planet, "nauvis", "nauvis sorts first")
+  assert_eq(groups[1].counts.delivering, 1, "nauvis: iron enroute -> 1 delivering")
+  assert_eq(groups[1].counts.loading, 1, "nauvis: steel at source -> 1 loading")
+  assert_eq(groups[1].counts.waiting, 1, "nauvis: copper no_ship; in_transit iron excluded")
+  assert_eq(groups[2].planet, "vulcanus")
+  assert_eq(groups[2].counts.delivering, 1, "vulcanus: coal unloading counts as delivering")
+  assert_eq(groups[2].counts.waiting, 1, "vulcanus: stone no_source")
+
+  -- item rows carry status (+ reason on waiting), in delivering/loading/waiting order.
+  assert_eq(groups[1].items[1].status, "delivering", "delivering items emitted first")
+  assert_eq(groups[1].items[1].qty, 200, "delivering qty = manifest amount")
+  local copper
+  for _, it in ipairs(groups[1].items) do
+    if it.item == "copper@normal" then copper = it end
+  end
+  assert_eq(copper.status, "waiting", "copper is waiting")
+  assert_eq(copper.qty, 100, "waiting qty = unmet")
+  assert_eq(copper.reason, "no_ship", "waiting carries its blocker reason")
+end)
+
+describe("group_demand: delivering wins over loading; in-flight never waits", function()
+  local shipments = {
+    { to = "nauvis", phase = fleet.LOADING, manifest = { ["iron@normal"] = 50 } },
+    { to = "nauvis", phase = fleet.ENROUTE, manifest = { ["iron@normal"] = 100 } },
+  }
+  local groups = viewmodel.group_demand(shipments, {})
+  assert_eq(#groups, 1, "one planet")
+  assert_eq(groups[1].counts.delivering, 1, "iron counts once, as delivering")
+  assert_eq(groups[1].counts.loading, 0, "not double-counted as loading")
+end)
+
+describe("group_demand: empty input -> empty groups", function()
+  assert_eq(#viewmodel.group_demand({}, {}), 0, "nothing in flight or waiting -> no groups")
+  assert_eq(#viewmodel.group_demand(nil, nil), 0, "nil tolerated -> no groups")
+end)
+
+describe("build: summary.ships_stuck counts stranded ships as a disjoint bucket", function()
+  -- "Stuck" is a SHIP count (the watchdog's stranded flag), NOT a demand/route
+  -- count. A stranded ship reads idle (freed) or enroute (re-dispatched) in its
+  -- lifecycle state, but must count as stuck -- and only stuck, never also
+  -- idle/working -- so working+idle+stuck+withdrawn partitions the roster.
+  local world = {
+    fleet = {
+      [10] = { enrolled = true, state = fleet.IDLE, name = "Hauler A", location = "nauvis" }, -- idle
+      [11] = { enrolled = true, state = fleet.ENROUTE, assignment = 1 },                 -- working
+      [12] = { enrolled = true, state = fleet.IDLE, stranded = true },                   -- stuck (idle+stranded)
+      [13] = { enrolled = true, state = fleet.ENROUTE, assignment = 2, stranded = true },-- stuck (enroute+stranded)
+      [14] = { enrolled = true, state = fleet.WITHDRAWN },                               -- withdrawn
+    },
+    assignments = {
+      [1] = { ship = 11, source_planet = "nauvis", dest_planet = "vulcanus" },
+      [2] = { ship = 13, source_planet = "nauvis", dest_planet = "gleba" },
+    },
+    alerts = {},
+    tick = 0,
+  }
+  local view = viewmodel.build(world)
+
+  assert_eq(view.summary.ships_total, 5, "5 ships on the roster")
+  assert_eq(view.summary.ships_active, 1, "only the non-stranded enroute ship is working")
+  assert_eq(view.summary.ships_idle, 1, "only the non-stranded idle ship is idle")
+  assert_eq(view.summary.ships_stuck, 2, "both stranded ships are stuck, whatever their state")
+  assert_eq(view.summary.ships_withdrawn, 1, "withdrawn is unaffected by stranded")
+  assert_eq(
+    view.summary.ships_active + view.summary.ships_idle
+      + view.summary.ships_stuck + view.summary.ships_withdrawn,
+    5, "buckets are disjoint and partition the roster")
+  -- the stranded flag also rides on the roster row so the expanded Monitor agrees.
+  assert_eq(view.roster[3].stranded, true, "ship 12 (roster sorted) flagged stranded on its row")
+  assert_eq(view.roster[1].stranded, false, "an unstranded ship reports stranded=false")
+  -- platform name + current location pass through to the roster row for display.
+  assert_eq(view.roster[1].name, "Hauler A", "roster row carries the ship's platform name")
+  assert_eq(view.roster[1].location, "nauvis", "roster row carries the ship's current planet")
 end)
 
 describe("apply_filters: planet / item / state narrowing", function()

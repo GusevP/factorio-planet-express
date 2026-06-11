@@ -7,12 +7,102 @@
 -- the element really descends from one of OUR frames -- not a foreign element
 -- that merely COPIES our element name.
 --
--- This module is engine-touching only in the trivial sense that it walks
--- `el.parent` (a LuaGuiElement chain) -- there is no `storage`/`game`/`settings`
--- access, so it still loads under plain `lua`. It deliberately holds NO shaping
--- logic (that lives in the pure viewmodel); it is pure routing/trust glue.
+-- Besides that trust glue it also hosts the shared `planet_box` RENDER component
+-- (so every GUI labels a planet identically). That reads `game.planets` -- but
+-- only when CALLED, never at module load -- so the module still `require`s cleanly
+-- under plain `lua`. It holds no DECISION/shaping logic (that stays in the pure
+-- viewmodel); the planet box is pure view.
+
+local qkey = require("scripts.qkey")
 
 local common = {}
+
+-- ---------------------------------------------------------------------------
+-- shared render component: the "planet box"
+-- ---------------------------------------------------------------------------
+
+-- A planet's icon + localised name as a LocalisedString: `<icon> <Name>` (falling
+-- back to the raw internal name, then a dash). `name` is the internal
+-- planet/space-location name (the dispatcher's route key).
+-- `game.planets[name].prototype.localised_name` is the display name (api-notes §5,
+-- confirmed); `[planet=<name>]` is the icon (rich text, provisional). Local so the
+-- caption shaping stays in one place.
+local function planet_caption(name)
+  if name == nil then
+    return "—"
+  end
+  local planet = game and game.planets and game.planets[name]
+  local nice = planet and planet.prototype and planet.prototype.localised_name
+  return { "", "[planet=" .. name .. "] ", nice or name }
+end
+
+-- Reusable "planet box" component: one element showing a planet's icon + name, so
+-- every GUI that references a planet (Monitor roster / shipments / waiting, the
+-- Trade & Fleet tabs, ...) renders it the SAME way -- change it here, change it
+-- everywhere. Adds the box to `parent` and returns the element. A nil / unknown
+-- `name` degrades to a plain dash, so callers never special-case a missing planet.
+function common.planet_box(parent, name)
+  return parent.add({ type = "label", caption = planet_caption(name) })
+end
+
+-- ---------------------------------------------------------------------------
+-- shared render component: items (icon + name, and compact icon chips)
+-- ---------------------------------------------------------------------------
+
+-- The rich-text item icon tag for a cargo `key` (a compound `qkey(item, quality)`):
+-- "[item=iron-plate]" (normal) or "[item=iron-plate,quality=uncommon]". Local, so
+-- both item renderers below build the tag the same way. [provisional rich-text tag]
+local function item_tag(name, quality)
+  if quality == nil or quality == qkey.DEFAULT_QUALITY then
+    return "[item=" .. name .. "]"
+  end
+  return "[item=" .. name .. ",quality=" .. quality .. "]"
+end
+
+-- A planet's item-box sibling: one element showing an item's icon + localised name
+-- (with the quality parenthesised when not normal), for the line-per-item views
+-- (Monitor waiting detail, future cargo views). `key` is the compound qkey;
+-- `prototypes.item[name].localised_name` is the display name (2.0 `prototypes`),
+-- falling back to the raw name. Adds the box to `parent` and returns it.
+function common.item_box(parent, key)
+  local name, quality = qkey.qparse(key)
+  local proto = prototypes and prototypes.item and prototypes.item[name]
+  local nice = proto and proto.localised_name or name
+  local caption
+  if quality ~= qkey.DEFAULT_QUALITY then
+    caption = { "", item_tag(name, quality) .. " ", nice, " (", quality, ")" }
+  else
+    caption = { "", item_tag(name, quality) .. " ", nice }
+  end
+  return parent.add({ type = "label", caption = caption })
+end
+
+-- A compact run of item ICONS with counts as a single rich-text string:
+-- "[item=iron-plate]×200 [item=copper-plate]×100". `qty_by_key` is { [qkey]=count }.
+-- Sorted by qkey (string sort -> deterministic across peers / save-load). Returns
+-- nil for an empty / nil map so callers can skip the cell.
+--
+-- NOTE: not currently called -- the shared item-chip renderer kept ready for the
+-- upcoming cargo view (the Demand section shows status counts, not chips).
+function common.item_chips(qty_by_key)
+  if not qty_by_key then
+    return nil
+  end
+  local keys = {}
+  for k in pairs(qty_by_key) do
+    keys[#keys + 1] = k
+  end
+  if #keys == 0 then
+    return nil
+  end
+  table.sort(keys)
+  local parts = {}
+  for _, k in ipairs(keys) do
+    local name, quality = qkey.qparse(k)
+    parts[#parts + 1] = item_tag(name, quality) .. "×" .. tostring(qty_by_key[k])
+  end
+  return table.concat(parts, " ")
+end
 
 -- Walk `el`'s ancestry upward and return the first ancestor (or `el` itself)
 -- whose `.name` equals `frame_name`, else nil. Defeats a foreign element that

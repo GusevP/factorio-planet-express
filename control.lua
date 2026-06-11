@@ -190,6 +190,22 @@ end)
 
 script.on_event(defines.events.on_lua_shortcut, monitor.on_shortcut)
 
+-- The Monitor's top-left dock is always visible once a force has the trade tech.
+-- refresh_all (the dispatcher cadence) builds/updates every player's dock, but
+-- that leaves a one-interval gap for a fresh join or a just-finished research, so
+-- nudge it immediately on both. on_research_finished is filtered to the gating
+-- tech -- the dock appears the instant the player unlocks the feature, and
+-- unrelated research never triggers a needless snapshot.
+script.on_event(defines.events.on_player_created, function()
+  monitor.refresh_all()
+end)
+
+script.on_event(defines.events.on_research_finished, function(event)
+  if event.research and event.research.name == fleet.TECH then
+    monitor.refresh_all()
+  end
+end)
+
 script.on_event(defines.events.on_gui_opened, function(event)
   trade_tab.on_gui_opened(event)
   fleet_tab.on_gui_opened(event)

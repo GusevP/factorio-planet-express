@@ -6,7 +6,7 @@
 -- A fleet entry (in `storage.fleet[platform_id]`) is a plain table:
 --   { platform, enrolled=bool, allowed_planets={names}|"all"|nil,
 --     reserve_for_manual_use=bool, state="idle|enroute|loading|unloading|withdrawn",
---     assignment=<id>|nil }
+--     assignment=<id>|nil, stranded=bool }
 --
 -- Design split (per the plan's pure-function seam): the ELIGIBILITY math
 -- (`allows_planet`, `idle_eligible`) is PURE over a plain entry table -- no
@@ -208,6 +208,22 @@ function fleet.set_assignment(platform_id, assignment_id)
   local entry = fleet.get(platform_id)
   if entry then
     entry.assignment = assignment_id
+  end
+  return entry
+end
+
+-- Mark / clear a ship as STRANDED. The watchdog sets this when a ship's
+-- assignment times out (no fuel / no rockets / no progress for a full deadline)
+-- and clears it once the ship makes real progress again (reaches a load/unload
+-- stop) or completes a delivery. DISPLAY-ONLY: it does NOT gate dispatch (a
+-- stranded ship is still freed to idle and re-dispatched -- `idle_eligible` never
+-- reads it); it drives the Monitor's "stuck" count so a broken ship is visible at
+-- a glance instead of hiding in the idle bucket. Additive optional field, so
+-- pre-existing fleet entries (nil) read as not-stranded with no migration.
+function fleet.set_stranded(platform_id, stranded)
+  local entry = fleet.get(platform_id)
+  if entry then
+    entry.stranded = stranded == true
   end
   return entry
 end

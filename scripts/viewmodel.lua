@@ -14,13 +14,14 @@
 --     consumes. It is the only engine-touching function here.
 --
 -- The view model shape `build` returns:
---   { roster    = { { ship_id, state, from, to, manifest, assignment_id }, ... },
+--   { roster    = { { ship_id, name, state, stranded, location, from, to,
+--                     manifest, assignment_id }, ... },
 --     shipments = { { id, ship_id, from, to, manifest, return_manifest, phase,
 --                     ticks_left }, ... },
 --     waiting   = { { item, dest_planet, unmet, reason }, ... },
 --     alerts    = { { kind, assignment, tick, detail }, ... },  -- newest first
 --     summary   = { ships_total, ships_idle, ships_active, ships_withdrawn,
---                   shipments, waiting, alerts } }
+--                   ships_stuck, shipments, waiting, alerts } }
 
 local state = require("scripts.state")
 local fleet = require("scripts.fleet")
@@ -134,20 +135,30 @@ function viewmodel.build(world)
   -- being un-enrolled mid-flight, which stays visible until the watchdog frees it
   -- (otherwise its in-flight shipment would show with no ship behind it).
   local roster = {}
-  local idle, active, withdrawn = 0, 0, 0
+  local idle, active, withdrawn, stuck = 0, 0, 0, 0
   for _, sid in ipairs(state.sorted_keys(fleet_in)) do
     local e = fleet_in[sid]
     if e.enrolled == true or e.assignment ~= nil then
       local a = e.assignment and assignments[e.assignment] or nil
       roster[#roster + 1] = {
         ship_id = sid,
+        name = e.name, -- platform name for display (nil under the pure test runner)
         state = e.state,
+        stranded = e.stranded == true,
+        location = e.location, -- planet the ship is currently AT (nil in transit)
         from = a and a.source_planet or nil,
         to = a and a.dest_planet or nil,
         manifest = a and a.manifest or nil,
         assignment_id = e.assignment,
       }
-      if e.state == fleet.IDLE then
+      -- DISJOINT buckets so working+idle+stuck+withdrawn partitions the roster.
+      -- `stranded` takes precedence over the lifecycle state: a stranded ship reads
+      -- idle (freed by the watchdog) or enroute (re-dispatched, still can't fly), but
+      -- either way it is STUCK, not idle/working -- the dock's "N stuck" must not
+      -- double-count it into another bucket.
+      if e.stranded == true then
+        stuck = stuck + 1
+      elseif e.state == fleet.IDLE then
         idle = idle + 1
       elseif e.state == fleet.WITHDRAWN then
         withdrawn = withdrawn + 1
@@ -206,6 +217,7 @@ function viewmodel.build(world)
     ships_idle = idle,
     ships_active = active,
     ships_withdrawn = withdrawn,
+    ships_stuck = stuck,
     shipments = #shipments,
     waiting = #waiting,
     alerts = #alerts_in,
@@ -218,6 +230,91 @@ function viewmodel.build(world)
     alerts = alerts,
     summary = summary,
   }
+end
+
+-- Roll the flat `shipments` (in-flight assignments) + `waiting` (blocked open
+-- demand) into a per-DESTINATION-planet status summary for the Monitor's
+-- collapsible Demand section. Each (item,quality) a planet is receiving or still
+-- wants is bucketed by how it is being handled RIGHT NOW:
+--   * loading    -- a ship is at the source loading it for this planet
+--   * delivering -- a ship is en route / unloading it to this planet
+--   * waiting    -- open demand with no ship on it (carries the blocker reason)
+-- Returns a planet-sorted list:
+--   { { planet,
+--       items  = { { item, qty, status, reason? }, ... },  -- status-then-item order
+--       counts = { delivering, loading, waiting } }, ... }
+-- `qty` is the in-flight amount (delivering/loading) or the unmet amount (waiting).
+-- `delivering` wins over `loading` for the same item (the more-progressed ship);
+-- an item already in flight never also lists as waiting (its residual open demand
+-- reads `in_transit`, excluded here). Only FORWARD manifests are counted -- two-way
+-- return legs are not surfaced yet. Deterministic: planets and items are sorted;
+-- the qty maps are summed order-independently (plain pairs). PURE -> unit-tested.
+function viewmodel.group_demand(shipments, waiting)
+  local planets = {}
+  local order = {}
+  local function planet(p)
+    local g = planets[p]
+    if not g then
+      g = { deliver = {}, load = {}, wait = {} } -- qkey -> qty (deliver/load) | {unmet,reason} (wait)
+      planets[p] = g
+      order[#order + 1] = p
+    end
+    return g
+  end
+
+  for _, sh in ipairs(shipments or {}) do
+    if sh.to and sh.manifest then
+      local g = planet(sh.to)
+      local bucket = (sh.phase == fleet.LOADING) and g.load or g.deliver
+      for k, qty in pairs(sh.manifest) do
+        bucket[k] = (bucket[k] or 0) + qty
+      end
+    end
+  end
+
+  for _, w in ipairs(waiting or {}) do
+    if w.reason ~= viewmodel.REASON_IN_TRANSIT then
+      planet(w.dest_planet).wait[w.item] = { unmet = w.unmet, reason = w.reason }
+    end
+  end
+
+  table.sort(order)
+  local out = {}
+  for _, p in ipairs(order) do
+    local g = planets[p]
+    for k in pairs(g.deliver) do
+      g.load[k] = nil -- delivering wins over loading for the same item
+    end
+    local items = {}
+    local function emit(map, status)
+      local keys = {}
+      for k in pairs(map) do
+        -- an item already in flight never also lists as waiting
+        if not (status == "waiting" and (g.deliver[k] or g.load[k])) then
+          keys[#keys + 1] = k
+        end
+      end
+      table.sort(keys)
+      for _, k in ipairs(keys) do
+        if status == "waiting" then
+          items[#items + 1] = { item = k, qty = map[k].unmet, status = status, reason = map[k].reason }
+        else
+          items[#items + 1] = { item = k, qty = map[k], status = status }
+        end
+      end
+    end
+    emit(g.deliver, "delivering")
+    emit(g.load, "loading")
+    emit(g.wait, "waiting")
+    local counts = { delivering = 0, loading = 0, waiting = 0 }
+    for _, it in ipairs(items) do
+      counts[it.status] = counts[it.status] + 1
+    end
+    if #items > 0 then
+      out[#out + 1] = { planet = p, items = items, counts = counts }
+    end
+  end
+  return out
 end
 
 -- ---------------------------------------------------------------------------
@@ -513,7 +610,12 @@ function viewmodel.gather(tick)
       state = entry.state,
       assignment = entry.assignment,
       enrolled = entry.enrolled,
+      stranded = entry.stranded, -- watchdog's stuck flag -> summary.ships_stuck
       force = entry.force, -- force stamp (Task 7) for Monitor scoping
+      -- Display-only (Monitor roster): the ship's platform name + the planet it is
+      -- currently parked at (nil in transit, via the existing space_location seam).
+      name = (entry.platform and entry.platform.valid and entry.platform.name) or nil,
+      location = dispatcher.ship_planet(entry.platform),
     }
   end
 
