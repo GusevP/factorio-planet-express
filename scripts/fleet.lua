@@ -6,7 +6,12 @@
 -- A fleet entry (in `storage.fleet[platform_id]`) is a plain table:
 --   { platform, enrolled=bool, allowed_planets={names}|"all"|nil,
 --     reserve_for_manual_use=bool, state="idle|enroute|loading|unloading|withdrawn",
---     assignment=<id>|nil, stranded=bool }
+--     assignment=<id>|nil, stranded=bool, require_ready=bool }
+--
+-- `require_ready` (additive, nil = off, no migration) is the "Hold until ready
+-- signal" toggle: when true the dispatcher only sends this ship while the hub
+-- reads `planet-express-ready > 0`. See `ready_from_signal` (pure eval) and
+-- `read_ready_value` (the thin engine read).
 --
 -- Design split (per the plan's pure-function seam): the ELIGIBILITY math
 -- (`allows_planet`, `idle_eligible`) is PURE over a plain entry table -- no
@@ -40,6 +45,49 @@ function fleet.tech_researched(force)
   end
   local tech = force.technologies[fleet.TECH]
   return tech ~= nil and tech.researched == true
+end
+
+-- ---------------------------------------------------------------------------
+-- ready-signal gate (pure eval + the ONE shared engine read)
+-- ---------------------------------------------------------------------------
+
+-- The dedicated virtual signal players emit to the hub to mark a ship ready.
+-- `READY` is the SignalID the `get_signal` read passes; the data-stage prototype
+-- of the same name lives in `data.lua`. NOTE the type split: the runtime
+-- `SignalIDType` for a virtual signal is `"virtual"` (NOT `"virtual-signal"`,
+-- which is the data-stage *prototype* type) -- using the prototype string here
+-- makes `get_signal` never match the emitted signal, silently holding the ship.
+fleet.READY_SIGNAL = "planet-express-ready"
+fleet.READY = { type = "virtual", name = fleet.READY_SIGNAL }
+
+-- Pure readiness decision: given the per-ship `require_ready` toggle and the hub
+-- signal `value`, is the ship clear to dispatch? Toggle off (anything other than
+-- an explicit `true`) -> always ready (today's behavior, no read needed). Toggle
+-- on -> ready only while the signal is positive. Plain inputs, bool out -> the
+-- unit-tested decision; the engine read lives in `read_ready_value`.
+function fleet.ready_from_signal(require_ready, value)
+  if require_ready ~= true then
+    return true
+  end
+  return (value or 0) > 0
+end
+
+-- The ONE shared engine read (thin IO wrapper; sits beside `tech_researched`).
+-- Reads the `planet-express-ready` value off the platform hub across BOTH circuit
+-- wires (red + green), so the signal counts whichever wire carries it. Guards a
+-- nil/invalid platform or hub -> 0 (the same "held when gated" outcome as a valid
+-- but unwired hub, which `get_signal` itself returns 0 for). IO-only -> verified
+-- by playtest, not by the calc tests.
+function fleet.read_ready_value(platform)
+  local hub = platform and platform.valid and platform.hub
+  if not (hub and hub.valid) then
+    return 0
+  end
+  return hub.get_signal(
+    fleet.READY,
+    defines.wire_connector_id.circuit_red,
+    defines.wire_connector_id.circuit_green
+  ) or 0
 end
 
 -- ---------------------------------------------------------------------------
@@ -190,6 +238,18 @@ function fleet.set_reserve_for_manual_use(platform_id, reserved)
   local entry = fleet.get(platform_id)
   if entry then
     entry.reserve_for_manual_use = reserved == true
+  end
+  return entry
+end
+
+-- Per-ship "Hold until ready signal" toggle. When true the dispatch gate
+-- (`build_snapshot` + `pick_ship`) only sends this ship while the hub reads
+-- `planet-express-ready > 0`. Additive optional field (nil = off), so existing
+-- entries read as un-gated with no migration.
+function fleet.set_require_ready(platform_id, require_ready)
+  local entry = fleet.get(platform_id)
+  if entry then
+    entry.require_ready = require_ready == true
   end
   return entry
 end

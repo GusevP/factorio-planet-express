@@ -1,15 +1,9 @@
 {
   "name": "planet-express",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "title": "Planet Express",
   "author": "CrazyFeSS",
   "factorio_version": "2.0",
   "description": "Cross-planet delivery that just works.\n\nMoving goods between planets means babysitting platform schedules and cargo requests by hand. Planet Express does it for you. Enrol a few cargo ships, tell each planet what it needs, and the mod finds the goods, picks a ship, and flies them over — no schedule micromanagement, ever.",
-  "dependencies": [
-    "base >= 2.0",
-    "space-age >= 2.0",
-    "? quality",
-    "? elevated-rails",
-    "(?) factorio-test"
-  ]
+  "dependencies": ["base >= 2.0", "space-age >= 2.0"]
 }

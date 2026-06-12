@@ -48,6 +48,21 @@ data:extend({
     small_icon_size = 32,
     order = "z[planet-express]",
   },
+  -- The single dedicated readiness signal. Players build whatever readiness logic
+  -- they like in their own combinators (fuel > N, ammo, asteroid stock, ...) and
+  -- emit this signal to the platform hub; the control stage reads it to gate
+  -- dispatch when a ship's "Hold until ready signal" toggle is on. `icon_size`
+  -- MUST be 32 to match the placeholder png (defaults to 64 -> reads a 64x64 rect
+  -- out of the 32x32 asset and fails load; same gotcha as the shortcut above).
+  -- Swap to 64x64 art later and bump `icon_size` to 64.
+  {
+    type = "virtual-signal",
+    name = "planet-express-ready",
+    icon = "__planet-express__/graphics/signal-icon.png",
+    icon_size = 32,
+    subgroup = "virtual-signal",
+    order = "z[planet-express]",
+  },
 })
 
 -- Tips and Tricks entries (data stage): a small in-game guide to the mod, shown in
@@ -79,4 +94,5 @@ data:extend({
   tip("planet-express-trade", "d", 1),
   tip("planet-express-monitor", "e", 1),
   tip("planet-express-stuck", "f", 1),
+  tip("planet-express-ready-signal", "g", 1),
 })

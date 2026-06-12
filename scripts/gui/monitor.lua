@@ -192,8 +192,10 @@ local function render_body(body, view)
       end
       -- A stranded ship reads "idle"/"enroute" in `r.state` (the watchdog freed or
       -- re-dispatched it), but it is counted as STUCK in the summary -- show "stuck"
-      -- here too so the expanded roster agrees with the dock's "N stuck".
-      info.add({ type = "label", caption = r.stranded and "stuck" or (r.state or "-") })
+      -- here too so the expanded roster agrees with the dock's "N stuck". A "held"
+      -- ship (idle + ready-signal gate reading 0) shows "held" so it isn't mistaken
+      -- for a missing ship -- ROW-only label (it still counts as idle in the dock).
+      info.add({ type = "label", caption = r.stranded and "stuck" or (r.held and "held") or (r.state or "-") })
       -- "on <planet>" only when the ship is actually parked somewhere (in transit
       -- has no current planet).
       if r.location then

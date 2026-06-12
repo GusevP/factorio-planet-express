@@ -414,6 +414,36 @@ describe("fleet.idle_eligible", function()
   assert_eq(fleet.idle_eligible(restricted, "gleba", "nauvis"), false, "source not in allow-list -> not eligible")
 end)
 
+describe("fleet.ready_from_signal -- ready-signal gate (pure eval)", function()
+  -- toggle OFF (nil / false / non-true) -> always ready, for ANY value incl. 0
+  assert_true(fleet.ready_from_signal(nil, 0), "off (nil) -> ready even at 0")
+  assert_true(fleet.ready_from_signal(false, 0), "off (false) -> ready even at 0")
+  assert_true(fleet.ready_from_signal(nil, -5), "off -> ready even at negative")
+  assert_true(fleet.ready_from_signal(nil, nil), "off + nil value -> ready")
+
+  -- toggle ON -> ready only while the signal is strictly positive
+  assert_eq(fleet.ready_from_signal(true, 0), false, "on + 0 -> held")
+  assert_eq(fleet.ready_from_signal(true, -1), false, "on + negative -> held")
+  assert_eq(fleet.ready_from_signal(true, nil), false, "on + nil value (unreadable) -> held")
+  assert_true(fleet.ready_from_signal(true, 1), "on + 1 -> ready")
+  assert_true(fleet.ready_from_signal(true, 99999), "on + large positive -> ready")
+end)
+
+describe("fleet.set_require_ready -- additive toggle writer", function()
+  local saved_storage = storage
+  storage = { fleet = { ["1/1"] = { enrolled = true } } }
+  fleet.set_require_ready("1/1", true)
+  assert_eq(storage.fleet["1/1"].require_ready, true, "true sets the gate on")
+  fleet.set_require_ready("1/1", false)
+  assert_eq(storage.fleet["1/1"].require_ready, false, "false clears the gate")
+  -- non-boolean coerces to false (only an explicit true turns it on)
+  fleet.set_require_ready("1/1", "yes")
+  assert_eq(storage.fleet["1/1"].require_ready, false, "non-true value coerces to false")
+  -- unknown id is a no-op (returns nil, never errors)
+  assert_true(fleet.set_require_ready("9/9", true) == nil, "unknown id -> nil no-op")
+  storage = saved_storage
+end)
+
 describe("fleet.enrolled_for_force -- Trade-tab Preferred-ship options", function()
   -- a mixed fleet: two forces, enrolled + un-enrolled, with and without a live
   -- platform name handle. Keys are the force-qualified fleet keys (Task 7 shape).
@@ -623,6 +653,45 @@ describe("schedule.build_records -- 2-stop route + wait-conditions", function()
   -- the built manifest is exposed for the dispatcher's bookkeeping (Task 5)
   assert_eq(built.manifest, { ["iron-plate"] = 500, ["copper-plate"] = 200 },
     "manifest mirrors the source requests")
+end)
+
+describe("schedule.build_records -- ready-signal gate (v1.1)", function()
+  -- `gate_ready` = the ready signal name adds a CIRCUIT wait-condition to every stop,
+  -- appended LAST with compare_type="and" so it is the HARD OUTER AND -- AFTER the
+  -- timeout `or`, so `((cargo) OR time) AND ready`: the per-stop timeout can never
+  -- bypass it. nil leaves the schedule exactly as before.
+  local ready_cond = {
+    type = "circuit", compare_type = "and",
+    condition = { comparator = ">=",
+      first_signal = { type = "virtual-signal", name = "planet-express-ready" }, constant = 1 },
+  }
+  local args = {
+    source = "nauvis", dest = "vulcanus", capacity = 1000, timeout = 3600,
+    items = { { item = "iron-plate", surplus = 500, unmet = 800 } },
+  }
+
+  -- gated: ready is the LAST condition at the load stop (after the items + timeout_or)
+  -- and at the final stop (after its hold-timeout).
+  local gated = schedule.build_records({
+    source = args.source, dest = args.dest, capacity = args.capacity, timeout = args.timeout,
+    items = args.items, gate_ready = "planet-express-ready",
+  })
+  local gsrc = gated.records[1]
+  assert_eq(gsrc.wait_conditions[#gsrc.wait_conditions], ready_cond,
+    "load stop: ready gate appended LAST (hard outer AND after the timeout)")
+  assert_eq(gsrc.wait_conditions[2], { type = "time", ticks = 3600, compare_type = "or" },
+    "the timeout OR still precedes the ready AND (so ready is the outer gate)")
+  local gdst = gated.records[2]
+  assert_eq(gdst.wait_conditions[#gdst.wait_conditions], ready_cond,
+    "final stop also carries the ready gate")
+
+  -- not gated: no circuit condition anywhere.
+  local plain = schedule.build_records(args)
+  for _, rec in ipairs(plain.records) do
+    for _, c in ipairs(rec.wait_conditions) do
+      assert_eq(c.type ~= "circuit", true, "no ready gate when gate_ready is nil")
+    end
+  end
 end)
 
 describe("schedule.build_records -- zero manifest -> no schedule", function()
@@ -877,6 +946,61 @@ describe("dispatcher.pick_ship -- prefers a ship already at the source (no deadh
     "pin overrides the at-source preference")
 end)
 
+describe("dispatcher.pick_ship -- ready-signal gate (held ships skipped)", function()
+  local function ship(id, ready)
+    return { id = id, capacity = 1000, ready = ready,
+      entry = { enrolled = true, state = fleet.IDLE } }
+  end
+  -- a ship stamped ready=false is never picked, even as the only candidate
+  assert_eq(dispatcher.pick_ship({ ship(1, false) }, {}, "nauvis", "vulcanus"), nil,
+    "the only ship is held (ready=false) -> nil (demand waits)")
+  -- a held ship is skipped in favor of a ready one (even a higher id)
+  assert_eq(dispatcher.pick_ship({ ship(2, false), ship(7, true) }, {}, "nauvis", "vulcanus").id, 7,
+    "held ship skipped, ready ship picked")
+  -- ready=true is eligible
+  assert_eq(dispatcher.pick_ship({ ship(4, true) }, {}, "nauvis", "vulcanus").id, 4,
+    "ready=true ship is eligible")
+  -- absent `ready` field stays eligible (un-gated ships / pure tests unaffected)
+  local unflagged = { id = 3, capacity = 1000, entry = { enrolled = true, state = fleet.IDLE } }
+  assert_eq(dispatcher.pick_ship({ unflagged }, {}, "nauvis", "vulcanus").id, 3,
+    "absent ready field -> still eligible")
+  -- a pinned-but-held ship is NOT picked (gate applies to the pin too)
+  assert_eq(dispatcher.pick_ship({ ship(5, false), ship(6, true) }, {}, "nauvis", "vulcanus", 5).id, 6,
+    "pinned ship held -> falls back to a ready ship")
+  -- the gate excludes a held ship parked AT the source BEFORE the no-deadhead
+  -- preference can pick it, so a ready ship elsewhere wins (locks gate-before-
+  -- co-location ordering in pick_ship: eligible() runs ahead of the at-source pref).
+  local at_src_held = { id = 1, capacity = 1000, ready = false, planet = "nauvis",
+    entry = { enrolled = true, state = fleet.IDLE } }
+  local elsewhere_ready = { id = 8, capacity = 1000, ready = true, planet = "gleba",
+    entry = { enrolled = true, state = fleet.IDLE } }
+  assert_eq(dispatcher.pick_ship({ at_src_held, elsewhere_ready }, {}, "nauvis", "vulcanus").id, 8,
+    "held ship at source excluded before no-deadhead preference -> ready ship elsewhere picked")
+end)
+
+describe("dispatcher.unserved_reason -- held-by-ready-signal branch", function()
+  -- A demand whose ONLY eligible ship is held by its ready signal reports the gate,
+  -- not the misleading "no idle eligible ship".
+  local snapshot = {
+    nodes = {
+      [1] = { id = 1, planet = "aaa", force = "f", demand = { { item = "X", unmet = 100, stack_size = 50 } },
+        surplus = {}, unmet_by_item = { ["X"] = 100 } },
+      [2] = { id = 2, planet = "bbb", force = "f", demand = {},
+        surplus = { ["X"] = 200 }, unmet_by_item = {} },
+    },
+    ships = { { id = 1, capacity = 1000, force = "f", planet = "bbb", ready = false,
+      entry = { enrolled = true, state = fleet.IDLE } } },
+  }
+  local reason = dispatcher.unserved_reason(snapshot, snapshot.nodes[1])
+  assert_true(reason:find("HELD") ~= nil, "held ship reported as HELD by its ready signal")
+  assert_true(reason:find("planet%-express%-ready") ~= nil, "names the signal to emit")
+
+  -- With the same ship NOT held, the demand would dispatch (sanity: not the held branch)
+  snapshot.ships[1].ready = true
+  local ok = dispatcher.unserved_reason(snapshot, snapshot.nodes[1])
+  assert_true(ok:find("HELD") == nil, "a ready ship is not reported as held")
+end)
+
 describe("dispatcher.covers -- reciprocity test for direction-aware routing", function()
   local snapshot = { nodes = {
     [1] = { id = 1, demand = { { item = "X", unmet = 100 } },
@@ -1113,6 +1237,27 @@ describe("dispatcher.plan -- all-busy and no-source edges", function()
     ships = { { id = 1, capacity = 1000, entry = { enrolled = true, state = fleet.IDLE } } },
   }
   assert_eq(#dispatcher.plan(idle), 0, "no demand -> no plan")
+end)
+
+describe("dispatcher.plan -- ready-signal gate honored end-to-end (held ship -> no plan)", function()
+  -- A trade that WOULD plan, except the only eligible ship is held by its ready
+  -- signal. Locks the gate at the planner level (it flows through pick_ship,
+  -- incl. the no-flip path) rather than only at pick_ship in isolation.
+  local function snap(ready)
+    return {
+      nodes = {
+        [1] = { id = 1, planet = "gleba", demand = { { item = "iron-plate", unmet = 300, priority = 0 } },
+          surplus = {}, unmet_by_item = {} },
+        [2] = { id = 2, planet = "nauvis", surplus = { ["iron-plate"] = 500 }, unmet_by_item = {} },
+      },
+      ships = { { id = 10, capacity = 1000, ready = ready,
+        entry = { enrolled = true, state = fleet.IDLE } } },
+    }
+  end
+  assert_eq(#dispatcher.plan(snap(false)), 0, "the only eligible ship is held -> no plan (demand waits)")
+  local plans = dispatcher.plan(snap(true))
+  assert_eq(#plans, 1, "same ship ready -> the trade is planned")
+  assert_eq(plans[1].ship_id, 10, "the now-ready ship flies the route")
 end)
 
 describe("dispatcher.plan -- guard blocks importing-and-exporting the same item", function()
@@ -2223,6 +2368,30 @@ describe("build: roster/state mapping + summary counts", function()
 
   -- shipment row carries ticks_left = deadline - tick.
   assert_eq(view.shipments[1].ticks_left, 300, "ticks_left = 500 - 200")
+end)
+
+describe("build: roster 'held' flag (ready-signal gate, Task 6)", function()
+  -- gather stamps `held` onto the fleet entry (idle + gated + signal 0); build
+  -- carries it to the roster row as a display-only flag. It is ROW-only -- a held
+  -- ship still counts in summary.ships_idle (disjointness deferred per the plan).
+  local world = {
+    fleet = {
+      [1] = { enrolled = true, state = fleet.IDLE, held = true },  -- gated + signal 0
+      [2] = { enrolled = true, state = fleet.IDLE, held = false }, -- gated + signal>0 / un-gated
+      [3] = { enrolled = true, state = fleet.IDLE },               -- absent -> not held
+    },
+    assignments = {},
+    alerts = {},
+    tick = 0,
+  }
+  local view = viewmodel.build(world)
+
+  assert_eq(view.roster[1].held, true, "ship 1 held (gated, idle, signal 0)")
+  assert_eq(view.roster[2].held, false, "ship 2 not held (gated but signal positive)")
+  assert_eq(view.roster[3].held, false, "ship 3 not held (absent flag -> false)")
+  -- display-only: a held ship is still an idle ship in the dock counts.
+  assert_eq(view.summary.ships_idle, 3, "held ship still counts as idle (row-only label)")
+  assert_eq(view.summary.ships_stuck, 0, "held is disjoint from stuck")
 end)
 
 describe("build: roster excludes un-enrolled platforms (registry indexes every hub)", function()

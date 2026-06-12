@@ -90,6 +90,24 @@ the stop falls back to the `time` timeout — no regression, just slow.]** Resol
 2026-06 (was `"full"`/`"empty"`, which the player correctly flagged as wrong for
 ships carrying their own fuel/ammo).
 
+**Ready-signal gate — `circuit` wait-condition (v1.2). [provisional — TOP playtest
+gate, NO graceful degrade].** When a ship's "Hold until ready signal" toggle is on,
+`schedule.records_for(..., ready_signal)` appends a `{type="circuit", compare_type=
+"and", condition={comparator=">=", first_signal={type="virtual-signal",
+name="planet-express-ready"}, constant=1}}` condition LAST on every stop — a HARD
+OUTER AND (after the `time` `or`), so the per-stop timeout cannot bypass it. `circuit`
+IS a valid `WaitConditionType`, but **whether a SPACE-PLATFORM stop's `circuit`
+condition evaluates the HUB's circuit network is UNCONFIRMED** — confirm in a running
+game (add a circuit wait-condition to a platform schedule, wire the hub, verify it
+holds/releases on the signal). If it does NOT read the hub, the condition is never
+satisfied and every gated ship holds → times out → freed + stuck (cause
+`ALERT_READY_HELD`); the feature is OPT-IN (`require_ready`), so the blast radius is
+only ticked ships, and the fallback is a watchdog-managed hold (the watchdog already
+reads the signal via `fleet.read_ready_value`). The player-edit signature
+(`schedule_signature`) signs only `type`/`ticks`/`compare_type` (not the circuit
+payload), so the gate is signature-stable — but **verify it doesn't false-flag a
+player edit** on readback (the same caveat as `item_count`).
+
 **Per-stop cargo request — RESOLVED to mechanism (b), hub logistic sections.**
 **[confirmed]** A 2.0 `ScheduleRecord` is `{station, rail, rail_direction,
 wait_conditions, temporary, created_by_interrupt, allows_unloading}` — there is
@@ -576,6 +594,55 @@ ships), but correctness rests on the signature compare, not the event.
   sections. **[confirmed]** against the 2.0 prototype docs: `image`/`simulation` are
   optional (text-only is valid) and `"unlocked"` is a valid `TipStatus`. Static
   data only -- the control stage never reads these.
+
+---
+
+## 6. Ship-ready signal — hub circuit read  → gates the ready-signal gate (ship-ready-signal plan, Tasks 4 / 5)
+
+**[provisional — confirm the hub is wireable + the wire-connector ids + `get_signal` shape in-engine before the IO read ships]**
+
+The ready-signal gate reads ONE virtual signal (`planet-express-ready`) off the
+platform hub's circuit network. The player builds whatever readiness logic they
+want in their own combinators and emits `planet-express-ready` to the hub; the mod
+only reads it, never writes to the circuit network.
+
+**Accessor:** `hub.get_signal(signal, wire_connector_id, extra_wire_connector_id?)
+→ int32` — reads a signal's value across one or two wire connectors. The mod reads
+both wires in one call so red OR green carrying the signal counts:
+
+```
+-- Runtime SignalIDType for a virtual signal is "virtual" (the "virtual-signal"
+-- string is the DATA-STAGE prototype type; using it here would never match).
+local READY = { type = "virtual", name = "planet-express-ready" }
+local value = hub.get_signal(READY,
+  defines.wire_connector_id.circuit_red,
+  defines.wire_connector_id.circuit_green)
+```
+
+- `defines.wire_connector_id.circuit_red` / `circuit_green` — the hub's two circuit
+  wire connectors. **[provisional — confirm these are the right connector ids for a
+  space platform hub in-engine.]**
+- `platform.hub` → the hub `LuaEntity` (already used elsewhere, e.g. the slot-budget
+  and per-item hub-count reads in §1); guard `.valid` before the read.
+- **[provisional — confirm the space platform hub is WIREABLE in Space Age, i.e. it
+  accepts a circuit connection and `get_signal` reads it. This is the key in-engine
+  unknown — the whole gate rests on it.]**
+
+**Degrade case:** the real degrade is a VALID-but-UNWIRED hub — `get_signal`
+returns 0, which means "held" when the gate is on (and the GUI surfaces the 0, so
+it's visible, not mysterious). The thin wrapper `fleet.read_ready_value(platform)`
+also guards a nil/invalid hub → returns 0; the dispatch caller already filters to a
+valid hub, so that nil branch is belt-and-suspenders.
+
+> **Caveat — read-only:** this is the only circuit-network touch in the mod, and it
+> is strictly READ (`get_signal`). The mod never writes a signal, wire, or
+> combinator. Stays within the no-mutation spec (only `platform.schedule` is
+> written).
+
+> **Confirm in playtest:** (1) the hub accepts a wire and `get_signal` returns the
+> emitted `planet-express-ready` value; (2) `circuit_red` / `circuit_green` are the
+> correct connector ids; (3) reading both connectors in one call sums/ORs red+green
+> as expected. Flip this entry to `[confirmed]` once verified.
 
 ---
 

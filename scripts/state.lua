@@ -20,6 +20,9 @@ local state = {}
 -- Current storage schema version. Bump + add a migration branch in
 -- `state.on_configuration_changed` when the shape below changes.
 --   v2: fleet keyed by "<force key>/<platform index>" (was bare platform index).
+-- Additive optional fleet-entry fields do NOT bump the version (they read as
+-- their nil-default on old saves, so no migration is needed): e.g.
+-- `entry.require_ready` (the "Hold until ready signal" gate -- nil = off).
 state.SCHEMA_VERSION = 2
 
 -- ---------------------------------------------------------------------------

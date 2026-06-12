@@ -4,7 +4,11 @@ A Factorio: Space Age mod (Lua: data stage + control stage). The mod orchestrate
 the player's real cargo space platforms; it **never** spawns, destroys, teleports,
 or `insert`s into game entities. The only platform mutation allowed is
 `platform.schedule = …`. If you find yourself reaching for `create_entity`,
-`destroy`, `insert`, or `teleport` against game entities, you are off-spec.
+`destroy`, `insert`, or `teleport` against game entities, you are off-spec. The
+mod performs exactly one circuit-network **read** — `hub.get_signal(planet-express-ready, …)`
+in `fleet.read_ready_value`, gating dispatch on a player-emitted readiness signal.
+It never *writes* a signal, wire, or combinator; the no-mutation spec is about
+writes, so reads are fine.
 
 ## Determinism (hard constraint — multiplayer)
 
@@ -71,7 +75,7 @@ globals) still loads them.
 | `stock.lua` | launchable stock read, per-tick cache (`begin_tick`), `surplus()` |
 | `demand.lua` | native pad requests → `unmet`/`open_demand`, inbound netting |
 | `registry.lua` | event-maintained index of trade nodes (pads) + fleet platforms |
-| `fleet.lua` | per-platform enroll toggle + per-ship limits, `idle_eligible` |
+| `fleet.lua` | per-platform enroll toggle + per-ship limits, `idle_eligible`; ready-signal gate (`require_ready` toggle, pure `ready_from_signal`, and the mod's only circuit read `read_ready_value`) |
 | `schedule.lua` | pure route→records builder + `schedule.writer` wrapper |
 | `dispatcher.lua` | `on_nth_tick` match/assign/bookkeep, `exportable` thrash guard, return leg |
 | `watchdog.lua` | timeouts, destroyed/stranded, re-clamp, player-edit signature |

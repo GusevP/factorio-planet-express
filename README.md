@@ -48,7 +48,12 @@ and exporting the same item at once.
    otherwise.
 4. **Set reserves.** In the Trade tab, set a global default floor plus per-item
    overrides so exports never strip-mine a planet below what it needs.
-5. **Watch it run.** Open the fleet **Monitor** from the top-bar shortcut.
+5. **(Optional) Gate on your own readiness.** In the Fleet tab, tick "Hold until
+   ready signal" to keep a ship docked until the hub reads
+   `planet-express-ready > 0`. Build whatever readiness logic you like in your own
+   combinators (fuel, ammo, asteroid stock, …) and emit that one virtual signal to
+   the hub. The gate only blocks dispatch — it never recalls a ship in flight.
+6. **Watch it run.** Open the fleet **Monitor** from the top-bar shortcut.
 
 ## Reserve config
 
@@ -110,10 +115,12 @@ dispatcher timer, not every tick.
 
 ## Known limits / roadmap
 
-v1 ships maintain-a-level trading on two-planet routes. Not yet implemented:
+v1 ships maintain-a-level trading on two-planet routes. v1.1 added the
+ready-signal dispatch gate (hold a ship until you emit `planet-express-ready`).
+Not yet implemented:
 
-- **v1.1** — ETA for ships and resources (the Monitor currently shows a timeout
-  countdown, not a true ETA).
+- **ETA for ships and resources** — the Monitor currently shows a timeout
+  countdown, not a true ETA.
 - **v1.2** — multi-stop routes (3–4 planets per run). Routes are already modeled
   internally as an ordered stop list, so this is a route-construction change, not
   a rewrite.

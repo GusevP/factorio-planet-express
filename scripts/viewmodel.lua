@@ -145,6 +145,7 @@ function viewmodel.build(world)
         name = e.name, -- platform name for display (nil under the pure test runner)
         state = e.state,
         stranded = e.stranded == true,
+        held = e.held == true, -- ready-signal "held" (Task 6); ROW-only display label
         location = e.location, -- planet the ship is currently AT (nil in transit)
         from = a and a.source_planet or nil,
         to = a and a.dest_planet or nil,
@@ -602,6 +603,14 @@ function viewmodel.gather(tick)
     mark_serving(a.source_planet, a.return_manifest)
   end
 
+  -- Per-ship readiness verdict from the SAME snapshot build_snapshot already
+  -- computed (no third hub read here -- reuse Task 4's stamp). Keyed by fleet id;
+  -- only gated ships carry an explicit `false`, so absent/`true` means ready.
+  local ready_by_id = {}
+  for _, s in ipairs(snapshot.ships or {}) do
+    ready_by_id[s.id] = s.ready
+  end
+
   -- fleet roster source (state + assignment only; the rest comes from the
   -- assignment record so the two never disagree).
   local fleet_world = {}
@@ -611,6 +620,11 @@ function viewmodel.gather(tick)
       assignment = entry.assignment,
       enrolled = entry.enrolled,
       stranded = entry.stranded, -- watchdog's stuck flag -> summary.ships_stuck
+      -- Ready-signal "held" (Task 6): an idle, gated ship whose hub reads
+      -- `planet-express-ready <= 0` is held back from dispatch -- a distinct roster
+      -- label so it isn't mistaken for a missing ship. Reuses the snapshot's
+      -- `ready` verdict (no extra read); display-only (the gate already applied).
+      held = entry.require_ready == true and entry.state == fleet.IDLE and ready_by_id[id] == false,
       force = entry.force, -- force stamp (Task 7) for Monitor scoping
       -- Display-only (Monitor roster): the ship's platform name + the planet it is
       -- currently parked at (nil in transit, via the existing space_location seam).

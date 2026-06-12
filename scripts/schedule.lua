@@ -34,6 +34,12 @@ local schedule = {}
 -- load and never reads empty. `time` is the mandatory timeout backstop (#1).
 schedule.WAIT_ITEM_COUNT = "item_count"
 schedule.WAIT_TIME = "time"
+-- The ready-signal gate (v1.2): a circuit wait-condition on the hub's network.
+-- Added to a ship's stops ONLY when its "Hold until ready signal" toggle is on, so
+-- the ship physically holds at every departure until the player's readiness logic
+-- emits `planet-express-ready >= 1` to the hub. [provisional — confirm a platform
+-- stop's circuit condition evaluates the HUB network in-engine; see api-notes §1.]
+schedule.WAIT_CIRCUIT = "circuit"
 
 -- ---------------------------------------------------------------------------
 -- pure load clamp + slot-aware wide manifest
@@ -159,12 +165,31 @@ local function item_signal(key)
   return { type = "item", name = name, quality = quality }
 end
 
+-- The ready-signal gate condition (v1.2). Appended LAST to a stop's conditions with
+-- `compare_type = "and"`, so it is a HARD OUTER AND: with the cargo/time list
+-- evaluating left-to-right, `((items) OR time) AND ready` means the per-stop timeout
+-- can NEVER bypass readiness -- the ship holds until `planet-express-ready >= 1` no
+-- matter what. (A ship held past the watchdog's no-progress deadline is then freed +
+-- flagged stuck, so it surfaces rather than parking forever.) `signal` is the virtual
+-- signal name; nil callers omit it (the toggle is off). PURE.
+local function ready_condition(signal)
+  return {
+    type = schedule.WAIT_CIRCUIT,
+    compare_type = "and",
+    condition = {
+      comparator = ">=",
+      first_signal = { type = "virtual-signal", name = signal },
+      constant = 1,
+    },
+  }
+end
+
 -- "manifest loaded OR timeout" at a load stop: one `item_count >= qty` condition
 -- per manifest item (AND-combined, stable item order for determinism), plus the
 -- mandatory timeout (`compare_type = "or"`, invariant #1). Scoped to the manifest
 -- ONLY, so the platform's own fuel/ammo cargo is ignored and a partial load still
 -- departs promptly. Each item_count carries a CircuitCondition.
-local function load_wait(manifest, timeout)
+local function load_wait(manifest, timeout, ready_signal)
   local conds = {}
   for item, qty in state.sorted_pairs(manifest or {}) do
     conds[#conds + 1] = {
@@ -179,6 +204,9 @@ local function load_wait(manifest, timeout)
   end
   if timeout then
     conds[#conds + 1] = { type = schedule.WAIT_TIME, ticks = timeout, compare_type = "or" }
+  end
+  if ready_signal then
+    conds[#conds + 1] = ready_condition(ready_signal) -- hard outer AND (no timeout bypass)
   end
   return conds
 end
@@ -196,11 +224,15 @@ end
 -- stop until the watchdog clears the route (well within the timeout); the timeout
 -- only ever fires if the watchdog somehow never runs. `manifest` is unused (kept for
 -- caller symmetry) -- "delivered" is the pad's job, not a cargo-count check here.
-local function unload_wait(manifest, timeout)
+local function unload_wait(manifest, timeout, ready_signal)
   local _ = manifest
   local conds = {}
   if timeout then
     conds[#conds + 1] = { type = schedule.WAIT_TIME, ticks = timeout, compare_type = "and" }
+  end
+  if ready_signal then
+    conds[#conds + 1] = ready_condition(ready_signal) -- hard outer AND (moot at the
+    -- terminal hold stop, which the watchdog frees regardless, but kept uniform)
   end
   return conds
 end
@@ -222,7 +254,7 @@ end
 -- forward is delivered; any over-delivery residue rides home and is dropped at the
 -- final stop (the pad pulls whatever that planet wants). `unload_manifest` is kept
 -- in the signature for caller symmetry but intentionally NOT conditioned on.
-local function turnaround_wait(unload_manifest, load_manifest, timeout)
+local function turnaround_wait(unload_manifest, load_manifest, timeout, ready_signal)
   local _ = unload_manifest
   local conds = {}
   for item, qty in state.sorted_pairs(load_manifest or {}) do
@@ -237,6 +269,9 @@ local function turnaround_wait(unload_manifest, load_manifest, timeout)
   -- it and send the ship home with a partial (or empty) return load.
   if timeout then
     conds[#conds + 1] = { type = schedule.WAIT_TIME, ticks = timeout, compare_type = "or" }
+  end
+  if ready_signal then
+    conds[#conds + 1] = ready_condition(ready_signal) -- hard outer AND (no timeout bypass)
   end
   return conds
 end
@@ -284,14 +319,14 @@ end
 -- manifests (keeping wait conditions in sync with the lowered request). Wait
 -- conditions are derived from the manifests, so qty changes here automatically
 -- update the conditions. See build_records for the route shape + allows_unloading.
-function schedule.records_for(source, dest, manifest, ret, timeout)
+function schedule.records_for(source, dest, manifest, ret, timeout, ready_signal)
   local has_return = ret ~= nil and next(ret) ~= nil
   local records = {
     {
       station = source,
       requests = manifest,
       import_from = source,
-      wait_conditions = load_wait(manifest, timeout),
+      wait_conditions = load_wait(manifest, timeout, ready_signal),
       allows_unloading = false,
     },
   }
@@ -302,13 +337,13 @@ function schedule.records_for(source, dest, manifest, ret, timeout)
       station = dest,
       requests = ret,
       import_from = dest,
-      wait_conditions = turnaround_wait(manifest, ret, timeout),
+      wait_conditions = turnaround_wait(manifest, ret, timeout, ready_signal),
       allows_unloading = true,
     }
     records[#records + 1] = {
       station = source,
       requests = {},
-      wait_conditions = unload_wait(ret, timeout),
+      wait_conditions = unload_wait(ret, timeout, ready_signal),
       allows_unloading = true,
     }
   else
@@ -316,7 +351,7 @@ function schedule.records_for(source, dest, manifest, ret, timeout)
     records[#records + 1] = {
       station = dest,
       requests = {},
-      wait_conditions = unload_wait(manifest, timeout),
+      wait_conditions = unload_wait(manifest, timeout, ready_signal),
       allows_unloading = true,
     }
   end
@@ -332,7 +367,11 @@ function schedule.build_records(assignment)
 
   local ret = assignment.return_manifest
   local has_return = ret ~= nil and next(ret) ~= nil
-  local records = schedule.records_for(assignment.source, assignment.dest, manifest, ret, assignment.timeout)
+  -- `gate_ready` (the ready signal name, or nil) is set by the dispatcher when the
+  -- ship's "Hold until ready signal" toggle is on -> the wait builders add the
+  -- circuit gate to every stop.
+  local records = schedule.records_for(assignment.source, assignment.dest, manifest, ret,
+    assignment.timeout, assignment.gate_ready)
 
   return { records = records, manifest = manifest, return_manifest = has_return and ret or nil }
 end
@@ -546,11 +585,11 @@ end
 -- `platform.schedule` assignment would wipe them); `set_records` replaces only the
 -- records and leaves `current` (the active stop) where it is. Falls back to the
 -- simplified assignment only if get_schedule is unavailable. No-op on a dead platform.
-function schedule.resync_conditions(platform, source, dest, manifest, ret, timeout)
+function schedule.resync_conditions(platform, source, dest, manifest, ret, timeout, ready_signal)
   if not (platform and platform.valid) then
     return
   end
-  local eng = schedule.engine_records(schedule.records_for(source, dest, manifest, ret, timeout))
+  local eng = schedule.engine_records(schedule.records_for(source, dest, manifest, ret, timeout, ready_signal))
   local sched = platform.get_schedule and platform.get_schedule()
   if sched and sched.set_records then
     sched.set_records(eng)                                  -- records only: interrupts preserved, current kept

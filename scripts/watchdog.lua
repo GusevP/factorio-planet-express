@@ -62,6 +62,10 @@ watchdog.INTERVAL = 300 -- 5s at 60 UPS
 watchdog.ALERT_DESTROYED = "ship_destroyed"
 watchdog.ALERT_TIMEOUT = "timeout"
 watchdog.ALERT_PLAYER_EDIT = "player_edit"
+-- A timeout whose CAUSE is the ready-signal gate (v1.2): the ship held at a stop
+-- because `planet-express-ready <= 0` the whole no-progress window. Distinct from a
+-- fuel/path strand so the Monitor names WHY it is stuck.
+watchdog.ALERT_READY_HELD = "ready_held"
 
 -- How many alerts to retain in `storage.alerts`. The Monitor only ever displays
 -- the newest handful (viewmodel.MAX_ALERTS = 20); we keep a bounded backlog so a
@@ -560,7 +564,7 @@ local function reclamp_leg(a, platform, exclude_id, node_id, import_from, manife
   -- waits out the timeout. `commit` already updated a.manifest/a.return_manifest,
   -- so rebuild from the current pair.
   schedule.resync_conditions(platform, a.source_planet, a.dest_planet,
-    a.manifest, a.return_manifest, a.wait_timeout)
+    a.manifest, a.return_manifest, a.wait_timeout, a.gate_ready)
   a.schedule_signature = watchdog.read_signature(platform) -- our edit, not the player's
   state.debug_log("watchdog reclamp a#" .. tostring(a.ship))
 end
@@ -657,11 +661,19 @@ function watchdog.run(tick)
       -- so a ship that just progressed is never falsely timed out.
       watchdog.note_progress(a, platform, tick)
       if watchdog.expired(a.deadline_tick, tick) then
-        watchdog.free_assignment(id, watchdog.ALERT_TIMEOUT, fleet.IDLE, tick)
+        -- Name the cause: a ship gated by its ready signal that held for the whole
+        -- window (require_ready on AND `planet-express-ready <= 0` now) is stuck
+        -- BECAUSE of the gate, not a fuel/path strand -- so the Monitor can say so.
+        local entry = fleet.get(a.ship)
+        local ready_held = entry and entry.require_ready == true
+          and fleet.read_ready_value(platform) <= 0
+        watchdog.free_assignment(id,
+          ready_held and watchdog.ALERT_READY_HELD or watchdog.ALERT_TIMEOUT, fleet.IDLE, tick)
         -- Flag the freed ship STRANDED so the Monitor's "stuck" count surfaces it.
         -- It was just released to idle, but it made no progress for a full deadline
-        -- (no fuel / no rockets / blocked), so it is stuck, not merely idle. Cleared
-        -- once it next reaches a load/unload stop (below) or completes a delivery.
+        -- (no fuel / no rockets / blocked / held by its ready signal), so it is stuck,
+        -- not merely idle. Cleared once it next reaches a load/unload stop (below) or
+        -- completes a delivery.
         fleet.set_stranded(a.ship, true)
       else
         watchdog.maybe_reclamp(a, platform, id)

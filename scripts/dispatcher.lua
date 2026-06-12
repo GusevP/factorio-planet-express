@@ -317,7 +317,12 @@ end
 -- ids already committed this tick.
 function dispatcher.pick_ship(ships, used, source_planet, dest_planet, pin)
   local function eligible(s)
-    return not used[s.id] and fleet.idle_eligible(s.entry, source_planet, dest_planet)
+    -- `s.ready ~= false` is the ready-signal gate (Task 4): build_snapshot stamps
+    -- `false` only when a gated ship's hub reads `planet-express-ready <= 0`.
+    -- Absent / `true` (un-gated or satisfied) stays eligible, so pure tests with
+    -- no `ready` field are unaffected.
+    return not used[s.id] and s.ready ~= false
+      and fleet.idle_eligible(s.entry, source_planet, dest_planet)
   end
 
   if pin ~= nil then
@@ -751,12 +756,22 @@ function dispatcher.build_snapshot(_tick)
     -- `fleet.idle_eligible` pure (no engine hub read there).
     local hub = valid and platform.hub
     if valid and hub and hub.valid then
+      -- Ready-signal gate (dispatch-only): when this ship's "Hold until ready
+      -- signal" toggle is on, read `planet-express-ready` off its hub (the ONE
+      -- shared read wrapper) and stamp the pure readiness verdict; otherwise it
+      -- stays unconditionally ready and we skip the per-tick signal read. Only an
+      -- explicit `false` blocks the pick, so un-gated ships are unaffected.
+      local ready = true
+      if entry.require_ready == true then
+        ready = fleet.ready_from_signal(true, fleet.read_ready_value(platform))
+      end
       ships[#ships + 1] = {
         id = pid,
         entry = entry,
         capacity = dispatcher.capacity_of(entry),
         force = dispatcher.force_key(platform.force),
         planet = dispatcher.ship_planet(platform), -- no-deadhead ship pick
+        ready = ready,                             -- ready-signal gate (Task 4)
       }
     end
   end
@@ -801,6 +816,10 @@ function dispatcher.commit(p, tick)
   -- phantom assignment holding surplus/inbound bookkeeping against a ship that
   -- never actually left.)
   local platform = p.ship and p.ship.entry and p.ship.entry.platform
+  -- Ready-signal gate (v1.2): when the ship's "Hold until ready signal" toggle is on,
+  -- carry the signal NAME into the schedule so every stop gets a circuit hold
+  -- condition; nil leaves the schedule exactly as before.
+  local gate_ready = (p.ship.entry and p.ship.entry.require_ready == true) and fleet.READY_SIGNAL or nil
   local built = schedule.write(platform, {
     source = p.source_planet,
     dest = p.dest_planet,
@@ -808,6 +827,7 @@ function dispatcher.commit(p, tick)
     timeout = dispatcher.TIMEOUT,
     items = p.items,
     return_manifest = p.return_manifest,
+    gate_ready = gate_ready,
   })
   if not built then
     state.debug_log(string.format(
@@ -846,6 +866,10 @@ function dispatcher.commit(p, tick)
     -- The per-stop wait-condition timeout used to BUILD the schedule. Stored so the
     -- watchdog can rebuild the wait conditions (after a re-clamp) with the same one.
     wait_timeout = dispatcher.TIMEOUT,
+    -- Ready-signal gate name (v1.2), or nil. Stored so the watchdog's re-clamp
+    -- (`resync_conditions`) rebuilds the SAME gated conditions instead of dropping
+    -- the hold.
+    gate_ready = gate_ready,
     phase = "enroute",
     -- Stamp the order-stable schedule signature so the watchdog (Task 6) can
     -- detect a later player edit and withdraw the ship instead of fighting them.
@@ -881,9 +905,21 @@ function dispatcher.unserved_reason(snapshot, dest)
     return "no exportable source (every other planet is below reserve+min-trip, "
       .. "has its surplus committed to a shipment, or is itself importing the item)"
   end
-  local ship = dispatcher.pick_ship(
-    dispatcher.ships_for_force(snapshot.ships, dest.force), {}, src.planet, dest.planet, dest.pin)
+  local route_ships = dispatcher.ships_for_force(snapshot.ships, dest.force)
+  local ship = dispatcher.pick_ship(route_ships, {}, src.planet, dest.planet, dest.pin)
   if not ship then
+    -- Held-aware branch (Task 4): pick_ship returns nil when every candidate is
+    -- held by its ready signal just as it does when there is no eligible ship at
+    -- all. Tell them apart so /pe-status + the debug log don't misreport a held
+    -- ship as missing. A ship that is idle_eligible (ignoring `ready`) but stamped
+    -- `ready == false` is held -- if any such ship exists, the block is the gate.
+    for _, s in ipairs(route_ships) do
+      if s.ready == false and fleet.idle_eligible(s.entry, src.planet, dest.planet) then
+        return "source=" .. tostring(src.planet)
+          .. " has surplus + an eligible ship, but it is HELD by its ready signal "
+          .. "(planet-express-ready <= 0 at the hub) -- emit planet-express-ready > 0 to dispatch"
+      end
+    end
     return "source=" .. tostring(src.planet)
       .. " has surplus, but NO idle eligible ship for force=" .. tostring(dest.force)
       .. " (enrolled? not reserved? allow-list covers both planets?)"

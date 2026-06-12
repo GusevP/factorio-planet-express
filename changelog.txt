@@ -1,3 +1,19 @@
+Version: 1.2.0
+Date: 2026-06-11
+  Features:
+    - The ready-signal gate now holds at every schedule stop, not only at dispatch: a circuit wait-condition on each stop keeps a ship from leaving while its hub reads "Planet Express: ready" at zero or below. The signal both clears and restricts departure, and the per-stop timeout cannot bypass it.
+    - A ship held past the no-progress timeout is freed and flagged "stuck" (in the top-left fleet panel and the Monitor), so a permanently-restricted ship surfaces instead of parking silently forever.
+  Info:
+    - Still read-only: it only reads the hub's circuit signal and never recalls a ship mid-flight — it holds it at stops.
+---------------------------------------------------------------------------------------------------
+Version: 1.1.0
+Date: 2026-06-11
+  Features:
+    - Ready-signal dispatch gate: a per-ship "Hold until ready signal" toggle in the Fleet tab keeps a platform docked until its hub reads the new "Planet Express: ready" virtual signal above zero. Build whatever readiness logic you want (fuel, ammo, asteroid stock, …) in your own combinators and emit that one signal to the hub.
+    - The Fleet tab shows which signal to wire and a setup-time readout of the current value; a held ship is flagged "held" on its Fleet Monitor row.
+  Info:
+    - The gate is dispatch-only and read-only: it never recalls a ship already in flight and only ever reads the hub's circuit signal.
+---------------------------------------------------------------------------------------------------
 Version: 1.0.0
 Date: 2026-06-11
   Features:

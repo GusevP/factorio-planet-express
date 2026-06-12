@@ -41,6 +41,7 @@ local BODY = "planet-express-fleet-body"
 local TOGGLE = "planet-express-fleet-toggle"
 local ENROLL = "planet-express-fleet-enroll"
 local RESERVE_MANUAL = "planet-express-fleet-reserve-manual"
+local REQUIRE_READY = "planet-express-fleet-require-ready"
 -- Container for the per-planet allow-list checkboxes, plus the name prefix each
 -- planet checkbox carries (the planet name is the suffix, recovered on toggle).
 local PLANETS = "planet-express-fleet-planets"
@@ -112,6 +113,39 @@ local function render_body(body, entry)
     caption = { "planet-express.fleet-reserve-manual" },
     state = entry.reserve_for_manual_use == true,
   })
+
+  -- "Hold until ready signal": gate dispatch on the player's own readiness logic.
+  -- The checkbox writes entry.require_ready; the hint tells the player EXACTLY which
+  -- signal to wire to the hub (icon via rich text + the localised signal name).
+  body.add({
+    type = "checkbox",
+    name = REQUIRE_READY,
+    caption = { "planet-express.fleet-require-ready" },
+    state = entry.require_ready == true,
+  })
+  body.add({
+    type = "label",
+    caption = {
+      "planet-express.fleet-ready-hint",
+      { "virtual-signal-name." .. fleet.READY_SIGNAL },
+    },
+  })
+  -- Setup-time SNAPSHOT of the live hub value (the Fleet tab has no recurring
+  -- refresh -- it renders only on open / on toggle). Reads via the ONE shared
+  -- wrapper; the Monitor's "held" state is the live view (pointed to in the
+  -- tooltip). Only read when gated, mirroring the dispatch gate.
+  if entry.require_ready == true then
+    local value = fleet.read_ready_value(entry.platform)
+    local key = fleet.ready_from_signal(true, value)
+      and "planet-express.fleet-ready-readout-ready"
+      or "planet-express.fleet-ready-readout-held"
+    body.add({
+      type = "label",
+      caption = { key, tostring(value) },
+      tooltip = { "planet-express.fleet-ready-readout-tooltip" },
+    })
+  end
+
   body.add({
     type = "label",
     caption = { "planet-express.fleet-status", tostring(entry.state or "-") },
@@ -268,6 +302,11 @@ function fleet_tab.on_gui_checked_state_changed(event)
     refresh_frame(frame)
   elseif el.name == RESERVE_MANUAL then
     fleet.set_reserve_for_manual_use(id, el.state)
+  elseif el.name == REQUIRE_READY then
+    -- Persist the toggle, then rebuild the body so the snapshot readout appears
+    -- (on) or disappears (off) to match the new state.
+    fleet.set_require_ready(id, el.state)
+    refresh_frame(frame)
   elseif el.name:sub(1, #PLANET_PREFIX) == PLANET_PREFIX then
     -- Rebuild the whole allow-list from the live checkboxes (not just this one),
     -- so the pure helper can collapse "all ticked" back to the unrestricted nil.
