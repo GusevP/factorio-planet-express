@@ -92,12 +92,17 @@ ships carrying their own fuel/ammo).
 
 **Ready-signal gate — `circuit` wait-condition (v1.2). [provisional — TOP playtest
 gate, NO graceful degrade].** When a ship's "Hold until ready signal" toggle is on,
-`schedule.records_for(..., ready_signal)` appends a `{type="circuit", compare_type=
-"and", condition={comparator=">=", first_signal={type="virtual-signal",
-name="planet-express-ready"}, constant=1}}` condition LAST on every stop — a HARD
-OUTER AND (after the `time` `or`), so the per-stop timeout cannot bypass it. `circuit`
-IS a valid `WaitConditionType`, but **whether a SPACE-PLATFORM stop's `circuit`
-condition evaluates the HUB's circuit network is UNCONFIRMED** — confirm in a running
+`schedule.records_for(..., ready_signal)` adds a `{type="circuit", compare_type=
+"and", condition={comparator=">=", first_signal={type="virtual",
+name="planet-express-ready"}, constant=1}}` condition to **every AND-group** of each
+stop's wait list — i.e. once after the cargo conditions AND once after the `time` `or`
+— so the gate is `ready AND (cargo OR timeout)` whether the engine evaluates the list
+left-to-right or as OR-of-AND groups (the and/or PRECEDENCE is undocumented). Putting
+it only LAST would be wrong under OR-of-AND grouping (the ship would leave on
+cargo-loaded, ignoring the signal). A runtime SignalID's type is `"virtual"`, NOT the
+prototype type `"virtual-signal"` (the latter crashes `set_records` with "Unknown
+signal type"). `circuit` IS a valid `WaitConditionType`, but **whether a SPACE-PLATFORM
+stop's `circuit` condition evaluates the HUB's circuit network is UNCONFIRMED** — confirm in a running
 game (add a circuit wait-condition to a platform schedule, wire the hub, verify it
 holds/releases on the signal). If it does NOT read the hub, the condition is never
 satisfied and every gated ship holds → times out → freed + stuck (cause

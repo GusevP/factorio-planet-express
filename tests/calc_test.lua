@@ -663,7 +663,7 @@ describe("schedule.build_records -- ready-signal gate (v1.1)", function()
   local ready_cond = {
     type = "circuit", compare_type = "and",
     condition = { comparator = ">=",
-      first_signal = { type = "virtual-signal", name = "planet-express-ready" }, constant = 1 },
+      first_signal = { type = "virtual", name = "planet-express-ready" }, constant = 1 },
   }
   local args = {
     source = "nauvis", dest = "vulcanus", capacity = 1000, timeout = 3600,
@@ -676,14 +676,18 @@ describe("schedule.build_records -- ready-signal gate (v1.1)", function()
     source = args.source, dest = args.dest, capacity = args.capacity, timeout = args.timeout,
     items = args.items, gate_ready = "planet-express-ready",
   })
+  -- load stop with one item: [iron item_count, ready, time(or), ready] -- the ready
+  -- gate closes BOTH and-groups (the cargo group AND the timeout group), so it is
+  -- correct whether the engine evaluates left-to-right or as OR-of-AND groups.
   local gsrc = gated.records[1]
-  assert_eq(gsrc.wait_conditions[#gsrc.wait_conditions], ready_cond,
-    "load stop: ready gate appended LAST (hard outer AND after the timeout)")
-  assert_eq(gsrc.wait_conditions[2], { type = "time", ticks = 3600, compare_type = "or" },
-    "the timeout OR still precedes the ready AND (so ready is the outer gate)")
+  assert_eq(#gsrc.wait_conditions, 4, "load stop: cargo + ready + timeout + ready")
+  assert_eq(gsrc.wait_conditions[2], ready_cond, "ready closes the cargo group (before the timeout)")
+  assert_eq(gsrc.wait_conditions[3], { type = "time", ticks = 3600, compare_type = "or" },
+    "the timeout OR sits between the two ready gates")
+  assert_eq(gsrc.wait_conditions[4], ready_cond, "ready also closes the timeout group (last)")
+  -- final stop: a single hold-timeout group -> one ready closes it.
   local gdst = gated.records[2]
-  assert_eq(gdst.wait_conditions[#gdst.wait_conditions], ready_cond,
-    "final stop also carries the ready gate")
+  assert_eq(gdst.wait_conditions[#gdst.wait_conditions], ready_cond, "final stop carries the ready gate")
 
   -- not gated: no circuit condition anywhere.
   local plain = schedule.build_records(args)

@@ -165,20 +165,25 @@ local function item_signal(key)
   return { type = "item", name = name, quality = quality }
 end
 
--- The ready-signal gate condition (v1.2). Appended LAST to a stop's conditions with
--- `compare_type = "and"`, so it is a HARD OUTER AND: with the cargo/time list
--- evaluating left-to-right, `((items) OR time) AND ready` means the per-stop timeout
--- can NEVER bypass readiness -- the ship holds until `planet-express-ready >= 1` no
--- matter what. (A ship held past the watchdog's no-progress deadline is then freed +
--- flagged stuck, so it surfaces rather than parking forever.) `signal` is the virtual
--- signal name; nil callers omit it (the toggle is off). PURE.
+-- The ready-signal gate condition (v1.2): `planet-express-ready >= 1`, `compare_type
+-- = "and"`. Factorio does NOT document whether a record's wait list evaluates
+-- left-to-right or as OR-of-AND groups (AND binding tighter than OR). To be correct
+-- under EITHER reading, the builders close EVERY and-group with this condition -- the
+-- cargo group AND the timeout group -- so the expression is `ready AND (cargo OR
+-- timeout)` whichever way the engine groups it: the ship can never depart on
+-- cargo-loaded alone, and the timeout can never bypass readiness. (A ship held past
+-- the watchdog's no-progress deadline is freed + flagged stuck, so it surfaces rather
+-- than parking forever.) `signal` is the virtual signal name; nil callers omit it
+-- (toggle off). PURE.
 local function ready_condition(signal)
   return {
     type = schedule.WAIT_CIRCUIT,
     compare_type = "and",
     condition = {
+      -- A runtime SignalID's type is "virtual" (NOT the prototype type
+      -- "virtual-signal", which `set_records` rejects as "Unknown signal type").
       comparator = ">=",
-      first_signal = { type = "virtual-signal", name = signal },
+      first_signal = { type = "virtual", name = signal },
       constant = 1,
     },
   }
@@ -202,11 +207,17 @@ local function load_wait(manifest, timeout, ready_signal)
       },
     }
   end
+  -- Close the CARGO and-group with the ready gate, then (after the timeout `or`)
+  -- close the TIMEOUT group too -- ready in BOTH groups so neither cargo-loaded nor
+  -- the timeout can release the ship while the signal is <= 0 (see ready_condition).
+  if ready_signal then
+    conds[#conds + 1] = ready_condition(ready_signal)
+  end
   if timeout then
     conds[#conds + 1] = { type = schedule.WAIT_TIME, ticks = timeout, compare_type = "or" }
-  end
-  if ready_signal then
-    conds[#conds + 1] = ready_condition(ready_signal) -- hard outer AND (no timeout bypass)
+    if ready_signal then
+      conds[#conds + 1] = ready_condition(ready_signal)
+    end
   end
   return conds
 end
@@ -231,8 +242,10 @@ local function unload_wait(manifest, timeout, ready_signal)
     conds[#conds + 1] = { type = schedule.WAIT_TIME, ticks = timeout, compare_type = "and" }
   end
   if ready_signal then
-    conds[#conds + 1] = ready_condition(ready_signal) -- hard outer AND (moot at the
-    -- terminal hold stop, which the watchdog frees regardless, but kept uniform)
+    -- One group here (just the hold-`time`, no `or`), so a single ready closes it:
+    -- `time AND ready` under either grouping. Moot at the terminal hold stop (the
+    -- watchdog frees it regardless), but kept uniform.
+    conds[#conds + 1] = ready_condition(ready_signal)
   end
   return conds
 end
@@ -267,11 +280,16 @@ local function turnaround_wait(unload_manifest, load_manifest, timeout, ready_si
   -- Depart ONLY when the whole return is aboard (>= qty), or the timeout. NO
   -- inactivity: a brief lull while the return is still loading would otherwise fire
   -- it and send the ship home with a partial (or empty) return load.
+  -- Close BOTH the return-cargo group and the timeout group with the ready gate
+  -- (see ready_condition / load_wait) so neither can release the ship while <= 0.
+  if ready_signal then
+    conds[#conds + 1] = ready_condition(ready_signal)
+  end
   if timeout then
     conds[#conds + 1] = { type = schedule.WAIT_TIME, ticks = timeout, compare_type = "or" }
-  end
-  if ready_signal then
-    conds[#conds + 1] = ready_condition(ready_signal) -- hard outer AND (no timeout bypass)
+    if ready_signal then
+      conds[#conds + 1] = ready_condition(ready_signal)
+    end
   end
   return conds
 end
