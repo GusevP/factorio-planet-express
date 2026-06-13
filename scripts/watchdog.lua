@@ -51,6 +51,29 @@ local schedule = require("scripts.schedule")
 
 local watchdog = {}
 
+-- `dispatcher` reference, INJECTED at load time -- never resolved by a runtime
+-- `require`. Factorio forbids `require` outside control.lua parsing (it raises
+-- "Require can't be used outside of control.lua parsing"), and the
+-- dispatcher<->watchdog cycle (dispatcher requires watchdog at its top) forbids a
+-- plain top-level require here -- watchdog finishes loading BEFORE dispatcher
+-- populates its table. So dispatcher hands its fully-built table back via
+-- `set_dispatcher` at the very end of its own load (still during control parse).
+-- The plain-`lua` test runner injects nothing, so `disp()` falls back to a one-time
+-- `require` -- legal there (no Factorio require gate) and the path the pure
+-- `flight_sample` tests already exercise.
+local dispatcher
+
+local function disp()
+  if not dispatcher then
+    dispatcher = require("scripts.dispatcher")
+  end
+  return dispatcher
+end
+
+function watchdog.set_dispatcher(d)
+  dispatcher = d
+end
+
 -- Watchdog cadence, in ticks -- the REAL period control.lua registers the
 -- watchdog `run` loop on (a constant, so it is peer-identical). Kept independent
 -- of the dispatcher interval so the two seams are greppable; both firing on the
@@ -82,9 +105,106 @@ watchdog.MAX_ALERTS = 100
 -- per-stop wait timeout (18000) + a 18000-tick travel budget.
 watchdog.DEADLINE_WINDOW = 36000
 
+-- EMA smoothing weight for the learned per-ship `eta_factor` (v1.1). Each flight
+-- sample blends the freshly-measured `ratio` in at this weight: a low alpha
+-- smooths noise but adapts slowly; 0.3 lets a freshly-upgraded (faster) ship's
+-- factor converge within a single trip's worth of samples. Tunable in-engine.
+watchdog.EMA_ALPHA = 0.3
+
+-- Minimum progress (in the connection's 0..1 fraction) a flight sample must cover
+-- before it yields a speed reading (v1.1). A near-stuck ship advancing a sliver
+-- over a whole watchdog window measures `actual_speed ~= 0` -> an absurd ratio;
+-- requiring a real delta (not merely `> 0`) keeps that noise out of the EMA.
+-- Tunable in-engine.
+watchdog.MIN_DELTA = 0.01
+
+-- Sane band for a measured speed `ratio` before it feeds the EMA (v1.1).
+-- `NOMINAL_SPEED / actual_speed` for a healthy ship sits near 1; a degenerate
+-- near-zero `actual_speed` (a sliver of progress over a long window) or a wildly
+-- fast reading would otherwise drag the factor ~alpha in a single step, which the
+-- factor's own `> 0` floor does NOT catch. Clamping the ratio here does.
+watchdog.RATIO_MIN = 0.25
+watchdog.RATIO_MAX = 4
+
 -- ---------------------------------------------------------------------------
 -- pure math (testable; no engine globals)
 -- ---------------------------------------------------------------------------
+
+-- PURE: EMA-update a ship's learned ETA factor. `factor = old*(1-a) + ratio*a`,
+-- blending the freshly-measured speed `ratio` (NOMINAL_SPEED / actual_speed)
+-- into the running estimate at weight `alpha` (default EMA_ALPHA). A nil/absent
+-- `old` starts from the neutral 1.0; the result is clamped strictly > 0 so a
+-- degenerate ratio can never zero out (or invert) an ETA. The sampler is
+-- responsible for clamping `ratio` into a sane band BEFORE calling this (a
+-- near-stuck ship would otherwise feed an absurd ratio); this only enforces the
+-- hard > 0 floor.
+function watchdog.ema_factor(old, ratio, alpha)
+  local a = alpha or watchdog.EMA_ALPHA
+  local prev = old or 1.0
+  local r = ratio or prev
+  local next_factor = prev * (1 - a) + r * a
+  if next_factor <= 0 then
+    return prev > 0 and prev or 1.0
+  end
+  return next_factor
+end
+
+-- The shared baseline space speed lives on the scorer side (`dispatcher`), read
+-- through the load-time-injected reference (`disp()`) so the constant keeps a
+-- single source of truth (the sampler's `ratio` must use the SAME nominal the
+-- `predicted_ticks` scorer does, or the learned factor mis-calibrates).
+local function nominal_speed()
+  return disp().NOMINAL_SPEED
+end
+
+-- PURE: a speed-calibration `ratio` from two in-flight cursor samples, or `nil`
+-- when the pair can't yield a trustworthy reading (v1.1). `prev` / `cur` are
+-- `{ connection, distance, tick }` cursors -- `connection` is the connection NAME
+-- string (a stable id across save/load), `distance` is the engine's 0..1 position
+-- on the connection's FIXED `from`->`to` axis (0=from, 1=to per the 2.0 docs --
+-- NOT progress-in-travel-direction), `tick` is the sample tick -- and `length` is
+-- that connection's km length (read from the distance map by the IO, so the helper
+-- stays unit-closed). It computes
+--   actual_speed = |Δdistance| * length / Δtick     (km/tick)
+--   ratio        = clamp(NOMINAL_SPEED / actual_speed, RATIO_MIN, RATIO_MAX)
+-- which the EMA folds into `eta_factor`. The delta is taken as a MAGNITUDE because
+-- a RETURN leg (`to`->`from`) traverses the fixed axis DOWNWARD (Δdistance < 0); the
+-- flight speed is the same either way, so signing it would make every return-leg
+-- sample fail the gate and never calibrate. Returns `nil` unless BOTH samples are
+-- on the SAME connection, `|Δdistance| >= MIN_DELTA`, and `Δtick > 0` -- so a
+-- connection change, a near-stuck ship, or a zero/negative time gap is SKIPPED
+-- rather than poisoning the factor. Deterministic float math (no random /
+-- wall-clock); the ratio clamp is the guard the factor's `> 0` floor cannot provide.
+function watchdog.flight_sample(prev, cur, length)
+  if not (prev and cur) then
+    return nil
+  end
+  -- same connection: a cursor from a different leg (or no prior connection) can't
+  -- be differenced against this one.
+  if prev.connection == nil or prev.connection ~= cur.connection then
+    return nil
+  end
+  local dd = (cur.distance or 0) - (prev.distance or 0)
+  local moved = dd < 0 and -dd or dd -- magnitude: a return leg counts the axis down
+  if moved < watchdog.MIN_DELTA then
+    return nil
+  end
+  local dt = (cur.tick or 0) - (prev.tick or 0)
+  if dt <= 0 then
+    return nil
+  end
+  local actual_speed = moved * (length or 0) / dt
+  if actual_speed <= 0 then
+    return nil -- degenerate (non-positive length) -> no reading
+  end
+  local ratio = nominal_speed() / actual_speed
+  if ratio < watchdog.RATIO_MIN then
+    return watchdog.RATIO_MIN
+  elseif ratio > watchdog.RATIO_MAX then
+    return watchdog.RATIO_MAX
+  end
+  return ratio
+end
 
 -- Re-clamp amount on arrival: never request MORE than originally committed, and
 -- never more than the current surplus. `new = clamp0(min(old, current_surplus))`.
@@ -327,6 +447,14 @@ function watchdog.free_assignment(id, reason, ship_state, tick)
         schedule.clear_route(platform)
       end
     end
+    -- Clear the flight sampler cursor so the ship's NEXT trip starts a fresh
+    -- same-connection sample window. Otherwise the cursor outlives this freed
+    -- assignment and a later trip on the SAME connection differences its first
+    -- sample against this trip's stale distance/tick -- a huge Δtick and a
+    -- cross-trip Δdistance poison the first measured rate / eta_factor. Mirrors
+    -- `sample_flight`'s reset on park / connection change; freeing is the third
+    -- lifecycle reset point.
+    fleet.set_eta_sample(a.ship, nil)
     fleet.set_assignment(a.ship, nil)
     fleet.set_state(a.ship, ship_state or fleet.IDLE)
   end
@@ -484,6 +612,74 @@ function watchdog.note_progress(a, platform, tick)
   end
   a.progress_index = current
   a.deadline_tick = tick + (a.deadline_window or watchdog.DEADLINE_WINDOW)
+end
+
+-- A SpaceLocationID is recorded as a name string, but stay robust if the runtime
+-- hands back the prototype object instead (provisional seam) -- pull `.name` off a
+-- table, pass a string through. Mirrors dispatcher.loc_name (kept local to each
+-- module rather than exported, to avoid widening the seam).
+local function loc_name(x)
+  if type(x) == "table" then
+    return x.name
+  end
+  return x
+end
+
+-- IO (thin, engine-touching; v1.1 continuous flight sampler): fold ONE flight
+-- observation into the ship's learned `eta_factor`, calibrating it against reality
+-- every watchdog tick the ship is travelling. Reads the ship's `space_connection`
+-- (nil = parked / not on a connection), its 0..1 `distance`, and the current
+-- `tick` into a `{ connection = NAME, distance, tick, rate }` cursor; differences it
+-- against the stored `eta_sample` via the PURE `flight_sample` helper (using the
+-- connection's km `length` looked up in the distance map, so the unit math stays
+-- on the pure side); EMA-updates `eta_factor` when a trustworthy ratio comes back;
+-- then stores the new cursor -- which also carries the measured Δdistance/Δtick
+-- progress-rate the Monitor ETA reads (so the display reads a STORED rate instead
+-- of re-differencing live at a tick the watchdog already advanced). The cursor is
+-- RESET (cleared) when the ship is parked or has switched to a different connection,
+-- so the next sample differences a clean same-connection pair rather than across a
+-- gap. `space_connection` / `.distance` are [provisional] seams (docs/api-notes.md
+-- §7) -- playtest-verified. `dispatcher` is read through the load-time-injected
+-- reference (`disp()`); a runtime `require` is illegal in Factorio.
+function watchdog.sample_flight(a, platform, tick)
+  local entry = a and a.ship and fleet.get(a.ship)
+  if not entry then
+    return
+  end
+  local conn = platform.space_connection
+  if not conn then
+    -- parked / between legs: clear the cursor so a fresh departure starts a new
+    -- same-connection sample window instead of differencing across the gap.
+    if entry.eta_sample ~= nil then
+      fleet.set_eta_sample(a.ship, nil)
+    end
+    return
+  end
+  local name = conn.name
+  local cur = { connection = name, distance = platform.distance or 0, tick = tick }
+  local prev = entry.eta_sample
+  if prev and prev.connection == name then
+    -- Record the measured progress-rate (Δdistance/Δtick) ON the cursor so the
+    -- Monitor's ETA reads a STORED rate rather than re-differencing live: the
+    -- watchdog and the Monitor refresh co-fire on the SAME tick under the default
+    -- (equal) cadence, where a live re-difference has a zero Δtick and yields no
+    -- rate. nil until the second same-connection sample (~one watchdog interval).
+    local dt = tick - (prev.tick or 0)
+    if dt > 0 then
+      cur.rate = (cur.distance - (prev.distance or 0)) / dt
+    end
+    local d = disp()
+    local length = d.distance(d.distances(), loc_name(conn.from), loc_name(conn.to))
+    -- Only calibrate off a REAL mapped length; a fallback (missing pair) would
+    -- make `actual_speed` absurd and the ratio clamp would silently pin the factor.
+    if length < d.DISTANCE_FALLBACK then
+      local ratio = watchdog.flight_sample(prev, cur, length)
+      if ratio then
+        fleet.set_eta_factor(a.ship, watchdog.ema_factor(entry.eta_factor, ratio))
+      end
+    end
+  end
+  fleet.set_eta_sample(a.ship, cur)
 end
 
 -- Surplus already committed FROM `source_id` by OTHER in-flight assignments
@@ -676,6 +872,10 @@ function watchdog.run(tick)
         -- completes a delivery.
         fleet.set_stranded(a.ship, true)
       else
+        -- Continuous flight calibration (v1.1): fold this tick's travel into the
+        -- ship's learned eta_factor (no-op when parked/loading -- it clears the
+        -- cursor then). Runs after the completion/timeout checks, before reclamp.
+        watchdog.sample_flight(a, platform, tick)
         watchdog.maybe_reclamp(a, platform, id)
         if watchdog.load_impossible(a, platform) then
           -- The source can no longer supply ANY of the forward manifest (drained

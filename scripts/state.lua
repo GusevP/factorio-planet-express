@@ -22,7 +22,11 @@ local state = {}
 --   v2: fleet keyed by "<force key>/<platform index>" (was bare platform index).
 -- Additive optional fleet-entry fields do NOT bump the version (they read as
 -- their nil-default on old saves, so no migration is needed): e.g.
--- `entry.require_ready` (the "Hold until ready signal" gate -- nil = off).
+-- `entry.require_ready` (the "Hold until ready signal" gate -- nil = off);
+-- `entry.eta_factor` (v1.1 learned per-ship speed calibration -- nil reads as
+-- 1.0) and `entry.eta_sample` (`{ connection, distance, tick }`, the continuous
+-- flight sampler's cursor -- `connection` is the connection NAME string, not the
+-- `space_connection` LuaObject, so it stays serializable across save/load).
 state.SCHEMA_VERSION = 2
 
 -- ---------------------------------------------------------------------------

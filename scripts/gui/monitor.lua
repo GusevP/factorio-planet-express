@@ -11,8 +11,10 @@
 -- rendering / event wiring here is engine-touching and is verified by MANUAL
 -- PLAYTEST (open it populated + empty, exercise the filters, click a ship).
 --
--- Refresh cadence: the dispatcher tick calls `monitor.refresh_all()` (NOT every
--- tick) so the panel updates roughly when trade decisions are made.
+-- Refresh cadence: the dispatcher/watchdog ticks call `monitor.refresh_all()` (a
+-- full rebuild, NOT every tick) so the panel updates roughly when trade decisions
+-- are made. Between those, a 1s `monitor.refresh_eta()` repaints ONLY the in-flight
+-- ETA label captions in place (no rebuild), so the ETA countdown stays smooth.
 
 local state = require("scripts.state")
 local viewmodel = require("scripts.viewmodel")
@@ -53,6 +55,13 @@ local DOCK_COLOR_OK = { r = 1.0, g = 1.0, b = 1.0 }
 -- The state-filter dropdown options. Index 1 is "any"; the rest map to fleet
 -- lifecycle states. Kept in one place so the dropdown and the lookup agree.
 local STATE_OPTIONS = { "any", fleet.IDLE, fleet.ENROUTE, fleet.LOADING, fleet.UNLOADING, fleet.WITHDRAWN }
+
+-- Caption prefix for a live in-flight ETA label. Shared between the full render
+-- (below) and the 1s ETA-only refresh (`refresh_eta`) so the in-place repaint
+-- produces a byte-identical caption to the full rebuild. The label also carries a
+-- `pe_eta_ships` tag (the ship ids behind the ETA) so refresh_eta can find and
+-- recompute it without a full gather.
+local ETA_CAPTION_PREFIX = "  ·  ETA "
 
 -- ---------------------------------------------------------------------------
 -- small render helpers
@@ -202,6 +211,16 @@ local function render_body(body, view)
         info.add({ type = "label", caption = " on " })
         common.planet_box(info, r.location)
       end
+      -- Live ETA for an in-flight ship (gather measured a usable progress-rate);
+      -- absent for parked / just-departed ships (rate not yet trustworthy). Tagged
+      -- with its ship so refresh_eta repaints the countdown every second.
+      if r.eta_ticks then
+        info.add({
+          type = "label",
+          caption = ETA_CAPTION_PREFIX .. viewmodel.format_eta(r.eta_ticks),
+          tags = { pe_eta_ships = { r.ship_id } },
+        })
+      end
     end
   end
 
@@ -251,6 +270,16 @@ local function render_body(body, view)
           tag.style.minimal_width = 72
           common.item_box(line, it.item)
           line.add({ type = "label", caption = "  ×" .. tostring(it.qty) })
+          -- Live ETA on a delivering item (soonest among the ships bringing it);
+          -- only present once a ship reports a usable in-flight progress-rate. Tagged
+          -- with those ships so refresh_eta recomputes the soonest ETA each second.
+          if it.eta_ticks then
+            line.add({
+              type = "label",
+              caption = ETA_CAPTION_PREFIX .. viewmodel.format_eta(it.eta_ticks),
+              tags = { pe_eta_ships = it.eta_ships },
+            })
+          end
           if it.reason then
             line.add({ type = "label", caption = "  ·  " })
             line.add({ type = "label", caption = reason_caption(it.reason) })
@@ -451,6 +480,54 @@ function monitor.refresh_all()
     local frame = frame_of(player)
     if frame then
       refresh_frame(frame, world)
+    end
+  end
+end
+
+-- Recursively repaint every live-ETA label under `element` from its tagged ships'
+-- CURRENT progress (the soonest among them), touching nothing else. Cheap: the body
+-- holds at most a few dozen rows and each ship's ETA is a couple of live reads, so
+-- this is safe to run every second. A label whose ships have all gone quiet
+-- (parked / arrived since the last full rebuild) keeps its last caption -- the next
+-- full refresh (<=5s) removes the stale row.
+local function update_eta_labels(element)
+  for _, child in pairs(element.children) do
+    local tags = child.tags
+    local ships = tags and tags.pe_eta_ships
+    if ships then
+      local best
+      for _, sid in ipairs(ships) do
+        local t = viewmodel.live_eta_ticks(sid)
+        if t and (not best or t < best) then
+          best = t
+        end
+      end
+      if best then
+        child.caption = ETA_CAPTION_PREFIX .. viewmodel.format_eta(best)
+      end
+    else
+      update_eta_labels(child)
+    end
+  end
+end
+
+-- Lightweight ETA-only refresh (1s cadence): repaint just the in-flight ETA labels
+-- in every open Monitor frame, leaving the rest of the panel (and the dock)
+-- untouched. The full refresh_all rebuilds on the >=5s dispatch/watchdog cadence;
+-- this fills the gaps so the ETA counts down every second. No gather, no
+-- body.clear -- it reads each tagged ship's live progress directly.
+function monitor.refresh_eta()
+  if not game then
+    return
+  end
+  for _, player in pairs(game.players) do
+    local frame = frame_of(player)
+    if frame then
+      local scroll = frame[SCROLL]
+      local body = scroll and scroll[BODY]
+      if body then
+        update_eta_labels(body)
+      end
     end
   end
 end

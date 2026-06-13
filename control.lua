@@ -20,6 +20,16 @@ local fleet_tab = require("scripts.gui.fleet_tab")
 script.on_init(function()
   state.init()
   registry.rebuild()
+  dispatcher.build_distances()
+end)
+
+-- The inter-planet distance map (v1.1 ETA dispatch) is derived static prototype
+-- data, NOT `storage` -- so it lives in a module cache that must be reconstructed
+-- every time the control stage loads (a fresh load gets no `on_init`). `prototypes`
+-- is readable in `on_load`, and the build is a pure read (no `storage` write,
+-- determinism-safe).
+script.on_load(function()
+  dispatcher.build_distances()
 end)
 
 -- Keep schema current on mod add/update/remove (runs the real v2 fleet-key
@@ -29,6 +39,7 @@ end)
 script.on_configuration_changed(function(event)
   state.on_configuration_changed(event)
   registry.rebuild()
+  dispatcher.build_distances()
 end)
 
 -- ---------------------------------------------------------------------------
@@ -85,59 +96,73 @@ script.on_event(defines.events.on_pre_surface_deleted, function(event)
   registry.on_pre_surface_deleted(event.surface_index)
 end)
 
--- Dispatch + watchdog cadences (Task 11). The dispatcher runs on its configurable
--- interval (`dispatcher.interval()`); the watchdog runs on its own constant cadence
--- (`watchdog.INTERVAL`). `on_nth_tick` allows only ONE handler per period, so:
---   * when the two periods are EQUAL we register a single shared handler that runs
---     both (dispatcher.run before watchdog.run -- preserve order, co-firing is
---     harmless and deterministic);
---   * when they DIFFER we register two independent handlers -- a dispatch handler
---     and a watchdog handler.
--- `monitor.refresh_all()` runs in EVERY handler: the Monitor must refresh on both
--- dispatch decisions and watchdog state changes, and either cadence can be the
--- faster one (the dispatch-interval setting can be set below watchdog.INTERVAL).
+-- Dispatch + watchdog + Monitor-ETA cadences (Task 11; ETA cadence is v1.3). Three
+-- periods drive the on_nth_tick handlers:
+--   * dispatch  -- `dispatcher.run` on its configurable interval (`dispatcher.interval()`)
+--   * watchdog  -- `watchdog.run` on its own constant cadence (`watchdog.INTERVAL`, 5s)
+--   * eta       -- the Monitor's 1s ETA-only refresh (`ETA_REFRESH_INTERVAL`)
+-- `on_nth_tick` allows only ONE handler per period, so the registrar builds the SET
+-- of distinct periods and gives each a single handler that runs every job that
+-- period owns (e.g. when dispatch == watchdog one handler runs both; when the ETA
+-- cadence divides a heavier one they still register as separate periods and both
+-- fire on the shared tick, which is harmless).
 --
--- Determinism: both periods are peer-identical -- watchdog.INTERVAL is a module
--- constant and dispatcher.interval() reads a SYNCED runtime-global setting -- so
--- the registrar computes the same period set on every client and registers
--- identically. (The replicated game state never feeds the registration.)
+-- Monitor refresh: a period that runs dispatcher or watchdog does a FULL
+-- `monitor.refresh_all()` (it rebuilds the panel, which already repaints ETA);
+-- a period that is ONLY the ETA cadence does the cheap in-place `monitor.refresh_eta()`
+-- so the in-flight ETA counts down every second between full rebuilds.
+--
+-- Determinism: all three periods are peer-identical -- watchdog.INTERVAL and
+-- ETA_REFRESH_INTERVAL are module constants and dispatcher.interval() reads a SYNCED
+-- runtime-global setting -- so the registrar computes the same period set on every
+-- client and registers identically. (The replicated game state never feeds the
+-- registration; the Monitor refreshes are per-player GUI side effects, not game state.)
 --
 -- The registrar tracks the SET of periods it currently has registered. Before
 -- registering the new set it clears every orphaned period (`on_nth_tick(p, nil)`),
--- so the 2->1 transition (dispatch interval changed to equal watchdog.INTERVAL --
--- the old separate dispatch period must stop firing) and the 1->2 transition (they
--- diverge again) never leave a stale period firing. Re-run on
--- init/config-change/load and whenever the dispatch-interval setting changes.
+-- so a dispatch-interval change that collapses or splits the period set never
+-- leaves a stale period firing. Re-run on init/config-change/load and whenever the
+-- dispatch-interval setting changes.
 local registered_periods = {} -- set of period -> true currently registered
 
-local function dispatch_only_handler(event)
-  dispatcher.run(event.tick)
-  monitor.refresh_all()
-end
+-- Monitor ETA-only refresh cadence: 1s at 60 UPS. A module constant (peer-identical,
+-- like watchdog.INTERVAL) so the registrar's period set stays deterministic.
+local ETA_REFRESH_INTERVAL = 60
 
-local function watchdog_only_handler(event)
-  watchdog.run(event.tick)
-  monitor.refresh_all()
-end
-
-local function shared_handler(event)
-  dispatcher.run(event.tick)
-  watchdog.run(event.tick)
-  monitor.refresh_all()
+-- The single on_nth_tick handler for `period`, given the current dispatch/watchdog
+-- periods. It runs whichever heavy jobs this period owns, then refreshes the
+-- Monitor: a full rebuild if anything heavy fired, otherwise the cheap ETA-only
+-- pass when this is (solely) the ETA cadence.
+local function handler_for(period, dispatch_period, watchdog_period)
+  local runs_dispatch = (period == dispatch_period)
+  local runs_watchdog = (period == watchdog_period)
+  local runs_eta = (period == ETA_REFRESH_INTERVAL)
+  return function(event)
+    if runs_dispatch then
+      dispatcher.run(event.tick)
+    end
+    if runs_watchdog then
+      watchdog.run(event.tick)
+    end
+    if runs_dispatch or runs_watchdog then
+      monitor.refresh_all()
+    elseif runs_eta then
+      monitor.refresh_eta()
+    end
+  end
 end
 
 local function register_ticks()
   local dispatch_period = dispatcher.interval()
   local watchdog_period = watchdog.INTERVAL
 
-  -- Desired period -> handler. When the two periods coincide the set has ONE
-  -- period whose handler runs both runs.
+  -- The distinct periods we must fire on. Duplicates collapse (e.g. dispatch ==
+  -- watchdog, or dispatch == ETA cadence) so each period gets exactly one handler.
   local desired = {}
-  if dispatch_period == watchdog_period then
-    desired[dispatch_period] = shared_handler
-  else
-    desired[dispatch_period] = dispatch_only_handler
-    desired[watchdog_period] = watchdog_only_handler
+  for _, period in ipairs({ dispatch_period, watchdog_period, ETA_REFRESH_INTERVAL }) do
+    if desired[period] == nil then
+      desired[period] = handler_for(period, dispatch_period, watchdog_period)
+    end
   end
 
   -- Clear orphaned periods (registered last time but not wanted now).

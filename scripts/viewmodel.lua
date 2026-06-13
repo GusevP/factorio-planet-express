@@ -26,6 +26,10 @@
 local state = require("scripts.state")
 local fleet = require("scripts.fleet")
 local qkey = require("scripts.qkey")
+-- Required up here (not lazily in the IO section) so the PURE ETA helpers below
+-- can reach `predicted_ticks` / `NOMINAL_SPEED`. dispatcher does not require
+-- viewmodel, so there is no load cycle.
+local dispatcher = require("scripts.dispatcher")
 
 local viewmodel = {}
 
@@ -106,6 +110,79 @@ function viewmodel.classify_waiting(candidates, min_trip, in_transit)
 end
 
 -- ---------------------------------------------------------------------------
+-- pure in-flight ETA (Task 8 -- Monitor display)
+-- ---------------------------------------------------------------------------
+
+-- Minimum trustworthy progress-rate (Δdistance per tick, where `distance` is the
+-- 0..1 leg progress). Just after a cursor reset (fresh departure / connection
+-- change) the measured Δdistance/Δtick can be a sliver for up to one watchdog
+-- interval, which would yield an absurd multi-hour ETA; a rate at or below this
+-- floor is treated as "no rate yet" and the row shows a fallback instead. A real
+-- leg's rate is ~1/leg_ticks (e.g. ~1.7e-4 for a 600 km leg at NOMINAL_SPEED),
+-- comfortably above this floor.
+viewmodel.MIN_RATE = 1e-5
+
+-- Pure remaining-flight ETA in TICKS for an in-flight ship, from the measured
+-- progress-rate -- unit-free, it NEVER reads `platform.speed` (whose km/tick units
+-- are unconfirmed). `live`:
+--   { distance  = <0..1 progress along the CURRENT leg>,
+--     rate      = <Δdistance/Δtick measured between the last two samples>,
+--     remaining = <km of WHOLE legs still to fly AFTER the current one; default 0,
+--                  v1 routes are two-stop so this is 0 today>,
+--     factor    = <the ship's learned eta_factor; default 1.0> }
+-- Current leg: `remaining_fraction / |rate|`. `distance` is the engine's 0..1
+-- position on the connection's FIXED `from`->`to` axis (0=from, 1=to per the 2.0
+-- docs), so a RETURN leg (`to`->`from`) counts the axis DOWN and the measured
+-- `rate` (Δdistance/Δtick) is NEGATIVE. The SIGN of the rate therefore tells the
+-- travel direction -- rate>0 climbs toward `to` (remaining = `1 - distance`),
+-- rate<0 descends toward `from` (remaining = `distance`) -- and `|rate|` is the
+-- speed. Remaining whole legs: the same NOMINAL_SPEED scorer the dispatcher uses
+-- (`predicted_ticks`), scaled by the ship's factor. Returns `nil` when there is no
+-- usable rate (missing, or a magnitude at/below MIN_RATE -- zero or near-zero) so
+-- the caller renders a "calculating" fallback rather than dividing by ~0.
+function viewmodel.remaining_eta(live)
+  if not live then
+    return nil
+  end
+  local rate = live.rate
+  if not rate then
+    return nil
+  end
+  local speed = rate < 0 and -rate or rate -- |rate|: a return leg measures it negative
+  if speed < viewmodel.MIN_RATE then
+    return nil
+  end
+  local distance = live.distance or 0
+  if distance < 0 then
+    distance = 0
+  elseif distance > 1 then
+    distance = 1
+  end
+  -- remaining 0..1 fraction toward THIS leg's destination, per travel direction.
+  local remaining_frac = rate > 0 and (1 - distance) or distance
+  local current = remaining_frac / speed
+  if current < 0 then
+    current = 0
+  end
+  local rest = dispatcher.predicted_ticks(live.remaining or 0) * (live.factor or 1.0)
+  return current + rest
+end
+
+-- Format a tick count as "m:ss" (Factorio runs 60 ticks/sec). Sub-minute reads
+-- "0:SS"; zero/negative reads "0:00"; large values keep counting minutes (no hour
+-- rollover -- a cargo run is minutes, and even an absurd value renders rather than
+-- overflowing). Pure string math -> unit-tested at the boundaries.
+function viewmodel.format_eta(ticks)
+  if not ticks or ticks < 0 then
+    ticks = 0
+  end
+  local secs = math.floor(ticks / 60 + 0.5)
+  local m = math.floor(secs / 60)
+  local s = secs % 60
+  return string.format("%d:%02d", m, s)
+end
+
+-- ---------------------------------------------------------------------------
 -- pure view-model builder
 -- ---------------------------------------------------------------------------
 
@@ -151,6 +228,9 @@ function viewmodel.build(world)
         to = a and a.dest_planet or nil,
         manifest = a and a.manifest or nil,
         assignment_id = e.assignment,
+        -- Live in-flight ETA (ticks) from the measured progress-rate, if gather
+        -- stamped the live fields (`eta_live`); nil for parked / un-sampled ships.
+        eta_ticks = viewmodel.remaining_eta(e.eta_live),
       }
       -- DISJOINT buckets so working+idle+stuck+withdrawn partitions the roster.
       -- `stranded` takes precedence over the lifecycle state: a stranded ship reads
@@ -173,6 +253,10 @@ function viewmodel.build(world)
   local shipments = {}
   for _, aid in ipairs(state.sorted_keys(assignments)) do
     local a = assignments[aid]
+    -- The live ETA is a per-SHIP measurement (gather stamps it on the fleet
+    -- entry), so resolve it through the carrying ship; nil unless that ship is
+    -- in-flight and sampled. group_demand propagates it onto delivering items.
+    local carrier = a.ship and fleet_in[a.ship] or nil
     shipments[#shipments + 1] = {
       id = aid,
       ship_id = a.ship,
@@ -182,6 +266,7 @@ function viewmodel.build(world)
       return_manifest = a.return_manifest,
       phase = a.phase,
       ticks_left = (a.deadline_tick and tick) and (a.deadline_tick - tick) or nil,
+      eta_ticks = carrier and viewmodel.remaining_eta(carrier.eta_live) or nil,
     }
   end
 
@@ -256,7 +341,11 @@ function viewmodel.group_demand(shipments, waiting)
   local function planet(p)
     local g = planets[p]
     if not g then
-      g = { deliver = {}, load = {}, wait = {} } -- qkey -> qty (deliver/load) | {unmet,reason} (wait)
+      -- deliver/load: qkey -> qty; wait: qkey -> {unmet,reason}; deliver_eta:
+      -- qkey -> soonest live ETA (ticks) among the ships delivering it;
+      -- deliver_ships: qkey -> list of ship ids delivering it (for the Monitor's
+      -- 1s in-place ETA refresh, which recomputes the soonest live ETA itself).
+      g = { deliver = {}, load = {}, wait = {}, deliver_eta = {}, deliver_ships = {} }
       planets[p] = g
       order[#order + 1] = p
     end
@@ -266,9 +355,32 @@ function viewmodel.group_demand(shipments, waiting)
   for _, sh in ipairs(shipments or {}) do
     if sh.to and sh.manifest then
       local g = planet(sh.to)
-      local bucket = (sh.phase == fleet.LOADING) and g.load or g.deliver
+      local loading = (sh.phase == fleet.LOADING)
+      local bucket = loading and g.load or g.deliver
       for k, qty in pairs(sh.manifest) do
         bucket[k] = (bucket[k] or 0) + qty
+        if not loading then
+          -- Keep the soonest ETA per delivering item (a planet may receive the same
+          -- item on more than one ship). Loading ships have no in-flight ETA yet.
+          if sh.eta_ticks then
+            local cur = g.deliver_eta[k]
+            if cur == nil or sh.eta_ticks < cur then
+              g.deliver_eta[k] = sh.eta_ticks
+            end
+          end
+          -- Record every ship delivering this item so the Monitor's 1s ETA-only
+          -- refresh can recompute the soonest live ETA in place (min over these
+          -- ships). GUI-only and order-independent (a min), so the append order
+          -- doesn't matter; shipments already arrive in sorted-id order regardless.
+          if sh.ship_id ~= nil then
+            local ships = g.deliver_ships[k]
+            if not ships then
+              ships = {}
+              g.deliver_ships[k] = ships
+            end
+            ships[#ships + 1] = sh.ship_id
+          end
+        end
       end
     end
   end
@@ -300,7 +412,11 @@ function viewmodel.group_demand(shipments, waiting)
         if status == "waiting" then
           items[#items + 1] = { item = k, qty = map[k].unmet, status = status, reason = map[k].reason }
         else
-          items[#items + 1] = { item = k, qty = map[k], status = status }
+          -- `eta_ticks` only on delivering rows that have a live measurement;
+          -- loading rows (no in-flight progress yet) carry none. `eta_ships` is the
+          -- delivering ships behind that ETA, for the Monitor's in-place 1s refresh.
+          items[#items + 1] = { item = k, qty = map[k], status = status,
+            eta_ticks = g.deliver_eta[k], eta_ships = g.deliver_ships[k] }
         end
       end
     end
@@ -554,10 +670,54 @@ end
 -- (provisional -- engine-touching; verified by manual playtest)
 -- ---------------------------------------------------------------------------
 
-local dispatcher = require("scripts.dispatcher")
 local stock = require("scripts.stock")
 local reserves = require("scripts.reserves")
 local demand = require("scripts.demand")
+
+-- IO (thin, engine-touching; v1.1 Monitor ETA): read a ship's live progress for
+-- the pure `remaining_eta`. The watchdog's `sample_flight` already measured the
+-- progress-rate (Δdistance/Δtick) and stored it on the `eta_sample` cursor, so we
+-- read that STORED rate rather than re-differencing here: the watchdog write and
+-- this refresh co-fire on the same tick under the default (equal) cadence, where a
+-- live re-difference would have a zero Δtick and yield no rate. The rate is the
+-- SAME unit-free measure the sampler/factor use, never `platform.speed`. Returns
+-- nil for a parked / un-sampled ship, or one still on its first post-departure
+-- interval (no rate measured yet); the current `distance` is read LIVE so the ETA
+-- stays fresh between watchdog samples. `remaining` is 0 today (v1 routes are
+-- two-stop, the ship is on its only leg). `space_connection` / `.name` /
+-- `.distance` are [provisional] seams (docs/api-notes.md §7), playtest-verified.
+local function gather_eta_live(entry)
+  local p = entry.platform
+  if not (p and p.valid) then
+    return nil
+  end
+  local conn = p.space_connection
+  if not conn then
+    return nil -- parked / between legs: no in-flight ETA
+  end
+  local s = entry.eta_sample
+  -- Need a measured rate on a cursor for the CURRENT connection. The watchdog
+  -- clears/replaces the cursor on park or connection change, so a stale cross-leg
+  -- rate never leaks through; the pure side still rejects a near-zero rate.
+  if not (s and s.connection == conn.name and s.rate) then
+    return nil
+  end
+  return { distance = p.distance or 0, rate = s.rate, remaining = 0, factor = entry.eta_factor or 1.0 }
+end
+
+-- IO (thin): the CURRENT live ETA in ticks for ONE ship by id, recomputed from its
+-- live progress (distance read now, vs the rate the watchdog stored on the cursor).
+-- This is the per-ship value `build` stamps onto a roster row, but callable for a
+-- single ship without a full gather -- the Monitor's 1s ETA-only refresh repaints
+-- each label with it between full rebuilds. Returns nil on the same gate as
+-- gather_eta_live (parked / unsampled / arrived).
+function viewmodel.live_eta_ticks(ship_id)
+  local entry = ship_id ~= nil and fleet.get(ship_id) or nil
+  if not entry then
+    return nil
+  end
+  return viewmodel.remaining_eta(gather_eta_live(entry))
+end
 
 -- Snapshot `storage` + a fresh dispatcher snapshot into the plain `world` the
 -- pure `build` consumes. Reuses the per-tick stock cache (begin_tick is a no-op
@@ -630,6 +790,8 @@ function viewmodel.gather(tick)
       -- currently parked at (nil in transit, via the existing space_location seam).
       name = (entry.platform and entry.platform.valid and entry.platform.name) or nil,
       location = dispatcher.ship_planet(entry.platform),
+      -- Live in-flight progress-rate fields for the pure ETA (nil unless sampled).
+      eta_live = gather_eta_live(entry),
     }
   end
 

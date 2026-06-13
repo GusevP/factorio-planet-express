@@ -23,8 +23,13 @@ save/load:
   Never derive ids from table address or wall-clock.
 - **No `math.random`, `os.time`, or wall-clock** anywhere in control logic.
 - **All persistent state lives in `storage`** — `storage.nodes`, `storage.fleet`,
-  `storage.assignments`, `storage.alerts`. The per-tick stock cache is the only
-  in-memory state, and it is rebuilt each tick (never read across ticks).
+  `storage.assignments`, `storage.alerts`. Two pieces of non-`storage` in-memory
+  state exist: the per-tick stock cache (rebuilt each tick, never read across
+  ticks), and the inter-planet `distance_map` in `dispatcher.lua` — derived static
+  prototype data rebuilt from `prototypes.space_connection` on
+  `on_init`/`on_configuration_changed`/`on_load` (`prototypes` is readable in
+  `on_load`) and read across ticks. It is deterministic without being serialized
+  because every peer rebuilds the identical map from identical prototypes.
   `storage.fleet` is keyed by the force-qualified fleet key
   `"<forcekey>/<platform.index>"` (`registry.fleet_key`; `forcekey` =
   `force.index or force.name`) — a stable string so `state.sorted_keys` ordering
@@ -78,7 +83,7 @@ globals) still loads them.
 | `fleet.lua` | per-platform enroll toggle + per-ship limits, `idle_eligible`; ready-signal gate (`require_ready` toggle, pure `ready_from_signal`, and the mod's only circuit read `read_ready_value`) |
 | `schedule.lua` | pure route→records builder + `schedule.writer` wrapper |
 | `dispatcher.lua` | `on_nth_tick` match/assign/bookkeep, `exportable` thrash guard, return leg |
-| `watchdog.lua` | timeouts, destroyed/stranded, re-clamp, player-edit signature |
+| `watchdog.lua` | timeouts, destroyed/stranded, re-clamp, player-edit signature; continuous flight sampler (`sample_flight`/`flight_sample`/`ema_factor`) that EMA-calibrates each ship's `eta_factor` and records the progress-rate for the Monitor ETA |
 | `gui/monitor.lua` | fleet monitor render + event routing (dumb view) |
 | `gui/trade_tab.lua` | Trade tab on the landing pad GUI (dumb view) |
 | `gui/fleet_tab.lua` | Fleet tab on the platform hub GUI — enroll / reserve-for-manual toggles (dumb view) |

@@ -72,12 +72,14 @@ the **minimum-trip threshold** so trivially small amounts don't dispatch ships.
 Opened from the top-bar shortcut, the Monitor shows the whole fleet at a glance:
 
 - **Fleet roster** — each ship's live state (idle / enroute / loading /
-  unloading / withdrawn), current job `From → To`, manifest, and timeout
-  countdown. Loading/unloading are derived from where the ship is parked, so the
-  roster tracks a trip in real time.
+  unloading / withdrawn), current job `From → To`, manifest, a live **ETA** for
+  in-flight ships, and the timeout countdown. Loading/unloading are derived from
+  where the ship is parked, so the roster tracks a trip in real time.
 - **Active shipments** — manifests and the live per-shipment phase.
-- **Waiting demand** — items wanting transport but not yet dispatched, each with
-  a reason: `no source`, `source busy importing`, `no ship`, or `below min-trip`.
+- **Waiting demand** — items wanting transport, with a live **ETA** on each item
+  already on the way (soonest among the ships bringing it); items not yet
+  dispatched carry a reason instead: `no source`, `source busy importing`,
+  `no ship`, or `below min-trip`.
 - **Alerts** — stranded / destroyed / conflict events.
 - **Network summary** — one-line fleet overview.
 
@@ -115,16 +117,17 @@ dispatcher timer, not every tick.
 
 ## Known limits / roadmap
 
-v1 ships maintain-a-level trading on two-planet routes. v1.1 added the
-ready-signal dispatch gate (hold a ship until you emit `planet-express-ready`).
+v1 ships maintain-a-level trading on two-planet routes. Later releases added the
+ready-signal dispatch gate (hold a ship until you emit `planet-express-ready`)
+and **ETA-aware dispatch** — the mod now sends the ship that *delivers soonest*,
+using real inter-planet distances plus a learned per-ship speed factor, and shows
+a live ETA in the Monitor. Source selection stays coverage-first; ETA only
+decides which ship is sent and breaks ties between equally-covering sources.
 Not yet implemented:
 
-- **ETA for ships and resources** — the Monitor currently shows a timeout
-  countdown, not a true ETA.
-- **v1.2** — multi-stop routes (3–4 planets per run). Routes are already modeled
+- **Multi-stop routes** (3–4 planets per run). Routes are already modeled
   internally as an ordered stop list, so this is a route-construction change, not
   a rewrite.
-- **v1.3** — route analysis / fastest-route selection.
 - **Deferred (out of scope):** one-shot delivery orders (v1 maintains a level
   only); extending landing-pad storage via linked pads.
 
@@ -134,8 +137,8 @@ Run `./package.sh` from the mod root. It derives the name and version from
 `info.json`, copies only shippable entries (excluding `tests/`, `docs/`, `.git`),
 and produces `planet-express_<version>.zip` ready for the mod portal.
 
-A `changelog.txt` (Factorio portal format) still needs to be authored before the
-first public release.
+`changelog.txt` (Factorio portal format) tracks each release; add a new
+top-most entry whenever you bump the version in `info.json`.
 
 ## Development
 

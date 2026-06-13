@@ -1,3 +1,20 @@
+Version: 1.3.1
+Date: 2026-06-13
+  Bugfixes:
+    - Fixed a crash that hit a few seconds into any cargo flight, the moment the mod first measured a ship's speed to calibrate its ETA. In-flight ETA never appeared before this fix because the crash struck exactly when the first progress-rate would have been recorded.
+  Changes:
+    - The live in-flight ETA in the Fleet Monitor now counts down every second instead of every five, on both the roster row and each delivering item. Only the ETA refreshes that often; the rest of the panel updates on its usual cadence.
+---------------------------------------------------------------------------------------------------
+Version: 1.3.0
+Date: 2026-06-12
+  Features:
+    - ETA-aware dispatch: the mod now sends the ship that delivers soonest, scoring every candidate by a real ETA built from inter-planet distances and a learned per-ship speed factor, instead of the old "parked here / lowest id" heuristic.
+    - Per-ship speed calibration: each enrolled platform learns its own speed factor from measured flight progress (a continuously-updated EMA), so a slow or freshly-upgraded ship's ETA self-corrects within a trip or two.
+    - Source selection stays coverage-first; ETA only decides which ship is sent and breaks ties between equally-covering sources toward the shorter route. The two-way return leg flips direction only when that genuinely lowers the ETA.
+    - Live ETA in the Fleet Monitor: in-flight ships show an "ETA m:ss" on their roster row and on each delivering item in the Demand view, computed from the ship's measured progress-rate.
+  Info:
+    - Distances come from the game's space-connection prototypes and the learned factor lives in storage, so every dispatch decision stays multiplayer-deterministic and survives save/load. Still read-only and schedule-only — nothing is spawned, recalled mid-flight, or hand-inserted.
+---------------------------------------------------------------------------------------------------
 Version: 1.2.0
 Date: 2026-06-11
   Features:

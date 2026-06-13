@@ -6,7 +6,15 @@
 -- A fleet entry (in `storage.fleet[platform_id]`) is a plain table:
 --   { platform, enrolled=bool, allowed_planets={names}|"all"|nil,
 --     reserve_for_manual_use=bool, state="idle|enroute|loading|unloading|withdrawn",
---     assignment=<id>|nil, stranded=bool, require_ready=bool }
+--     assignment=<id>|nil, stranded=bool, require_ready=bool,
+--     eta_factor=number, eta_sample={ connection, distance, tick } }
+--
+-- `eta_factor` / `eta_sample` (v1.1, additive, nil-default, no migration) drive
+-- the ETA-aware dispatcher: `eta_factor` is the learned per-ship speed
+-- calibration (`eta = predicted * factor`, default 1.0 for a never-flown ship),
+-- EMA-updated each watchdog flight sample (`watchdog.ema_factor`); `eta_sample`
+-- is that sampler's cursor (`connection` is the connection NAME string -- a
+-- stable serializable id, never the `space_connection` LuaObject).
 --
 -- `require_ready` (additive, nil = off, no migration) is the "Hold until ready
 -- signal" toggle: when true the dispatcher only sends this ship while the hub
@@ -284,6 +292,33 @@ function fleet.set_stranded(platform_id, stranded)
   local entry = fleet.get(platform_id)
   if entry then
     entry.stranded = stranded == true
+  end
+  return entry
+end
+
+-- Store a ship's learned ETA calibration factor (v1.1). The continuous flight
+-- sampler (watchdog) computes the EMA-updated value via `watchdog.ema_factor`
+-- and writes it back here; `build_snapshot` reads `entry.eta_factor or 1.0`, so
+-- a never-flown ship stays at the neutral 1.0 default with no migration. Guards
+-- a nil/non-positive value -> leaves the entry untouched (the factor must stay
+-- > 0 so it never zeroes out an ETA).
+function fleet.set_eta_factor(platform_id, factor)
+  local entry = fleet.get(platform_id)
+  if entry and type(factor) == "number" and factor > 0 then
+    entry.eta_factor = factor
+  end
+  return entry
+end
+
+-- Store the flight sampler's cursor (v1.1): the last-seen `{ connection,
+-- distance, tick }` for the travelling ship. `connection` is the connection
+-- NAME string (serializable + stable across save/load), NOT the
+-- `space_connection` LuaObject. Pass nil to clear the cursor on park / route
+-- change so the next sample starts fresh instead of differencing across a gap.
+function fleet.set_eta_sample(platform_id, sample)
+  local entry = fleet.get(platform_id)
+  if entry then
+    entry.eta_sample = sample
   end
   return entry
 end

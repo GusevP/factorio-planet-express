@@ -822,22 +822,47 @@ describe("dispatcher.best_source -- most coverage, nearest tie-break, id tie-bre
   }
   assert_eq(dispatcher.best_source(guarded, guarded.nodes[1]), nil, "guarded candidate is not a source -> nil")
 
-  -- nearest tie-break: equal coverage, override distance so node 3 is nearer
+  -- coverage stays PRIMARY over distance: the higher-coverage source wins even when
+  -- a rival has a strictly shorter route. nauvis (covers 200) sits FAR; vulcanus
+  -- (covers 100) sits NEAR -- coverage must still pick nauvis.
+  local cov_over_dist = {
+    distances = { ["nauvis"] = { ["dest"] = 9 }, ["vulcanus"] = { ["dest"] = 1 } },
+    nodes = {
+      [1] = { id = 1, planet = "dest", demand = {
+        { item = "iron-plate", unmet = 100, priority = 0 },
+        { item = "copper-plate", unmet = 100, priority = 0 },
+      } },
+      [2] = { id = 2, planet = "nauvis", surplus = { ["iron-plate"] = 500, ["copper-plate"] = 500 }, unmet_by_item = {} },
+      [3] = { id = 3, planet = "vulcanus", surplus = { ["iron-plate"] = 500 }, unmet_by_item = {} },
+    },
+  }
+  assert_eq(dispatcher.best_source(cov_over_dist, cov_over_dist.nodes[1]).id, 2,
+    "higher coverage beats a shorter route")
+
+  -- nearest tie-break: equal coverage, feed snapshot.distances so node 3 is nearer.
+  -- The tie-break now reads the GUARDED map lookup (no global stub), keyed by planet.
   local tie = {
+    distances = { ["near"] = { ["dest"] = 1 }, ["far"] = { ["dest"] = 9 } },
     nodes = {
       [1] = { id = 1, planet = "dest", demand = { { item = "iron-plate", unmet = 100, priority = 0 } } },
       [2] = { id = 2, planet = "far", surplus = { ["iron-plate"] = 500 }, unmet_by_item = {} },
       [3] = { id = 3, planet = "near", surplus = { ["iron-plate"] = 500 }, unmet_by_item = {} },
     },
   }
-  local saved_distance = dispatcher.distance
-  dispatcher.distance = function(planet, _dest) return planet == "near" and 1 or 9 end
   assert_eq(dispatcher.best_source(tie, tie.nodes[1]).id, 3, "equal coverage -> nearest wins")
 
   -- id tie-break: equal coverage AND equal distance -> lowest id
-  dispatcher.distance = function(_a, _b) return 5 end
-  assert_eq(dispatcher.best_source(tie, tie.nodes[1]).id, 2, "equal coverage+distance -> lowest id")
-  dispatcher.distance = saved_distance
+  local tie_eq = {
+    distances = { ["near"] = { ["dest"] = 5 }, ["far"] = { ["dest"] = 5 } },
+    nodes = tie.nodes,
+  }
+  assert_eq(dispatcher.best_source(tie_eq, tie_eq.nodes[1]).id, 2, "equal coverage+distance -> lowest id")
+
+  -- no distances map at all: every lookup falls to the large fallback (all equal)
+  -- so the tie-break degrades cleanly to lowest id -- never a nil-index crash.
+  local no_dist = { nodes = tie.nodes }
+  assert_eq(dispatcher.best_source(no_dist, no_dist.nodes[1]).id, 2,
+    "no snapshot.distances -> fallback for all -> lowest id (no crash)")
 
   -- no source can cover anything -> nil
   local none = {
@@ -847,6 +872,65 @@ describe("dispatcher.best_source -- most coverage, nearest tie-break, id tie-bre
     },
   }
   assert_eq(dispatcher.best_source(none, none.nodes[1]), nil, "no surplus anywhere -> no source")
+end)
+
+describe("dispatcher.distance -- pure nil-guarded map lookup (v1.1)", function()
+  -- symmetric map built the way dispatcher.build_distances writes it
+  local map = {
+    ["nauvis"] = { ["vulcanus"] = 600, ["gleba"] = 1000 },
+    ["vulcanus"] = { ["nauvis"] = 600 },
+    ["gleba"] = { ["nauvis"] = 1000 },
+  }
+  assert_eq(dispatcher.distance(map, "nauvis", "vulcanus"), 600, "direct lookup")
+  assert_eq(dispatcher.distance(map, "vulcanus", "nauvis"), 600, "symmetric lookup (b->a same length)")
+  assert_eq(dispatcher.distance(map, "nauvis", "gleba"), 1000, "second connection")
+
+  assert_eq(dispatcher.distance(map, "nauvis", "nauvis"), 0, "self-distance is 0 (no deadhead)")
+  assert_eq(dispatcher.distance(map, "gleba", "gleba"), 0, "self-distance is 0 even with no self entry")
+
+  local FB = dispatcher.DISTANCE_FALLBACK
+  assert_eq(dispatcher.distance(map, "vulcanus", "gleba"), FB, "missing pair -> large fallback")
+  assert_eq(dispatcher.distance(map, "unknown", "nauvis"), FB, "unknown source -> fallback")
+  assert_eq(dispatcher.distance(map, nil, "nauvis"), FB, "nil source key -> fallback (no crash)")
+  assert_eq(dispatcher.distance(map, "nauvis", nil), FB, "nil dest key -> fallback (no crash)")
+  assert_eq(dispatcher.distance(nil, "nauvis", "vulcanus"), FB, "nil map -> fallback (no crash)")
+  assert_eq(dispatcher.distance(nil, nil, nil), FB, "all nil -> fallback (no crash)")
+end)
+
+describe("dispatcher.eta -- pure ETA scorer (v1.1)", function()
+  local NS = dispatcher.NOMINAL_SPEED
+  local function approx(a, b)
+    return math.abs(a - b) < 1e-9
+  end
+  check(NS > 0, "NOMINAL_SPEED must be positive")
+
+  -- predicted_ticks scales linearly with distance and reduces to 0 at distance 0
+  assert_eq(dispatcher.predicted_ticks(0), 0, "zero distance -> zero ticks")
+  assert_eq(dispatcher.predicted_ticks(nil), 0, "nil distance -> zero ticks")
+  check(approx(dispatcher.predicted_ticks(600), 600 / NS), "predicted scales with distance")
+  check(approx(dispatcher.predicted_ticks(1200), 2 * dispatcher.predicted_ticks(600)),
+    "predicted is linear in distance")
+
+  -- eta scales with total distance (deadhead + route)
+  local base = dispatcher.eta(0, 600, 1.0)
+  check(approx(base, 600 / NS), "eta(0,600,1.0) == predicted(600)")
+  check(approx(dispatcher.eta(600, 600, 1.0), 2 * base), "eta adds deadhead + route")
+
+  -- factor weighting: 1.0 neutral, 1.3 slower (longer ETA), 0.8 faster (shorter)
+  check(approx(dispatcher.eta(0, 600, 1.3), base * 1.3), "factor 1.3 -> 30% slower")
+  check(approx(dispatcher.eta(0, 600, 0.8), base * 0.8), "factor 0.8 -> 20% faster")
+  check(approx(dispatcher.eta(0, 600, nil), base), "nil factor reads as 1.0")
+
+  -- monotonic ordering used by selection: a faster (lower-factor) far ship can
+  -- beat a nearer slow ship on ETA
+  local near_slow = dispatcher.eta(0, 600, 1.5)     -- at source, slow
+  local far_fast = dispatcher.eta(200, 600, 0.7)    -- deadheads 200, but fast
+  check(far_fast < near_slow, "faster far ship beats nearer slow ship on ETA")
+
+  -- a fallback (unresolved) route dwarfs any real route -> deprioritized
+  local FB = dispatcher.DISTANCE_FALLBACK
+  check(dispatcher.eta(FB, 600, 0.25) > dispatcher.eta(0, 600, 4.0),
+    "unresolved route ETA dwarfs any real route")
 end)
 
 describe("dispatcher force isolation -- sources/ships matched within a force", function()
@@ -982,6 +1066,142 @@ describe("dispatcher.pick_ship -- ready-signal gate (held ships skipped)", funct
     "held ship at source excluded before no-deadhead preference -> ready ship elsewhere picked")
 end)
 
+describe("dispatcher.pick_ship -- ETA-aware pick (v1.1): min delivery time", function()
+  local function ship(id, planet, factor)
+    return { id = id, planet = planet, capacity = 1000, eta_factor = factor,
+      entry = { enrolled = true, state = fleet.IDLE } }
+  end
+  -- A symmetric distance map: "src"->"dst" is the shared route leg; "near"/"far"
+  -- are the two ships' parked planets at different deadheads from the source.
+  local distances = {
+    src  = { dst = 600, near = 10, far = 400 },
+    dst  = { src = 600 },
+    near = { src = 10 },
+    far  = { src = 400 },
+  }
+
+  -- at-source ship (deadhead 0 via self-distance) wins by default at equal factor:
+  -- a ship parked at "src" beats one that must deadhead from "far".
+  assert_eq(dispatcher.pick_ship({ ship(2, "far", 1.0), ship(9, "src", 1.0) }, {},
+    "src", "dst", nil, distances).id, 9,
+    "at-source ship (deadhead 0) wins by default")
+
+  -- a faster FAR ship beats a nearer SLOW ship on ETA: id1 sits "near" but is slow
+  -- (factor 2.0); id2 sits "far" but is fast (factor 0.5) -> id2 delivers sooner.
+  --   id1 eta = (10 + 600) * 2.0 = 1220 ; id2 eta = (400 + 600) * 0.5 = 500
+  assert_eq(dispatcher.pick_ship({ ship(1, "near", 2.0), ship(2, "far", 0.5) }, {},
+    "src", "dst", nil, distances).id, 2,
+    "faster far ship beats nearer slow ship on ETA")
+
+  -- exact ETA tie -> lowest id (two ships, same planet + same factor)
+  assert_eq(dispatcher.pick_ship({ ship(7, "near", 1.0), ship(3, "near", 1.0) }, {},
+    "src", "dst", nil, distances).id, 3,
+    "equal ETA -> lowest id")
+
+  -- a pin still wins regardless of ETA (the slow far ship is forced)
+  assert_eq(dispatcher.pick_ship({ ship(1, "near", 1.0), ship(2, "far", 9.0) }, {},
+    "src", "dst", 2, distances).id, 2,
+    "pin overrides the min-ETA auto-pick")
+
+  -- an in-transit ship (state ENROUTE) is never picked even with the best ETA
+  local intransit = { id = 5, planet = "src", capacity = 1000, eta_factor = 0.1,
+    entry = { enrolled = true, state = fleet.ENROUTE } }
+  assert_eq(dispatcher.pick_ship({ intransit, ship(8, "far", 1.0) }, {},
+    "src", "dst", nil, distances).id, 8,
+    "in-transit ship excluded by the idle gate despite a better ETA")
+
+  -- nil eta_factor reads as 1.0 (un-calibrated ship), so it still orders sanely
+  assert_eq(dispatcher.pick_ship({ ship(1, "far", nil), ship(2, "near", nil) }, {},
+    "src", "dst", nil, distances).id, 2,
+    "nil factor reads as 1.0 -> nearer ship wins")
+end)
+
+describe("dispatcher.plan -- ETA-gated flip: taken ONLY when it lowers ETA", function()
+  -- Reciprocal trade A("aaa") wants X has Y ; B("bbb") wants Y has X. plan visits
+  -- dest A(id1) first -> best_source picks src=B("bbb"). Two ships: one at the
+  -- source B, one at the dest A. The flip relabels the route to start at A.
+  local function snap(ship_src_factor, ship_dst_factor)
+    return {
+      two_way = true,
+      distances = { aaa = { bbb = 600 }, bbb = { aaa = 600 } },
+      nodes = {
+        [1] = { id = 1, planet = "aaa", demand = { { item = "X", unmet = 100, stack_size = 50 } },
+          surplus = { ["Y"] = 200 }, unmet_by_item = { ["X"] = 100 } },
+        [2] = { id = 2, planet = "bbb", demand = { { item = "Y", unmet = 100, stack_size = 50 } },
+          surplus = { ["X"] = 200 }, unmet_by_item = { ["Y"] = 100 } },
+      },
+      ships = {
+        { id = 10, planet = "bbb", capacity = 1000, eta_factor = ship_src_factor,
+          entry = { enrolled = true, state = fleet.IDLE } },
+        { id = 20, planet = "aaa", capacity = 1000, eta_factor = ship_dst_factor,
+          entry = { enrolled = true, state = fleet.IDLE } },
+      },
+    }
+  end
+
+  -- Case A: the at-DEST ship (id20 @ aaa) is fast (0.3); the at-SOURCE ship
+  -- (id10 @ bbb) is nominal. The reverse leg (load at A, deadhead 0) beats every
+  -- forward option -> FLIP: route starts at A and the first leg carries Y to B.
+  local taken = dispatcher.plan(snap(1.0, 0.3))
+  assert_eq(#taken, 1, "one assignment planned (flip case)")
+  assert_eq(taken[1].source_planet, "aaa", "flip taken: route starts at the fast at-dest ship's planet A")
+  assert_eq(taken[1].dest_planet, "bbb", "flip delivers to B")
+  assert_eq(taken[1].ship_id, 20, "the fast at-dest ship flies")
+  assert_eq(taken[1].manifest, { ["Y"] = 100 }, "first leg carries Y (what B wants), loaded at A")
+
+  -- Case B: the at-SOURCE ship (id10 @ bbb) is fast (0.5); the at-DEST ship
+  -- (id20 @ aaa) is only slightly fast (0.9). The forward pick (fast ship already
+  -- at the source, deadhead 0) delivers sooner than the reverse -> NO flip.
+  --   fwd: ship10 (0 + 600)*0.5 = 300 ; rev: ship20 (0 + 600)*0.9 = 540
+  local kept = dispatcher.plan(snap(0.5, 0.9))
+  assert_eq(#kept, 1, "one assignment planned (no-flip case)")
+  assert_eq(kept[1].source_planet, "bbb", "flip NOT taken: forward fast at-source ship delivers sooner")
+  assert_eq(kept[1].ship_id, 10, "the fast at-source ship flies the normal direction")
+  assert_eq(kept[1].manifest, { ["X"] = 100 }, "loads X at B for A")
+end)
+
+describe("dispatcher.plan -- ETA flip considers the best AT-DEST ship, not the global reverse min", function()
+  -- Reciprocal A("aaa") wants X has Y ; B("bbb") wants Y has X. plan visits dest
+  -- A(id1) first -> best_source = B("bbb"). THREE ships:
+  --   id10 @ bbb (factor 1.0): forward at-source pick (deadhead 0) -> fwd ETA 600.
+  --   id20 @ aaa (factor 0.9): parked AT the dest -> reverse ETA (0+600)*0.9 = 540.
+  --   id30 @ ccc (factor 0.5): far from bbb (2000) but CLOSE to aaa (50), so it wins
+  --                            the GLOBAL reverse pick at (50+600)*0.5 = 325 -- yet
+  --                            it is NOT parked at the dest.
+  -- The flip should start the route at aaa with the at-dest id20 (rev 540 < fwd 600).
+  -- The OLD code asked pick_ship for the global reverse min (id30 @ ccc), saw it
+  -- wasn't parked at the dest, and abandoned the flip -- wrongly running the slower
+  -- forward leg (600) and never comparing the beneficial at-dest id20 (540).
+  local snapshot = {
+    two_way = true,
+    distances = {
+      aaa = { bbb = 600, ccc = 50 },
+      bbb = { aaa = 600, ccc = 2000 },
+      ccc = { aaa = 50, bbb = 2000 },
+    },
+    nodes = {
+      [1] = { id = 1, planet = "aaa", demand = { { item = "X", unmet = 100, stack_size = 50 } },
+        surplus = { ["Y"] = 200 }, unmet_by_item = { ["X"] = 100 } },
+      [2] = { id = 2, planet = "bbb", demand = { { item = "Y", unmet = 100, stack_size = 50 } },
+        surplus = { ["X"] = 200 }, unmet_by_item = { ["Y"] = 100 } },
+    },
+    ships = {
+      { id = 10, planet = "bbb", capacity = 1000, eta_factor = 1.0,
+        entry = { enrolled = true, state = fleet.IDLE } },
+      { id = 20, planet = "aaa", capacity = 1000, eta_factor = 0.9,
+        entry = { enrolled = true, state = fleet.IDLE } },
+      { id = 30, planet = "ccc", capacity = 1000, eta_factor = 0.5,
+        entry = { enrolled = true, state = fleet.IDLE } },
+    },
+  }
+  local plans = dispatcher.plan(snapshot)
+  assert_eq(#plans, 1, "one assignment planned")
+  assert_eq(plans[1].source_planet, "aaa", "flip taken: route starts at the at-dest ship's planet A")
+  assert_eq(plans[1].dest_planet, "bbb", "delivers to B")
+  assert_eq(plans[1].ship_id, 20, "the at-dest ship (id20, 540) flies -- NOT vetoed by the far-but-fast id30")
+  assert_eq(plans[1].manifest, { ["Y"] = 100 }, "first leg carries Y (what B wants), loaded at A")
+end)
+
 describe("dispatcher.unserved_reason -- held-by-ready-signal branch", function()
   -- A demand whose ONLY eligible ship is held by its ready signal reports the gate,
   -- not the misleading "no idle eligible ship".
@@ -1080,6 +1300,37 @@ describe("dispatcher.plan -- no flip when the ship is already at the source", fu
   assert_eq(#plans, 1, "one assignment planned")
   assert_eq(plans[1].source_planet, "bbb", "ship already at B (the source) -> normal direction, no flip")
   assert_eq(plans[1].manifest, { ["X"] = 100 }, "loads X at B (no deadhead either way)")
+end)
+
+describe("dispatcher.plan -- a node pin suppresses the ETA flip", function()
+  -- Same reciprocal setup as the ETA-gated flip: the at-DEST ship (id20 @ aaa) is
+  -- fast (0.3), so an UNPINNED plan WOULD flip to start the route at A. Pinning
+  -- dest A(id1) to the at-SOURCE ship id10 must force the forward route (no flip) --
+  -- the player's explicit pin wins over the ETA heuristic (dispatcher.lua: the flip
+  -- is gated on `dest.pin == nil`).
+  local snapshot = {
+    two_way = true,
+    distances = { aaa = { bbb = 600 }, bbb = { aaa = 600 } },
+    nodes = {
+      [1] = { id = 1, planet = "aaa", pin = 10,
+        demand = { { item = "X", unmet = 100, stack_size = 50 } },
+        surplus = { ["Y"] = 200 }, unmet_by_item = { ["X"] = 100 } },
+      [2] = { id = 2, planet = "bbb",
+        demand = { { item = "Y", unmet = 100, stack_size = 50 } },
+        surplus = { ["X"] = 200 }, unmet_by_item = { ["Y"] = 100 } },
+    },
+    ships = {
+      { id = 10, planet = "bbb", capacity = 1000, eta_factor = 1.0,
+        entry = { enrolled = true, state = fleet.IDLE } },
+      { id = 20, planet = "aaa", capacity = 1000, eta_factor = 0.3,
+        entry = { enrolled = true, state = fleet.IDLE } },
+    },
+  }
+  local plans = dispatcher.plan(snapshot)
+  assert_eq(#plans, 1, "one assignment planned (pinned)")
+  assert_eq(plans[1].source_planet, "bbb", "pin suppresses the flip: route stays B->A")
+  assert_eq(plans[1].ship_id, 10, "the pinned at-source ship flies (not the faster at-dest ship)")
+  assert_eq(plans[1].manifest, { ["X"] = 100 }, "loads X at B for A")
 end)
 
 describe("dispatcher.plan -- wide load, re-export, deterministic assignment", function()
@@ -1542,6 +1793,122 @@ describe("watchdog.reclamp_amount -- lower-only min(old, current surplus)", func
   assert_eq(watchdog.reclamp_amount(0, 500), 0, "nothing committed -> stays zero")
   assert_eq(watchdog.reclamp_amount(nil, nil), 0, "nil inputs -> 0")
   assert_eq(watchdog.reclamp_amount(500, -10), 0, "negative surplus clamps at 0")
+end)
+
+describe("watchdog.ema_factor -- learned per-ship ETA calibration (v1.1)", function()
+  local function approx(a, b)
+    return math.abs(a - b) < 1e-9
+  end
+  local A = watchdog.EMA_ALPHA
+  check(A > 0 and A < 1, "EMA_ALPHA is a sane smoothing weight in (0,1)")
+
+  -- a never-flown ship reads nil-factor as the neutral 1.0
+  assert_eq(watchdog.ema_factor(nil, 1.0), 1.0, "nil old + ratio 1.0 stays neutral 1.0")
+  check(approx(watchdog.ema_factor(nil, 2.0), 1.0 * (1 - A) + 2.0 * A),
+    "nil old starts the blend from 1.0")
+
+  -- the blend is old*(1-a) + ratio*a
+  check(approx(watchdog.ema_factor(1.0, 1.5), 1.0 * (1 - A) + 1.5 * A), "EMA blends ratio at alpha")
+  check(approx(watchdog.ema_factor(1.0, 1.0), 1.0), "ratio == old -> unchanged (steady state)")
+  -- an explicit alpha overrides the default
+  check(approx(watchdog.ema_factor(1.0, 2.0, 0.5), 1.5), "explicit alpha weights the ratio")
+
+  -- converges toward a steady ratio: repeatedly feeding ratio 1.6 pulls the
+  -- factor monotonically up toward (and never past) 1.6
+  local f = 1.0
+  local prev = f
+  for _ = 1, 40 do
+    f = watchdog.ema_factor(f, 1.6)
+    check(f > prev - 1e-12 and f < 1.6 + 1e-9, "factor climbs monotonically toward the steady ratio")
+    prev = f
+  end
+  check(math.abs(f - 1.6) < 1e-3, "factor converges to the steady ratio")
+
+  -- upgrade adaptation: a ship that gets faster reports a run of dropping ratios
+  -- (< 1.0); the factor follows downward
+  local up = 1.5
+  for _ = 1, 20 do
+    up = watchdog.ema_factor(up, 0.7)
+  end
+  check(up < 1.0, "a run of low ratios (faster ship) pulls the factor down")
+  check(math.abs(up - 0.7) < 1e-2, "upgrade adaptation converges toward the new faster ratio")
+
+  -- the factor never drops to <= 0 even on a degenerate ratio (hard floor)
+  check(watchdog.ema_factor(0.5, -100) > 0, "degenerate negative ratio never zeroes/inverts the factor")
+  check(watchdog.ema_factor(0.5, 0) > 0, "zero ratio still keeps the factor > 0")
+end)
+
+describe("watchdog.flight_sample -- continuous speed calibration (v1.1)", function()
+  local function approx(a, b)
+    return math.abs(a - b) < 1e-9
+  end
+  -- The sampler's ratio must use the SAME nominal the scorer does.
+  local N = require("scripts.dispatcher").NOMINAL_SPEED
+  local LEN = 600 -- a typical connection km length
+
+  -- ratio math: actual_speed = Δdistance * length / Δtick; ratio = N / actual_speed.
+  -- Δdistance 0.05 over Δtick 300 on a 600km leg -> actual_speed = 0.1 km/tick.
+  local cur_at_nominal = { connection = "c", distance = 0.25, tick = 400 }
+  local prev = { connection = "c", distance = 0.20, tick = 100 }
+  local r1 = watchdog.flight_sample(prev, cur_at_nominal, LEN)
+  check(approx(r1, N / (0.05 * LEN / 300)), "ratio = NOMINAL / actual_speed")
+  -- with N=0.1 and actual_speed=0.1 that is exactly 1.0 (a ship hitting nominal)
+  check(approx(r1, 1.0), "a ship moving at NOMINAL_SPEED calibrates to ratio 1.0")
+
+  -- a faster ship (covers more distance in the same window) -> ratio < 1.0
+  local fast = { connection = "c", distance = 0.30, tick = 400 } -- Δd 0.10 -> 0.2 km/tick
+  local rf = watchdog.flight_sample(prev, fast, LEN)
+  check(approx(rf, N / (0.10 * LEN / 300)), "faster ship -> lower ratio")
+  check(rf < 1.0, "a faster-than-nominal ship reports ratio < 1.0")
+
+  -- nil guards -> nil (skip the sample, don't poison the factor)
+  assert_eq(watchdog.flight_sample(nil, cur_at_nominal, LEN), nil, "nil prev -> nil")
+  assert_eq(watchdog.flight_sample(prev, nil, LEN), nil, "nil cur -> nil")
+  assert_eq(
+    watchdog.flight_sample({ connection = "a", distance = 0.2, tick = 100 },
+      { connection = "b", distance = 0.5, tick = 400 }, LEN),
+    nil, "different connection -> nil (cursor reset condition)")
+  assert_eq(
+    watchdog.flight_sample({ connection = nil, distance = 0.2, tick = 100 }, cur_at_nominal, LEN),
+    nil, "no prior connection -> nil")
+  assert_eq(
+    watchdog.flight_sample({ connection = "c", distance = 0.249, tick = 100 }, cur_at_nominal, LEN),
+    nil, "sub-MIN_DELTA progress -> nil (near-stuck ship skipped)")
+  assert_eq(
+    watchdog.flight_sample({ connection = "c", distance = 0.20, tick = 400 }, cur_at_nominal, LEN),
+    nil, "zero Δtick -> nil")
+  assert_eq(
+    watchdog.flight_sample({ connection = "c", distance = 0.20, tick = 500 }, cur_at_nominal, LEN),
+    nil, "negative Δtick -> nil")
+
+  -- ratio clamp at both bounds: a near-stuck ship (tiny actual_speed) clamps HIGH,
+  -- a very fast reading clamps LOW.
+  local crawl = watchdog.flight_sample(
+    { connection = "c", distance = 0.20, tick = 100 },
+    { connection = "c", distance = 0.22, tick = 10100 }, LEN) -- Δd 0.02 over 10000 ticks
+  assert_eq(crawl, watchdog.RATIO_MAX, "near-stuck ship clamps ratio to RATIO_MAX")
+  local zoom = watchdog.flight_sample(
+    { connection = "c", distance = 0.20, tick = 100 },
+    { connection = "c", distance = 0.70, tick = 110 }, LEN) -- Δd 0.5 over 10 ticks
+  assert_eq(zoom, watchdog.RATIO_MIN, "very fast reading clamps ratio to RATIO_MIN")
+
+  -- a non-positive length yields no reading (defensive)
+  assert_eq(watchdog.flight_sample(prev, cur_at_nominal, 0), nil, "zero length -> nil")
+
+  -- RETURN leg: `distance` is the FIXED `from`->`to` axis (2.0 docs), so a ship
+  -- traversing `to`->`from` counts it DOWN and Δdistance is NEGATIVE. The sampler
+  -- differences on the MAGNITUDE, so a return leg calibrates identically to a
+  -- same-speed forward leg. (Regression: pre-fix the negative Δd failed the
+  -- `>= MIN_DELTA` gate, so every return leg was skipped and never calibrated.)
+  local rev_prev = { connection = "c", distance = 0.30, tick = 100 }
+  local rev_cur = { connection = "c", distance = 0.25, tick = 400 } -- |Δd| 0.05 over 300
+  check(approx(watchdog.flight_sample(rev_prev, rev_cur, LEN), 1.0),
+    "return leg (negative Δdistance) calibrates to ratio 1.0 by magnitude")
+  -- the MIN_DELTA gate is on the magnitude too: a tiny DOWNWARD sliver still skips.
+  assert_eq(
+    watchdog.flight_sample({ connection = "c", distance = 0.205, tick = 100 },
+      { connection = "c", distance = 0.20, tick = 400 }, LEN),
+    nil, "sub-MIN_DELTA downward progress -> nil (magnitude gate)")
 end)
 
 describe("watchdog.expired -- no-progress deadline", function()
@@ -2503,6 +2870,142 @@ end)
 describe("group_demand: empty input -> empty groups", function()
   assert_eq(#viewmodel.group_demand({}, {}), 0, "nothing in flight or waiting -> no groups")
   assert_eq(#viewmodel.group_demand(nil, nil), 0, "nil tolerated -> no groups")
+end)
+
+-- ---------------------------------------------------------------------------
+-- viewmodel ETA (Task 8 -- Monitor in-flight ETA from the measured progress-rate)
+-- ---------------------------------------------------------------------------
+
+describe("viewmodel.remaining_eta: current-leg progress-rate math", function()
+  -- (1 - distance) / rate, NOMINAL_SPEED = 0.1, remaining defaults to 0.
+  assert_eq(viewmodel.remaining_eta({ distance = 0.5, rate = 0.001 }), 500,
+    "half-done at 0.001/tick -> 500 ticks left")
+  assert_eq(viewmodel.remaining_eta({ distance = 0, rate = 0.0002 }), 5000,
+    "just departed, slow rate -> full leg")
+  assert_eq(viewmodel.remaining_eta({ distance = 0.75, rate = 0.001 }), 250,
+    "nearly there -> short ETA")
+  assert_eq(viewmodel.remaining_eta({ rate = 0.001 }), 1000,
+    "nil distance defaults to 0 -> full current leg (1/rate)")
+end)
+
+describe("viewmodel.remaining_eta: remaining whole legs + factor", function()
+  -- current 500 ticks; remaining 600 km via predicted_ticks(600)=6000, * factor.
+  assert_eq(viewmodel.remaining_eta({ distance = 0.5, rate = 0.001, remaining = 600 }), 6500,
+    "factor 1.0: 500 current + 6000 remaining leg")
+  assert_eq(viewmodel.remaining_eta({ distance = 0.5, rate = 0.001, remaining = 600, factor = 1.3 }), 8300,
+    "slow ship (factor 1.3) inflates only the predicted remaining legs")
+  assert_eq(viewmodel.remaining_eta({ distance = 0.5, rate = 0.001, remaining = 600, factor = 0.8 }), 5300,
+    "fast ship (factor 0.8) shortens the predicted remaining legs")
+end)
+
+describe("viewmodel.remaining_eta: no usable rate -> nil fallback", function()
+  assert_eq(viewmodel.remaining_eta(nil), nil, "nil live -> nil")
+  assert_eq(viewmodel.remaining_eta({ distance = 0.5 }), nil, "missing rate -> nil")
+  assert_eq(viewmodel.remaining_eta({ distance = 0.5, rate = 0 }), nil, "zero rate -> nil")
+  assert_eq(viewmodel.remaining_eta({ distance = 0.5, rate = 1e-6 }), nil,
+    "near-zero rate (below MIN_RATE) -> nil, not an absurd ETA")
+end)
+
+describe("viewmodel.remaining_eta: distance clamp (arrived / overshoot)", function()
+  -- distance >= 1 means the current leg is done -> 0 ticks left on it.
+  assert_eq(viewmodel.remaining_eta({ distance = 1, rate = 0.001 }), 0, "at end of leg -> 0")
+  assert_eq(viewmodel.remaining_eta({ distance = 1.5, rate = 0.001 }), 0, "overshoot clamps to 0, never negative")
+end)
+
+describe("viewmodel.remaining_eta: RETURN leg (negative rate, fixed from->to axis)", function()
+  -- `distance` is the FIXED `from`->`to` axis (2.0 docs), so a ship on the `to`->`from`
+  -- return leg measures a NEGATIVE rate and approaches distance 0 (the `from` end).
+  -- The SIGN picks the remaining fraction (`distance`, not `1 - distance`) and `|rate|`
+  -- is the speed. (Regression: pre-fix a negative rate fell below MIN_RATE -> no ETA.)
+  assert_eq(viewmodel.remaining_eta({ distance = 0.5, rate = -0.001 }), 500,
+    "return leg half-done (distance 0.5 -> 0) at |rate| 0.001 -> 500 ticks left")
+  assert_eq(viewmodel.remaining_eta({ distance = 0.25, rate = -0.001 }), 250,
+    "return leg nearly home (distance 0.25 toward 0) -> short ETA, not 750")
+  assert_eq(viewmodel.remaining_eta({ distance = 0, rate = -0.001 }), 0,
+    "return leg at the `from` end (distance 0) -> arrived, 0 ticks")
+  -- the MIN_RATE gate is on the magnitude: a near-zero NEGATIVE rate is still no-rate.
+  assert_eq(viewmodel.remaining_eta({ distance = 0.5, rate = -1e-6 }), nil,
+    "near-zero negative rate (|rate| below MIN_RATE) -> nil, not an absurd ETA")
+  -- remaining whole legs still add on a return leg (factor-scaled, direction-agnostic).
+  assert_eq(viewmodel.remaining_eta({ distance = 0.5, rate = -0.001, remaining = 600, factor = 0.8 }), 5300,
+    "return leg: 500 current + predicted_ticks(600)*0.8 remaining")
+end)
+
+describe("viewmodel.format_eta: m:ss boundaries", function()
+  assert_eq(viewmodel.format_eta(0), "0:00", "zero -> 0:00")
+  assert_eq(viewmodel.format_eta(nil), "0:00", "nil -> 0:00")
+  assert_eq(viewmodel.format_eta(-50), "0:00", "negative -> 0:00")
+  assert_eq(viewmodel.format_eta(30), "0:01", "30 ticks ~ 0.5s rounds to 1s")
+  assert_eq(viewmodel.format_eta(600), "0:10", "sub-minute")
+  assert_eq(viewmodel.format_eta(3000), "0:50", "just under a minute")
+  assert_eq(viewmodel.format_eta(3600), "1:00", "exactly one minute")
+  assert_eq(viewmodel.format_eta(3630), "1:01", "one minute one second, zero-padded")
+  assert_eq(viewmodel.format_eta(360000), "100:00", "large -> minutes keep counting (no hour rollover)")
+end)
+
+describe("group_demand: propagates soonest live ETA onto delivering items", function()
+  local shipments = {
+    { to = "nauvis", phase = fleet.ENROUTE, manifest = { ["iron@normal"] = 100 }, eta_ticks = 300 },
+    { to = "nauvis", phase = fleet.ENROUTE, manifest = { ["iron@normal"] = 50 }, eta_ticks = 180 },
+    { to = "nauvis", phase = fleet.LOADING, manifest = { ["steel@normal"] = 20 } },
+  }
+  local groups = viewmodel.group_demand(shipments, {})
+  assert_eq(#groups, 1, "one planet")
+  local iron, steel
+  for _, it in ipairs(groups[1].items) do
+    if it.item == "iron@normal" then iron = it end
+    if it.item == "steel@normal" then steel = it end
+  end
+  assert_eq(iron.status, "delivering", "iron delivering")
+  assert_eq(iron.qty, 150, "iron qty summed across both ships")
+  assert_eq(iron.eta_ticks, 180, "delivering ETA = soonest ship (180 < 300)")
+  assert_eq(steel.status, "loading", "steel still loading")
+  assert_eq(steel.eta_ticks, nil, "loading item has no in-flight ETA")
+end)
+
+describe("group_demand: collects delivering ship ids for the 1s ETA refresh", function()
+  -- Two ships delivering iron + one still loading it. eta_ships must list ONLY the
+  -- delivering ships (the Monitor's 1s refresh recomputes the soonest among them).
+  local shipments = {
+    { ship_id = "f/1", to = "nauvis", phase = fleet.ENROUTE, manifest = { ["iron@normal"] = 100 }, eta_ticks = 300 },
+    { ship_id = "f/2", to = "nauvis", phase = fleet.ENROUTE, manifest = { ["iron@normal"] = 50 }, eta_ticks = 180 },
+    { ship_id = "f/3", to = "nauvis", phase = fleet.LOADING, manifest = { ["iron@normal"] = 20 } },
+  }
+  local groups = viewmodel.group_demand(shipments, {})
+  local iron
+  for _, it in ipairs(groups[1].items) do
+    if it.item == "iron@normal" then iron = it end
+  end
+  assert_eq(#iron.eta_ships, 2, "both delivering ships recorded; loading ship excluded")
+  assert_eq(iron.eta_ships[1], "f/1", "ship ids in shipment order (first)")
+  assert_eq(iron.eta_ships[2], "f/2", "ship ids in shipment order (second)")
+end)
+
+describe("build: stamps live ETA on roster + shipment rows", function()
+  local world = {
+    fleet = {
+      [5] = {
+        enrolled = true, state = fleet.ENROUTE, assignment = 1,
+        eta_live = { distance = 0.5, rate = 0.001, remaining = 0, factor = 1.0 },
+      },
+      -- parked ship: no eta_live -> no eta_ticks.
+      [6] = { enrolled = true, state = fleet.IDLE, location = "nauvis" },
+    },
+    assignments = {
+      [1] = { ship = 5, source_planet = "nauvis", dest_planet = "vulcanus", manifest = { ["iron@normal"] = 100 } },
+    },
+    alerts = {},
+    tick = 0,
+  }
+  local view = viewmodel.build(world)
+  local r5, r6
+  for _, r in ipairs(view.roster) do
+    if r.ship_id == 5 then r5 = r end
+    if r.ship_id == 6 then r6 = r end
+  end
+  assert_eq(r5.eta_ticks, 500, "in-flight ship gets ETA from its live progress-rate")
+  assert_eq(r6.eta_ticks, nil, "parked ship has no ETA")
+  assert_eq(view.shipments[1].eta_ticks, 500, "shipment row resolves ETA through its carrier ship")
 end)
 
 describe("build: summary.ships_stuck counts stranded ships as a disjoint bucket", function()

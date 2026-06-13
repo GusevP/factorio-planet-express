@@ -149,15 +149,108 @@ function dispatcher.active_counts(assignments)
 end
 
 -- ---------------------------------------------------------------------------
--- pure distance seam (nearest tie-break)
+-- distance map (foundation for ETA-aware dispatch, v1.1)
 -- ---------------------------------------------------------------------------
 
--- [provisional] Inter-planet distance, used only as the nearest tie-break in
--- source selection. Until the in-engine space-location distance accessor is
--- confirmed, all distances are equal, so selection tie-breaks purely on node id
--- (still fully deterministic). Tests override this to exercise the tie-break.
-function dispatcher.distance(_source_planet, _dest_planet)
-  return 0
+-- The large fallback returned for a missing pair / nil planet. Any lookup that
+-- can't resolve to a real connection length is DEPRIORITIZED (sorted last), never
+-- an index error -- an enrolled ship in transit has a nil `space_location`, and a
+-- node whose surface was deleted has a nil planet, so both keys are nil-tolerant.
+-- Kept well above any real `length` (km) so a genuine route always beats it.
+dispatcher.DISTANCE_FALLBACK = 1e9
+
+-- In-memory symmetric distance map `dist[a][b] = length` (km), rebuilt from
+-- `prototypes.space_connection` on load (NOT a `storage` copy -- it is derived
+-- static prototype data, so it is reconstructed deterministically rather than
+-- serialized into the save). nil until the first build.
+local distance_map = nil
+
+-- A SpaceLocationID is recorded as a name string, but stay robust if the runtime
+-- hands back the prototype object instead (provisional seam) -- pull `.name` off a
+-- table, pass a string through.
+local function loc_name(x)
+  if type(x) == "table" then
+    return x.name
+  end
+  return x
+end
+
+-- IO (thin, engine-touching): iterate the connection prototype universe into a
+-- symmetric `dist[a][b] = dist[b][a] = length` map and cache it at module scope.
+-- Rebuilt on `on_init` / `on_configuration_changed` / `on_load` from control.lua
+-- (`prototypes` is readable in `on_load`). Degrades to an empty map when
+-- `prototypes` is absent (the pure-Lua test runner). Returns the map.
+function dispatcher.build_distances()
+  local map = {}
+  if prototypes and prototypes.space_connection then
+    for _, conn in pairs(prototypes.space_connection) do
+      local a = loc_name(conn.from)
+      local b = loc_name(conn.to)
+      local length = conn.length
+      if a and b and length then
+        map[a] = map[a] or {}
+        map[b] = map[b] or {}
+        map[a][b] = length
+        map[b][a] = length
+      end
+    end
+  end
+  distance_map = map
+  return map
+end
+
+-- Accessor for the cached distance map (lazily builds it on first read so a stray
+-- call before the load hook still gets a real map, not nil).
+function dispatcher.distances()
+  if distance_map == nil then
+    dispatcher.build_distances()
+  end
+  return distance_map
+end
+
+-- PURE inter-planet distance lookup over a passed-in map (`snapshot.distances`),
+-- used as the ETA-routing distance and the source nearest tie-break. Nil-guards
+-- BOTH keys and a missing pair, returning the large fallback (never a nil[...]
+-- index error). Self-distance is 0 (a ship parked at the source deadheads 0).
+-- All call sites MUST go through here -- never raw `map[a][b]`.
+function dispatcher.distance(map, a, b)
+  if a == nil or b == nil then
+    return dispatcher.DISTANCE_FALLBACK
+  end
+  if a == b then
+    return 0
+  end
+  local row = map and map[a]
+  local d = row and row[b]
+  if d == nil then
+    return dispatcher.DISTANCE_FALLBACK
+  end
+  return d
+end
+
+-- ---------------------------------------------------------------------------
+-- pure ETA scorer (v1.1) -- distance + per-ship factor -> ETA in ticks
+-- ---------------------------------------------------------------------------
+
+-- Baseline space speed in km/tick. The per-ship `eta_factor` absorbs the real
+-- baseline and units (`eta = predicted * factor`, factor ~= NOMINAL_SPEED /
+-- real_speed), so any consistent value works; this is picked so a first-trip
+-- (factor 1.0) ETA is roughly right, then tuned empirically in-engine. Kept > 0.
+dispatcher.NOMINAL_SPEED = 0.1
+
+-- PURE: nominal travel time (ticks) for a raw distance (km), before the per-ship
+-- factor. A fallback distance (DISTANCE_FALLBACK) yields a huge time, so an
+-- unresolved route is naturally deprioritized by any min-ETA comparison.
+function dispatcher.predicted_ticks(dist)
+  return (dist or 0) / dispatcher.NOMINAL_SPEED
+end
+
+-- PURE: the ETA (ticks) for sending a ship across `deadhead` (its parked planet
+-- to the source) then `route` (source to dest), scaled by the ship's learned
+-- `factor` (default 1.0). Monotonic in distance and in factor, so min-ETA
+-- selection orders ships correctly. A nil factor reads as 1.0.
+function dispatcher.eta(deadhead, route, factor)
+  return dispatcher.predicted_ticks((deadhead or 0) + (route or 0)) * (factor or 1.0)
 end
 
 -- ---------------------------------------------------------------------------
@@ -266,7 +359,9 @@ function dispatcher.best_source(snapshot, dest)
         end
       end
       if coverage > 0 then
-        local dist = dispatcher.distance(source.planet, dest.planet)
+        -- nearest tie-break over the GUARDED helper (never raw `distances[a][b]`):
+        -- equally-covering sources break toward the shorter route, then lowest id.
+        local dist = dispatcher.distance(snapshot.distances, source.planet, dest.planet)
         -- strict comparisons + stable id iteration => lowest id wins full ties.
         if best == nil
           or coverage > best.coverage
@@ -304,18 +399,23 @@ end
 
 -- Choose an idle eligible ship for the route source_planet -> dest_planet. A
 -- manual `pin` (a fleet key set on the Trade tab, Task 9) overrides auto-pick
--- when that ship is free and eligible; otherwise auto-pick PREFERS a ship already
--- parked at `source_planet` (its `planet` field, stamped by build_snapshot) so the
--- first leg loads immediately instead of flying there empty (no deadhead), then
--- falls back to the lowest-id eligible ship (deterministic). Returns the ship
--- entry from `ships` or nil (caller then lets the demand wait for the next tick).
--- Pure over plain ship tables: a ship with no `planet` (in transit, or the test
--- runner) simply gets no co-location preference, so behavior matches the old
--- lowest-id pick.
+-- when that ship is free and eligible; otherwise auto-pick selects the ship that
+-- DELIVERS SOONEST (min ETA, v1.1): `eta(deadhead, route, factor)` where
+-- `deadhead = distance(ship.planet -> source)`, `route = distance(source -> dest)`,
+-- and `factor = ship.eta_factor` (its learned calibration, default 1.0). Lowest id
+-- breaks an exact ETA tie (deterministic). Returns the ship entry from `ships` or
+-- nil (caller then lets the demand wait for the next tick).
 --
--- `ships` is a list of { id, entry, capacity, planet }; `used` is a set of ship
--- ids already committed this tick.
-function dispatcher.pick_ship(ships, used, source_planet, dest_planet, pin)
+-- All distance reads go through the nil-guarded `dispatcher.distance` helper, so a
+-- ship with no `planet` (in transit, or the test runner) deadheads the large
+-- fallback and a parked-at-source ship deadheads 0 (self-distance) -- the latter
+-- preserves the old no-deadhead preference for free, since 0 < any real/fallback
+-- distance. With no `distances` map at all, every real pair falls to the fallback
+-- so equal-factor ships tie and the lowest id wins (matches the old lowest-id pick).
+--
+-- `ships` is a list of { id, entry, capacity, planet, eta_factor }; `used` is a set
+-- of ship ids already committed this tick; `distances` is `snapshot.distances`.
+function dispatcher.pick_ship(ships, used, source_planet, dest_planet, pin, distances)
   local function eligible(s)
     -- `s.ready ~= false` is the ready-signal gate (Task 4): build_snapshot stamps
     -- `false` only when a gated ship's hub reads `planet-express-ready <= 0`.
@@ -333,16 +433,16 @@ function dispatcher.pick_ship(ships, used, source_planet, dest_planet, pin)
     end
   end
 
-  -- Prefer a ship already at the source (at_source beats elsewhere regardless of
-  -- id); within the same co-location class, lowest id wins (stable + deterministic).
-  local best, best_at = nil, false
+  -- Min-ETA pick: the route leg is shared by every candidate; only the deadhead
+  -- and the per-ship factor vary. Lowest id breaks an exact tie (stable).
+  local route = dispatcher.distance(distances, source_planet, dest_planet)
+  local best, best_eta = nil, nil
   for _, s in ipairs(ships) do
     if eligible(s) then
-      local at = (s.planet ~= nil and s.planet == source_planet)
-      if best == nil
-        or (at and not best_at)
-        or (at == best_at and s.id < best.id) then
-        best, best_at = s, at
+      local deadhead = dispatcher.distance(distances, s.planet, source_planet)
+      local eta = dispatcher.eta(deadhead, route, s.eta_factor)
+      if best == nil or eta < best_eta or (eta == best_eta and s.id < best.id) then
+        best, best_eta = s, eta
       end
     end
   end
@@ -444,24 +544,53 @@ function dispatcher.plan(snapshot)
       if src then
         -- only this force's ships may fly the route (force isolation)
         local route_ships = dispatcher.ships_for_force(snapshot.ships, dest.force)
-        local ship = dispatcher.pick_ship(route_ships, used, src.planet, dest.planet, dest.pin)
+        local ship = dispatcher.pick_ship(route_ships, used, src.planet, dest.planet, dest.pin, snapshot.distances)
 
-        -- Direction-aware (no-deadhead) routing. best_source + the iteration order
-        -- pick src->dest, and the ship flies to the SOURCE first (empty). If the
-        -- chosen ship is NOT already at the source but the trade is RECIPROCAL (the
-        -- dest holds exportable surplus the source demands) and an idle ship sits at
-        -- the DEST, FLIP the route to start at that ship's planet: same two planets,
-        -- same goods, reversed leg order -- but the first leg now carries cargo
-        -- instead of deadheading. A node pin forces a specific ship, so never flip
-        -- under a pin. The flip keeps within-tick bookkeeping correct: it just
-        -- relabels which node is source vs dest for this assignment.
+        -- Direction-aware (ETA-gated) routing. best_source + the iteration order
+        -- pick src->dest, and the forward pick may fly to the SOURCE first. If the
+        -- trade is RECIPROCAL (the dest holds exportable surplus the source demands),
+        -- consider FLIPPING the route to start at a ship PARKED AT THE DEST: same two
+        -- planets, same goods, reversed leg order -- the first leg then carries cargo
+        -- from the dest instead of the chosen ship deadheading to the source. Under
+        -- min-ETA the forward pick may DELIBERATELY take a far-but-fast ship, so the
+        -- flip must not override it blindly: take the flip ONLY when the best at-dest
+        -- ship's reverse ETA beats the forward ETA. A node pin forces a specific ship,
+        -- so never flip under a pin. The flip keeps within-tick bookkeeping correct:
+        -- it just relabels source vs dest.
         local s_id, s_planet, d_id, d_planet = src.id, src.planet, dest_id, dest.planet
-        if ship and dest.pin == nil and ship.planet ~= src.planet
-          and dispatcher.covers(snapshot, dest_id, src.id) then
-          local at_dest = dispatcher.pick_ship(route_ships, used, dest.planet, src.planet, nil)
-          if at_dest and at_dest.planet == dest.planet then
-            ship = at_dest
-            s_id, s_planet, d_id, d_planet = dest_id, dest.planet, src.id, src.planet
+        if ship and dest.pin == nil and dispatcher.covers(snapshot, dest_id, src.id) then
+          -- The flip relabels the route to START at the dest, so the chosen ship
+          -- loads there immediately instead of the forward pick deadheading to the
+          -- source. Only a ship genuinely PARKED AT the dest can do that, so pick
+          -- the reverse-leg ship from the AT-DEST SUBSET. Picking the GLOBAL
+          -- reverse-min (over all ships) and then rejecting it when it isn't at the
+          -- dest would wrongly veto a beneficial flip: a far-but-fast ship can win
+          -- the global reverse pick yet not be parked at the dest, leaving a
+          -- slightly-slower at-dest ship -- whose reverse ETA still beats the
+          -- forward ETA -- never even compared. Among at-dest ships the deadhead is
+          -- 0, so `pick_ship` reduces to lowest factor then lowest id.
+          local at_dest_ships = {}
+          for _, s in ipairs(route_ships) do
+            if s.planet == dest.planet then
+              at_dest_ships[#at_dest_ships + 1] = s
+            end
+          end
+          local at_dest = dispatcher.pick_ship(at_dest_ships, used, dest.planet, src.planet, nil, snapshot.distances)
+          if at_dest then
+            -- forward: the chosen ship deadheads to the source, then runs src->dest.
+            local fwd_eta = dispatcher.eta(
+              dispatcher.distance(snapshot.distances, ship.planet, src.planet),
+              dispatcher.distance(snapshot.distances, src.planet, dest.planet),
+              ship.eta_factor)
+            -- reverse: the at-dest ship loads immediately, then runs dest->src.
+            local rev_eta = dispatcher.eta(
+              dispatcher.distance(snapshot.distances, at_dest.planet, dest.planet),
+              dispatcher.distance(snapshot.distances, dest.planet, src.planet),
+              at_dest.eta_factor)
+            if rev_eta < fwd_eta then
+              ship = at_dest
+              s_id, s_planet, d_id, d_planet = dest_id, dest.planet, src.id, src.planet
+            end
           end
         end
 
@@ -770,7 +899,11 @@ function dispatcher.build_snapshot(_tick)
         entry = entry,
         capacity = dispatcher.capacity_of(entry),
         force = dispatcher.force_key(platform.force),
-        planet = dispatcher.ship_planet(platform), -- no-deadhead ship pick
+        planet = dispatcher.ship_planet(platform), -- ETA deadhead leg (v1.1)
+        -- Learned per-ship ETA calibration (v1.1). Defaults to 1.0 before Task 6
+        -- lands the stored field / before a ship has flown, so the min-ETA pick
+        -- treats an un-calibrated ship at its nominal speed.
+        eta_factor = entry.eta_factor or 1.0,
         ready = ready,                             -- ready-signal gate (Task 4)
       }
     end
@@ -782,6 +915,9 @@ function dispatcher.build_snapshot(_tick)
   return {
     nodes = nodes,
     ships = ships,
+    -- The in-memory inter-planet distance map (v1.1), read by best_source's
+    -- nearest tie-break and pick_ship's min-ETA leg via the guarded helper.
+    distances = dispatcher.distances(),
     two_way = two_way_enabled(),
     max_ships_global = state.setting(dispatcher.MAX_GLOBAL_SETTING, 0),
     max_ships_route = state.setting(dispatcher.MAX_ROUTE_SETTING, 5),
@@ -906,7 +1042,7 @@ function dispatcher.unserved_reason(snapshot, dest)
       .. "has its surplus committed to a shipment, or is itself importing the item)"
   end
   local route_ships = dispatcher.ships_for_force(snapshot.ships, dest.force)
-  local ship = dispatcher.pick_ship(route_ships, {}, src.planet, dest.planet, dest.pin)
+  local ship = dispatcher.pick_ship(route_ships, {}, src.planet, dest.planet, dest.pin, snapshot.distances)
   if not ship then
     -- Held-aware branch (Task 4): pick_ship returns nil when every candidate is
     -- held by its ready signal just as it does when there is no eligible ship at
@@ -1122,5 +1258,12 @@ function dispatcher.run(tick)
     dispatcher.log_unserved(snapshot, plans)
   end
 end
+
+-- Hand the now fully-built table to the watchdog. The dispatcher<->watchdog cycle
+-- (watchdog is required at the top of this file) means watchdog finished loading
+-- before this point with an empty `dispatcher` reference; injecting here -- still
+-- during control.lua parsing -- gives its flight sampler the real table without a
+-- runtime `require` (which Factorio forbids). See scripts/watchdog.lua `disp()`.
+watchdog.set_dispatcher(dispatcher)
 
 return dispatcher

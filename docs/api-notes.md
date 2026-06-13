@@ -476,11 +476,15 @@ ships), but correctness rests on the signature compare, not the event.
 
 ## 5. Misc seams (already exercised / low-risk)
 
-- `script.on_nth_tick(interval, handler)` — dual-cadence registrar. **[confirmed]**
-  Registered in `control.lua`: the dispatcher runs on the dispatch-interval setting
-  and the watchdog on the constant `watchdog.INTERVAL`. Equal periods share one
-  handler; differing periods register two. Re-registers when the dispatch-interval
-  setting changes (clearing any orphaned period).
+- `script.on_nth_tick(interval, handler)` — multi-cadence registrar. **[confirmed]**
+  Registered in `control.lua` over three periods: the dispatcher (dispatch-interval
+  setting), the watchdog (constant `watchdog.INTERVAL`, 5s), and the Monitor ETA-only
+  refresh (constant `ETA_REFRESH_INTERVAL`, 1s). The registrar builds the SET of
+  distinct periods and gives each ONE handler that runs every job that period owns
+  (coinciding periods collapse). A period running dispatcher/watchdog does a full
+  `monitor.refresh_all()`; a period that is ONLY the ETA cadence does the cheap
+  in-place `monitor.refresh_eta()`. Re-registers when the dispatch-interval setting
+  changes (clearing any orphaned period).
 - `script.on_init` / `script.on_configuration_changed` — storage init +
   schema migration. **[confirmed]** Wired to `scripts/state.lua`
   (`on_configuration_changed` runs the v1→v2 `migrate_fleet_keys`).
@@ -557,6 +561,17 @@ ships), but correctness rests on the signature compare, not the event.
   toggled from `on_gui_click` on a per-planet button (planet carried in `tags`).
   Storage write on a per-player MP-synced input -> deterministic; read only for that
   player's view. No new engine seam (plain `on_gui_click` + `storage`).
+- Monitor live ETA 1s refresh (`gui/monitor.lua` `refresh_eta`): between the full
+  `refresh_all` rebuilds (>=5s), a 1s `on_nth_tick` repaints ONLY the in-flight ETA
+  label captions in place so the countdown ticks every second. Each ETA label is
+  built with `tags = { pe_eta_ships = { <ship id>, … } }`; `refresh_eta` walks every
+  open frame's body via `LuaGuiElement.children` (read), reads `.tags` per child,
+  recomputes the soonest live ETA over those ships (`viewmodel.live_eta_ticks`, which
+  re-reads `platform.distance` against the watchdog's stored rate), and writes the
+  label `.caption`. **[provisional — `LuaGuiElement.children` / `.tags` read +
+  `.caption` write are standard 2.0 GUI seams; confirm the recursive walk repaints in
+  a running game.]** No `gather` / no `body.clear`; a label whose ships all go quiet
+  keeps its last caption until the next full rebuild removes the row.
 - Fleet-tab per-ship allow-list (`gui/fleet_tab.lua`): the planet universe comes
   from `game.planets` (a `LuaCustomTable[name -> LuaPlanet]`). `planet.name` is the
   internal name and MATCHES the surface name the dispatcher compares against
@@ -648,6 +663,87 @@ valid hub, so that nil branch is belt-and-suspenders.
 > emitted `planet-express-ready` value; (2) `circuit_red` / `circuit_green` are the
 > correct connector ids; (3) reading both connectors in one call sums/ORs red+green
 > as expected. Flip this entry to `[confirmed]` once verified.
+
+---
+
+## 7. Space connections + platform travel progress — ETA dispatcher  → gates the ETA dispatcher plan (Tasks 2 / 7 / 8)
+
+**[provisional — confirm the prototype iterator, the connection shape, and the
+in-flight platform reads in a running game before any ETA IO wrapper ships]**
+
+The ETA-aware dispatcher needs two engine-derived inputs: a static inter-planet
+**distance map** (built once from prototypes) and a ship's live **travel progress**
+(sampled per watchdog tick for the learned speed factor and the Monitor ETA).
+
+**Distance map — `prototypes.space_connection` (Task 2).** The connection prototype
+universe is read at load time and folded into a symmetric in-memory `dist[a][b]` km
+map (NOT a `storage` copy — it is derived static data, rebuilt on `on_init` /
+`on_configuration_changed` / `on_load`):
+
+```
+for _, conn in pairs(prototypes.space_connection) do
+  -- conn.from, conn.to : SpaceLocationID (planet/space-location names)
+  -- conn.length        : uint32, km (default 600)
+end
+```
+
+- `prototypes.space_connection` — the runtime prototype map (the 2.0 `prototypes`
+  table is the replacement for the 1.1 `game.*_prototypes`). **[provisional —
+  confirm the exact runtime accessor name and that it iterates with `pairs` in a
+  running game; `prototypes` IS readable in `on_load`, which is why the cache can
+  rebuild there.]**
+- `SpaceConnectionPrototype.from` / `.to` — the two endpoints as `SpaceLocationID`
+  (name strings); `.length` — uint32 distance in km (default `600`). **[provisional
+  — confirm `.from`/`.to`/`.length` field names + that `.length` is km.]**
+
+**Travel progress — `LuaSpacePlatform` (Tasks 7 / 8).** For a travelling platform
+the sampler/display read the connection it is on and its fractional progress:
+
+- `platform.space_connection` — the `LuaSpaceConnectionPrototype` the platform is
+  currently traversing; **`nil` when parked**. Its **`.name`** (a stable string) is
+  what gets stored as the `eta_sample` cursor id — **never the LuaObject itself**
+  (storage must be serializable, and the "same connection across samples" guard
+  compares a stable id across save/load). **[provisional — confirm
+  `space_connection` and its `.name` on an in-transit platform.]**
+- `platform.distance` — a `double` in `0..1`, the platform's position on its
+  current `space_connection`. **[confirmed — official 2.0 docs:** "represented as a
+  number in range `[0, 1]`, with 0 being `LuaSpaceConnectionPrototype::from` and 1
+  being `LuaSpaceConnectionPrototype::to`."**]** This is a FIXED `from`->`to` axis,
+  NOT progress-in-travel-direction. The sampler uses `|Δdistance| × length / Δtick`
+  for the learned speed factor; the Monitor uses the signed `Δdistance/Δtick`
+  progress-rate for the in-flight ETA. (Still confirm in-engine that `.distance`
+  reads 0..1, not absolute km, on a live in-transit platform.)
+  - **Direction on the RETURN leg — RESOLVED to the fixed-axis form (per the docs
+    quote above), fix implemented.** A `space_connection` has a FIXED `from`/`to`, but
+    a ship traverses it both ways across a roundtrip, so a `to`->`from` RETURN leg
+    counts the axis DOWN (1→0) and yields a NEGATIVE Δdistance. The sampler
+    (`watchdog.flight_sample`) therefore differences on the MAGNITUDE `|Δdistance|`
+    (else the `>= MIN_DELTA` gate skips every return leg and never calibrates), and
+    the Monitor (`viewmodel.remaining_eta`) reads the SIGN of the measured rate to
+    pick the remaining fraction (`rate>0` → `1 - distance` toward `to`; `rate<0` →
+    `distance` toward `from`) with `|rate|` as the speed (else a return leg's negative
+    rate falls below `MIN_RATE` and shows no ETA). Both fixes are convention-safe: a
+    no-op under a hypothetical direction-of-travel axis, correct under the confirmed
+    fixed axis. Still verify the in-flight ETA actually displays on a real return leg.
+- **`.speed` is NOT a new seam** — the sampler and the Monitor both derive their
+  rate from `Δdistance/Δtick`, deliberately avoiding any dependency on
+  `platform.speed`'s units. `speed` is an already-listed `[provisional]` seam (§1),
+  exercised only by the existing watchdog completion check, and is unchanged by this
+  feature.
+
+> **Load-bearing name identity (confirm in playtest — distinct from confirming the
+> accessor shapes).** Every `dist[...]` lookup keys on planet names, so
+> `space_connection.from` / `.to` (SpaceLocationID) MUST equal the planet/surface
+> names the dispatcher already routes on — `dispatcher.planet_name`
+> (`node.surface.name`) and `dispatcher.ship_planet` (`platform.space_location.name`).
+> If they differ, every distance lookup misses → falls to the large fallback
+> constant → ETA selection silently degrades to the lowest-id tie-break (no crash,
+> just a quietly inert feature). Verify with the debug log that REAL distances (not
+> the fallback) are in use before trusting the ETA pick.
+
+> **Caveat — read-only:** these are all READ seams (`prototypes.space_connection`,
+> `platform.space_connection` / `.distance`). The ETA feature writes nothing new to
+> the engine; the only platform mutation remains `platform.schedule` (§1).
 
 ---
 
