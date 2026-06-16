@@ -1,3 +1,8 @@
+Version: 1.4.0
+Date: 2026-06-16
+  Locale:
+    - Added full translations of every in-game string — the technology, mod settings, the ready virtual-signal, the Fleet Monitor, the Trade and Fleet tabs, and all tips-and-tricks entries — into 14 languages: German, French, Spanish, Italian, Russian, Ukrainian, Polish, Czech, Brazilian Portuguese, Dutch, Turkish, Simplified Chinese, Japanese, and Korean. The "Planet Express" name stays untranslated as the brand, and all rich-text references (entities, the ready signal, the technology) render in each player's own language.
+---------------------------------------------------------------------------------------------------
 Version: 1.3.3
 Date: 2026-06-16
   Bugfixes:
