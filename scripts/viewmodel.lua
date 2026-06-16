@@ -267,6 +267,7 @@ function viewmodel.build(world)
       phase = a.phase,
       ticks_left = (a.deadline_tick and tick) and (a.deadline_tick - tick) or nil,
       eta_ticks = carrier and viewmodel.remaining_eta(carrier.eta_live) or nil,
+      source_avail = a.source_avail, -- provider holdings per loaded item (Monitor display)
     }
   end
 
@@ -345,7 +346,10 @@ function viewmodel.group_demand(shipments, waiting)
       -- qkey -> soonest live ETA (ticks) among the ships delivering it;
       -- deliver_ships: qkey -> list of ship ids delivering it (for the Monitor's
       -- 1s in-place ETA refresh, which recomputes the soonest live ETA itself).
-      g = { deliver = {}, load = {}, wait = {}, deliver_eta = {}, deliver_ships = {} }
+      -- load_from / load_avail: qkey -> the source PLANET a loading item is picked
+      -- up at, and the provider's gross launchable surplus there (Monitor display).
+      g = { deliver = {}, load = {}, wait = {}, deliver_eta = {}, deliver_ships = {},
+            load_from = {}, load_avail = {} }
       planets[p] = g
       order[#order + 1] = p
     end
@@ -359,7 +363,14 @@ function viewmodel.group_demand(shipments, waiting)
       local bucket = loading and g.load or g.deliver
       for k, qty in pairs(sh.manifest) do
         bucket[k] = (bucket[k] or 0) + qty
-        if not loading then
+        if loading then
+          -- Stamp where this item is loading from + the provider's holdings there, so
+          -- the Monitor can show "from [source] (N avail)". A given (dest,item) is
+          -- almost always loaded from ONE source; on the rare two-source overlap the
+          -- last shipment's source wins (a display approximation, not a decision).
+          g.load_from[k] = sh.from
+          g.load_avail[k] = sh.source_avail and sh.source_avail[k] or nil
+        else
           -- Keep the soonest ETA per delivering item (a planet may receive the same
           -- item on more than one ship). Loading ships have no in-flight ETA yet.
           if sh.eta_ticks then
@@ -415,7 +426,12 @@ function viewmodel.group_demand(shipments, waiting)
           -- `eta_ticks` only on delivering rows that have a live measurement;
           -- loading rows (no in-flight progress yet) carry none. `eta_ships` is the
           -- delivering ships behind that ETA, for the Monitor's in-place 1s refresh.
+          -- `from` / `avail` only on LOADING rows (the source it is picked up at +
+          -- the provider's holdings there); delivering rows leave them nil.
+          local loading = (status == "loading")
           items[#items + 1] = { item = k, qty = map[k], status = status,
+            from = loading and g.load_from[k] or nil,
+            avail = loading and g.load_avail[k] or nil,
             eta_ticks = g.deliver_eta[k], eta_ships = g.deliver_ships[k] }
         end
       end
@@ -798,6 +814,26 @@ function viewmodel.gather(tick)
   -- assignments, projected to the display-relevant fields.
   local assignments_world = {}
   for id, a in state.sorted_pairs(storage.assignments or {}) do
+    -- Provider holdings (Monitor display): for each item this assignment is
+    -- loading, the GROSS launchable surplus above reserve at the SOURCE -- "what the
+    -- provider currently holds that it could launch". Read off the EXACT source node
+    -- (`a.source`, a node id), so it is force-correct even when two forces share a
+    -- planet name. Deliberately the gross above-reserve count (same launchable basis
+    -- as stock.surplus) WITHOUT min-trip suppression or the in-flight-commit
+    -- subtraction: the player wants the source's holdings to see WHY a load is small
+    -- (the bug-2 lens), not the allocatable remainder. Keyed by the cargo qkey; the
+    -- reserve is per bare NAME. Keyed write over the manifest -> plain pairs is fine.
+    -- nil when the source node isn't in this tick's snapshot (degrade: no readout).
+    local source_avail = nil
+    local snode = a.source and snapshot.nodes[a.source]
+    if snode and snode.node and a.manifest then
+      source_avail = {}
+      for item in pairs(a.manifest) do
+        local sname = qkey.qparse(item)
+        local v = stock.stock_count(snode.node, item) - reserves.reserve(snode.node, sname)
+        source_avail[item] = v > 0 and v or 0
+      end
+    end
     assignments_world[id] = {
       ship = a.ship,
       source_planet = a.source_planet,
@@ -807,6 +843,7 @@ function viewmodel.gather(tick)
       phase = a.phase,
       deadline_tick = a.deadline_tick,
       force = a.force, -- force stamp (dispatcher.commit) for Monitor scoping
+      source_avail = source_avail, -- provider holdings per loaded item (Monitor display)
     }
   end
 

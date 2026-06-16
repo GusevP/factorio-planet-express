@@ -2872,6 +2872,33 @@ describe("group_demand: empty input -> empty groups", function()
   assert_eq(#viewmodel.group_demand(nil, nil), 0, "nil tolerated -> no groups")
 end)
 
+describe("group_demand: loading items carry source planet + provider holdings", function()
+  -- A ship LOADING science for gleba, picked up at vulcanus, where the provider
+  -- holds 200 launchable. The loading row surfaces both so the Monitor can show
+  -- "from [vulcanus] (200 avail)". A delivering row leaves from/avail nil.
+  local shipments = {
+    { to = "gleba", from = "vulcanus", phase = fleet.LOADING,
+      manifest = { ["science@normal"] = 2000 },
+      source_avail = { ["science@normal"] = 200 } },
+    { to = "gleba", from = "nauvis", phase = fleet.ENROUTE,
+      manifest = { ["iron@normal"] = 500 },
+      source_avail = { ["iron@normal"] = 9999 } },
+  }
+  local groups = viewmodel.group_demand(shipments, {})
+  assert_eq(#groups, 1, "one destination planet")
+  local sci, iron
+  for _, it in ipairs(groups[1].items) do
+    if it.item == "science@normal" then sci = it end
+    if it.item == "iron@normal" then iron = it end
+  end
+  assert_eq(sci.status, "loading", "science is loading")
+  assert_eq(sci.from, "vulcanus", "loading item carries its source planet")
+  assert_eq(sci.avail, 200, "loading item carries the provider's launchable holdings")
+  assert_eq(iron.status, "delivering", "iron is delivering")
+  assert_eq(iron.from, nil, "delivering item has no source readout")
+  assert_eq(iron.avail, nil, "delivering item has no avail readout")
+end)
+
 -- ---------------------------------------------------------------------------
 -- viewmodel ETA (Task 8 -- Monitor in-flight ETA from the measured progress-rate)
 -- ---------------------------------------------------------------------------

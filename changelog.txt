@@ -1,9 +1,10 @@
 Version: 1.3.3
 Date: 2026-06-16
   Bugfixes:
-    - A planet's exportable surplus is now measured from its rocket silos' logistic networks (what can actually be launched) instead of the cargo landing pad's own network. Previously, if your stock and silos were not on the same logistic network as the landing pad, the mod saw only a fraction of what the planet held and shipped a trickle of each request — e.g. loading 100-200 of a 2,000 request despite plenty in stock.
+    - A planet's exportable surplus is now measured across all of the planet's logistic networks, instead of only the cargo landing pad's own network. Previously, if your stock sat on a different logistic network than the landing pad, the mod saw only a fraction of what the planet held and shipped a trickle of each request — e.g. loading 100-200 of a 2,000 request despite plenty in stock. (Note: stock that is not in any logistic network — pure belt/train buffers with no roboport coverage — still can't be measured.)
   Changes:
     - The /pe-status diagnostic now prints each planet's exportable surplus per item next to its demand, so an under-supplying source is visible at a glance.
+    - The Fleet Monitor now shows, on each loading item, the provider planet it is picked up from and that planet's launchable holdings — "from [planet] (N avail)" — so an under-supplying source is visible without running /pe-status.
 ---------------------------------------------------------------------------------------------------
 Version: 1.3.2
 Date: 2026-06-16

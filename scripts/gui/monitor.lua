@@ -270,6 +270,20 @@ local function render_body(body, view)
           tag.style.minimal_width = 72
           common.item_box(line, it.item)
           line.add({ type = "label", caption = "  ×" .. tostring(it.qty) })
+          -- Loading items: show the provider planet the cargo is picked up at and that
+          -- planet's launchable holdings, so an under-supplying source (the bug-2
+          -- situation) is visible in the Monitor without running /pe-status. Only
+          -- loading rows carry `from`/`avail` (set by group_demand).
+          if it.from then
+            line.add({ type = "label", caption = "  " })
+            line.add({ type = "label", caption = { "planet-express.monitor-demand-from" } })
+            line.add({ type = "label", caption = " " })
+            common.planet_box(line, it.from)
+            if it.avail ~= nil then
+              line.add({ type = "label", caption = " " })
+              line.add({ type = "label", caption = { "planet-express.monitor-source-avail", it.avail } })
+            end
+          end
           -- Live ETA on a delivering item (soonest among the ships bringing it);
           -- only present once a ship reports a usable in-flight progress-rate. Tagged
           -- with those ships so refresh_eta recomputes the soonest ETA each second.
