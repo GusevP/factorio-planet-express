@@ -56,54 +56,91 @@ end
 -- launchable-stock IO wrapper (provisional -- docs/api-notes.md §2)
 -- ---------------------------------------------------------------------------
 
--- [provisional] Launchable item count scoped to the trade node's OWN logistic
--- network -- the network the pad entity belongs to (`pad.logistic_network`).
--- This is what a rocket silo on the pad's network can actually launch; summing
--- ALL networks on the surface over-counts on planets with two or more
--- DISCONNECTED logistic networks, making the mod promise surplus a silo can't
--- launch (see docs/api-notes.md §2 and its silo-vs-pad caveat). When the
--- per-node accessor is unavailable (no/invalid pad entity, or the pad isn't on
--- a network) we DEGRADE SAFELY to the old surface-sum rather than erroring; an
--- under-count is recovered by the re-clamp / load_impossible paths, never a
--- crash. Confirm `LuaEntity.logistic_network` (+ `get_item_count`) in-engine
--- before flipping §2 to [confirmed].
---
--- QUALITY (Task 9, #4b): the cargo key is a `qkey(item, quality)`, so the
--- launchable stock is read PER QUALITY via a SINGLE `ItemWithQualityID` table
--- (`network.get_item_count{name, quality}`) -- normal-quality iron and uncommon-
--- quality iron are independent stock pools. The old two-arg `(name, quality)` form
--- crashed in-engine (2.0 `get_item_count` takes 0 or 1 args). A bare item-name key
--- decodes to "normal" so legacy/quality-agnostic reads still resolve.
-local function read_launchable_stock(node, key)
-  local name, quality = qkey.qparse(key)
-  local pad = node.entity
-  if pad and pad.valid then
-    local network = pad.logistic_network
-    if network then
-      return network.get_item_count({ name = name, quality = quality })
+-- Per-tick cache of each (surface, force)'s deduped rocket-silo logistic networks.
+-- Cargo launches from rocket SILOS (they pull goods from their own logistic network
+-- and fire them up), so the silos' networks -- NOT the cargo landing pad's -- are
+-- what a planet can actually export. A planet demanding many items would otherwise
+-- re-scan the surface for silos once per item; cache the network list per tick
+-- instead. Holds live engine handles, rebuilt every tick alongside the stock-value
+-- cache (see `begin_tick`), never serialized -- same read-through contract as `cache`.
+local silo_networks_cache = { tick = nil, by_key = {} }
+
+-- The deduped list of rocket-silo logistic networks for `force` on `surface`
+-- (cached per dispatcher tick). Scoped to the node's force so one force never reads
+-- another's launchable stock. Networks are de-duped by `network_id` so several silos
+-- sharing one network don't multiply the count. [provisional -- confirm
+-- `find_entities_filtered{type="rocket-silo"}`, `LuaEntity.logistic_network`, and
+-- `LuaLogisticNetwork.network_id` in-engine before flipping §2 to [confirmed].]
+local function silo_networks(surface, force)
+  local key = tostring(surface.index or surface.name)
+    .. "@" .. tostring(force and (force.index or force.name) or "?")
+  local cached = silo_networks_cache.by_key[key]
+  if cached then
+    return cached
+  end
+  local nets = {}
+  local seen = {}
+  local filter = { type = "rocket-silo" }
+  if force then
+    filter.force = force
+  end
+  -- Build-then-dedup over the silo set is order-independent (a set-build, not a
+  -- decision loop), so plain `pairs` is fine.
+  for _, silo in pairs(surface.find_entities_filtered(filter)) do
+    if silo.valid then
+      local network = silo.logistic_network
+      if network then
+        local nid = network.network_id
+        if nid == nil then
+          nets[#nets + 1] = network
+        elseif not seen[nid] then
+          seen[nid] = true
+          nets[#nets + 1] = network
+        end
+      end
     end
   end
+  silo_networks_cache.by_key[key] = nets
+  return nets
+end
 
-  -- Fallback: aggregate every logistic network on the node's surface. Summing
-  -- is order-independent (a commutative reduction, NOT a game-affecting decision
-  -- iteration), so plain `pairs` is fine here.
-  local surface, force = node.surface, node.force
-  -- Guard `surface.valid` (Task 6): a node whose surface was deleted has an
-  -- invalid `LuaSurface`, so reading `.name` off it below would error. Plain test
-  -- tables have no `.valid` field (absent => nil), so `== false` only short-circuits
-  -- on a real dead engine handle and the pure-Lua test runner is unaffected.
+-- [provisional] Launchable item count = what the planet's rocket SILOS can launch.
+-- Cargo is fired up by rocket silos pulling from THEIR logistic network; the cargo
+-- landing pad only RECEIVES. The pre-2026-06 reader scoped surplus to the PAD's own
+-- `logistic_network`, which UNDER-COUNTED whenever the pad was not wired into the
+-- same network as the stock/silos: a planet visibly holding 100k exported only the
+-- trickle near its pad, clamping every manifest to a fraction of demand (the
+-- silo-vs-pad-network caveat, docs/api-notes.md §2 -- the reported "only loads a
+-- fraction" bug). Now scope to the UNION of every rocket-silo logistic network on the
+-- node's surface (deduped, force-scoped), summed per (item, quality). This counts
+-- exactly what a silo can pull and launch -- stock the pad sees but no silo can reach
+-- was never launchable, so excluding it is the correction, not a regression. Summing
+-- is a commutative reduction (order-independent), so plain `pairs` is fine
+-- (determinism: summation, not a decision loop). Degrades safely to 0 when there are
+-- no networked silos (a planet that can't launch has no export surplus) or the engine
+-- accessor is absent (the pure-Lua test runner, which replaces `stock.reader` wholesale).
+--
+-- QUALITY (Task 9, #4b): the cargo key is a `qkey(item, quality)`, read PER QUALITY
+-- via a SINGLE `ItemWithQualityID` table (`network.get_item_count{name, quality}`) --
+-- normal- and uncommon-quality iron are independent pools. The old two-arg
+-- `(name, quality)` form crashed in-engine (2.0 `get_item_count` takes 0 or 1 args).
+-- A bare item-name key decodes to "normal" so legacy reads still resolve.
+local function read_launchable_stock(node, key)
+  local name, quality = qkey.qparse(key)
+  local surface = node.surface
+  -- Guard `surface.valid` (Task 6): a node whose surface was deleted has an invalid
+  -- `LuaSurface`. Plain test tables have no `.valid` field (absent => nil), so
+  -- `== false` only fires on a real dead engine handle.
   if surface and surface.valid == false then
     return 0
   end
-  if not (surface and force and force.logistic_networks) then
-    return 0
-  end
-  local networks = force.logistic_networks[surface.name]
-  if not networks then
+  -- No engine surface (pure-Lua test runner / partial mock) -> nothing to read.
+  -- Tests replace `stock.reader` wholesale, so this only guards a partial mock.
+  if not (surface and surface.find_entities_filtered) then
     return 0
   end
   local total = 0
-  for _, network in pairs(networks) do
+  for _, network in pairs(silo_networks(surface, node.force)) do
     total = total + network.get_item_count({ name = name, quality = quality })
   end
   return total
@@ -146,6 +183,12 @@ function stock.begin_tick(tick)
   if cache.tick ~= tick then
     cache.tick = tick
     cache.values = {}
+  end
+  -- Drop the per-tick silo-network cache in lockstep so a network handle (or a
+  -- silo that was built/mined) never leaks across ticks.
+  if silo_networks_cache.tick ~= tick then
+    silo_networks_cache.tick = tick
+    silo_networks_cache.by_key = {}
   end
 end
 

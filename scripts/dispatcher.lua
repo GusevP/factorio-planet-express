@@ -1158,8 +1158,18 @@ function dispatcher.diagnose()
       -- d.item is a cargo qkey; decode it for the debug dump (cosmetic).
       parts[#parts + 1] = qkey.label(d.item) .. ":" .. tostring(d.unmet)
     end
-    add(string.format("  pad#%s planet=%s force=%s demand=[%s]",
-      tostring(id), tostring(n.planet), tostring(n.force), table.concat(parts, ",")))
+    -- Surplus this planet can EXPORT (launchable stock - reserve, min-trip
+    -- suppressed), as the mod sees it through the pad's logistic network. This is
+    -- the number that clamps a manifest, so a planet that visibly holds plenty but
+    -- shows a small surplus here means its stock is not on the cargo-landing-pad's
+    -- logistic network (the silo-vs-pad-network caveat, api-notes.md §2).
+    local surplus_parts = {}
+    for item, qty in state.sorted_pairs(n.surplus or {}) do
+      surplus_parts[#surplus_parts + 1] = qkey.label(item) .. ":" .. tostring(qty)
+    end
+    add(string.format("  pad#%s planet=%s force=%s demand=[%s] surplus=[%s]",
+      tostring(id), tostring(n.planet), tostring(n.force), table.concat(parts, ","),
+      table.concat(surplus_parts, ",")))
   end
 
   add("fleet: " .. #snapshot.ships)

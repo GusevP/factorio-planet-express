@@ -294,11 +294,17 @@ know which stop the ship is at and whether its hold has drained:
 "Surplus" is computed against **what the planet can currently launch**, i.e. the
 logistic-network item count reachable by rocket silos.
 
-**Accessor (Task 4, #7) — the trade node's OWN logistic network:**
-`pad.logistic_network` (the `LuaLogisticNetwork` the cargo-landing-pad entity
-belongs to), then `network.get_item_count{name, quality}`.
-`stock.read_launchable_stock` scopes to THIS network, NOT the whole-surface
-aggregate.
+**Accessor — the planet's ROCKET-SILO logistic networks (revised 2026-06):**
+exports are launched by rocket **silos**, which pull the goods from THEIR own
+logistic network. So launchable stock = the UNION of every rocket silo's network
+on the node's surface:
+`surface.find_entities_filtered{type="rocket-silo", force=node.force}`, each
+`silo.logistic_network` (deduped by `network_id`), summed via
+`network.get_item_count{name, quality}`. `stock.read_launchable_stock` scopes to
+THIS silo-network union; `stock.silo_networks` caches the deduped list per
+(surface, force) per tick. **[provisional — confirm
+`find_entities_filtered{type="rocket-silo"}`, `LuaEntity.logistic_network`, and
+`LuaLogisticNetwork.network_id` in-engine before flipping §2 to [confirmed].]**
 
 - **Per-quality stock (Task 9, #4b) [provisional — 2.0
   `LuaLogisticNetwork.get_item_count` takes a SINGLE `ItemWithQualityID`
@@ -306,30 +312,35 @@ aggregate.
   `(item, quality)` form crashed in playtest 2026-06-10, re-confirm the table form
   in a running game]:** the cargo key is a `qkey(item, quality)`, so the reader
   `qparse`s it and reads launchable stock PER QUALITY —
-  `network.get_item_count{name, quality}` (and the fallback surface-sum likewise).
-  Normal- and uncommon-quality iron are independent stock pools; a bare item-name
-  key decodes to `"normal"` so legacy reads still resolve.
+  `network.get_item_count{name, quality}` per silo network. Normal- and
+  uncommon-quality iron are independent stock pools; a bare item-name key decodes
+  to `"normal"` so legacy reads still resolve.
 
-- **Why per-node, not surface-wide:** a planet may host **two or more
-  DISCONNECTED logistic networks**. Summing every network on the surface (the
-  pre-#7 behavior) over-counts — the mod would promise surplus a silo on a
-  different network can't launch, producing impossible dispatches that fall back
-  to the no-progress timeout.
-- **Fallback (degrade safely, never error):** when the per-node accessor is
-  unavailable — no/invalid pad entity, or the pad isn't on a network — the reader
-  falls back to the old surface-sum: `force.logistic_networks[surface.name]`, then
-  `network.get_item_count(item)` summed over all networks (order-independent
-  commutative reduction, so plain `pairs` is fine).
+- **Why silo-networks, not the pad's network (the bug this fixed):** the
+  pre-2026-06 reader scoped surplus to the cargo landing **PAD's** own
+  `logistic_network`. But the pad only RECEIVES; it does not launch. Whenever the
+  pad was not wired into the same network as the stock/silos, the reader
+  under-counted — a planet visibly holding 100k science exported only the trickle
+  near its pad, clamping every manifest to a fraction of demand (the user-reported
+  "platforms only load 100-200" bug). Reading the silo networks counts exactly what
+  a silo can pull and launch.
+- **Why not the whole-surface sum:** a planet may host **two or more DISCONNECTED
+  logistic networks**. Summing every network on the surface over-counts — it would
+  promise surplus a silo on a *different* network can't launch. The silo-network
+  union avoids both errors: it includes every network a silo can launch from, and
+  excludes networks no silo is on.
+- **Degrade (never error):** no engine surface / no `find_entities_filtered` (the
+  pure-Lua test runner or a partial mock) → 0; a planet with no networked silos →
+  0 (it genuinely can't export). Stock the pad sees but no silo can reach was never
+  launchable, so excluding it is the correction, not a regression.
 
-> **Caveat — silo-vs-pad network (must verify in-engine, gates the wrapper):**
-> exports launch from rocket **SILOS**, which may sit on a **different** logistic
-> network than the landing **PAD**. Scoping surplus to the pad's network removes
-> the over-count on disconnected-network planets, but can **under-count** if a
-> launching silo isn't on the pad's network. An under-count is the safe direction:
-> the re-clamp / `load_impossible` paths cover it (a too-low surplus just means a
-> smaller/skipped manifest, never an impossible dispatch). **Flag for playtest
-> (#7):** on a real two-network planet, confirm the pad's network is the one the
-> silos draw from, or revisit (e.g. union the silos' networks) if exports starve.
+> **Caveat — belt-fed silos / non-networked cargo:** a silo not on any logistic
+> network (cargo belt-fed straight into it) contributes 0 here, same as the old
+> reader (which only ever saw *networked* stock). The mod's whole surplus model is
+> logistic-network-based; cargo that lives only on belts/in machines is invisible to
+> it by design. **Flag for playtest:** confirm a normal single-network base reads its
+> true launchable stock, and that a silo on the main network surfaces the planet's
+> full export pool.
 
 > **Caveat — in-flight / committed items:** the raw stock number does **not**
 > subtract items already committed to an in-flight launch or a rocket being
