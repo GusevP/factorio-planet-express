@@ -96,6 +96,21 @@ script.on_event(defines.events.on_pre_surface_deleted, function(event)
   registry.on_pre_surface_deleted(event.surface_index)
 end)
 
+-- A space platform was created or changed state. The build events above do NOT
+-- fire for the INITIAL hub of a freshly-created platform: on_space_platform_built_entity
+-- covers entities a platform's own construction robots build, not the starter-pack
+-- hub the engine spawns. So a brand-new platform stayed invisible to the registry
+-- until the next registry.rebuild() (on_init / on_configuration_changed) -- which is
+-- exactly why a player could only enroll a new platform after updating/reinstalling
+-- the mod (that fires on_configuration_changed -> rebuild). on_space_platform_changed_state
+-- carries `event.platform` and fires once the platform exists with its hub set, so
+-- it is the reliable "a platform appeared" signal. registry.add_platform is idempotent
+-- (guards valid/index and just refreshes an existing entry's live handle), so firing
+-- it on every state change is safe and cheap.
+script.on_event(defines.events.on_space_platform_changed_state, function(event)
+  registry.add_platform(event.platform)
+end)
+
 -- Dispatch + watchdog + Monitor-ETA cadences (Task 11; ETA cadence is v1.3). Three
 -- periods drive the on_nth_tick handlers:
 --   * dispatch  -- `dispatcher.run` on its configurable interval (`dispatcher.interval()`)

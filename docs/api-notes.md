@@ -494,6 +494,19 @@ ships), but correctness rests on the signature compare, not the event.
   `script_raised_destroy`, plus platform create/destroy events. **[provisional
   — confirm the full 2.0 event set + the platform-specific events in Task 3.]**
   Filter to cargo landing pads (and platform hubs) by `entity.name`/`type`.
+- **Platform appearance — `on_space_platform_changed_state`. [confirmed against
+  the 2.0 docs; carries `event.platform` + `event.old_state`].** The build-event set
+  above does **NOT** detect a freshly-created platform: `on_space_platform_built_entity`
+  fires for entities a platform's own construction robots build, **not** the
+  starter-pack hub the engine spawns when the platform is created. So a new platform
+  was invisible to the registry until the next `registry.rebuild()`
+  (`on_init`/`on_configuration_changed`) — the user-visible bug where a new platform
+  could only be enrolled after updating/reinstalling the mod (a mod change fires
+  `on_configuration_changed` → rebuild). Fixed 2026-06 by also hooking
+  `on_space_platform_changed_state` → `registry.add_platform(event.platform)`; the
+  event fires once the platform exists with its hub set, and `add_platform` is
+  idempotent. (Still verify in a live game that the event fires on first creation,
+  not only on later state transitions.)
 - Surface deletion for the registry (Task 6): `on_pre_surface_deleted` →
   `registry.on_pre_surface_deleted(event.surface_index)`. **[provisional —
   confirm `on_pre_surface_deleted` and its `event.surface_index` field in-engine.]**

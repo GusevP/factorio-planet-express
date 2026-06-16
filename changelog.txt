@@ -1,3 +1,8 @@
+Version: 1.3.2
+Date: 2026-06-16
+  Bugfixes:
+    - New space platforms are now detected the moment they are created, so the Fleet tab and enrollment work right away. Previously a platform built during play stayed invisible to the mod until the next mod update or reinstall, because the engine spawns a new platform's hub without firing any of the build events the mod was listening for.
+---------------------------------------------------------------------------------------------------
 Version: 1.3.1
 Date: 2026-06-13
   Bugfixes:
