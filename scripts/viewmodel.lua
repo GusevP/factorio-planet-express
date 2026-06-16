@@ -265,9 +265,12 @@ function viewmodel.build(world)
       manifest = a.manifest,
       return_manifest = a.return_manifest,
       phase = a.phase,
+      progress_index = a.progress_index, -- route stop (1/2/3), for forward-vs-return leg
       ticks_left = (a.deadline_tick and tick) and (a.deadline_tick - tick) or nil,
       eta_ticks = carrier and viewmodel.remaining_eta(carrier.eta_live) or nil,
-      source_avail = a.source_avail, -- provider holdings per loaded item (Monitor display)
+      -- provider holdings per loaded item (Monitor display): forward + return loads.
+      source_avail = a.source_avail,
+      dest_avail = a.dest_avail,
     }
   end
 
@@ -320,9 +323,9 @@ function viewmodel.build(world)
 end
 
 -- Roll the flat `shipments` (in-flight assignments) + `waiting` (blocked open
--- demand) into a per-DESTINATION-planet status summary for the Monitor's
--- collapsible Demand section. Each (item,quality) a planet is receiving or still
--- wants is bucketed by how it is being handled RIGHT NOW:
+-- demand) into a per-RECEIVING-planet status summary for the Monitor's collapsible
+-- Demand section. Each (item,quality) a planet is receiving or still wants is
+-- bucketed by how it is being handled RIGHT NOW:
 --   * loading    -- a ship is at the source loading it for this planet
 --   * delivering -- a ship is en route / unloading it to this planet
 --   * waiting    -- open demand with no ship on it (carries the blocker reason)
@@ -333,9 +336,11 @@ end
 -- `qty` is the in-flight amount (delivering/loading) or the unmet amount (waiting).
 -- `delivering` wins over `loading` for the same item (the more-progressed ship);
 -- an item already in flight never also lists as waiting (its residual open demand
--- reads `in_transit`, excluded here). Only FORWARD manifests are counted -- two-way
--- return legs are not surfaced yet. Deterministic: planets and items are sorted;
--- the qty maps are summed order-independently (plain pairs). PURE -> unit-tested.
+-- reads `in_transit`, excluded here). Two-way return legs ARE surfaced: a ship past
+-- the turnaround buckets its RETURN manifest under the SOURCE planet (loading at the
+-- dest, then delivering home) via `contributions_of` (keyed off `progress_index` +
+-- `phase`). Deterministic: planets and items are sorted; the qty maps are summed
+-- order-independently (plain pairs). PURE -> unit-tested.
 function viewmodel.group_demand(shipments, waiting)
   local planets = {}
   local order = {}
@@ -356,40 +361,102 @@ function viewmodel.group_demand(shipments, waiting)
     return g
   end
 
+  -- One shipment can touch TWO planets across a two-way (3-stop) trip: the FORWARD
+  -- cargo goes to the destination, then the RETURN cargo comes back to the source.
+  -- Which cargo is live -- which manifest, which planet, loading vs delivering -- is
+  -- decided by the ship's current stop (`progress_index`: 1 = source load, 2 = dest
+  -- turnaround, 3 = source drop) together with `phase`.
+  --
+  -- The lifecycle of any cargo is loading -> delivering -> (delivered, gone):
+  --   * loading    -- parked at / heading to the pickup stop.
+  --   * delivering -- ENROUTE carrying it toward the receiving planet.
+  --   * delivered  -- once PARKED at the receiving planet the pad pulls it (sub-second),
+  --                   so it is dropped from the view rather than lingering as "delivering"
+  --                   until the assignment is freed. (Previously the forward cargo stayed
+  --                   shown -- "loading"/"delivering" -- at the destination right through
+  --                   the turnaround and return legs; that was the bug.)
+  local function contributions_of(sh)
+    if not (sh.to and sh.manifest) then
+      return {}
+    end
+    local ret = sh.return_manifest
+    local has_ret = ret ~= nil and next(ret) ~= nil
+    local pi = sh.progress_index or 1
+    local enroute = (sh.phase == fleet.ENROUTE)
+
+    if pi <= 1 then
+      -- Forward leg, at/heading to the SOURCE: loading the forward cargo there for the
+      -- destination (parked loading), or in transit toward it (delivering). Bucketed
+      -- under the destination either way.
+      return { {
+        planet = sh.to, items = sh.manifest,
+        status = enroute and "delivering" or "loading",
+        from = sh.from, avail = sh.source_avail,
+        eta_ticks = sh.eta_ticks, ship_id = sh.ship_id,
+      } }
+    elseif pi == 2 then
+      if enroute then
+        -- forward cargo in transit to the destination
+        return { {
+          planet = sh.to, items = sh.manifest, status = "delivering",
+          eta_ticks = sh.eta_ticks, ship_id = sh.ship_id,
+        } }
+      end
+      -- PARKED at the destination: the forward cargo has been delivered (the pad pulled
+      -- it), so it is dropped. On a two-way trip the return cargo is now LOADING here (the
+      -- turnaround) for the source; on a one-way trip nothing remains (the ship just
+      -- holds until the watchdog frees it).
+      if has_ret then
+        return { {
+          planet = sh.from, items = ret, status = "loading",
+          from = sh.to, avail = sh.dest_avail,
+        } }
+      end
+      return {}
+    else
+      -- pi >= 3 (two-way return leg): delivering while in transit; once PARKED at the
+      -- source the return cargo has been dropped (delivered) -> nothing shown.
+      if has_ret and enroute then
+        return { {
+          planet = sh.from, items = ret, status = "delivering",
+          eta_ticks = sh.eta_ticks, ship_id = sh.ship_id,
+        } }
+      end
+      return {}
+    end
+  end
+
   for _, sh in ipairs(shipments or {}) do
-    if sh.to and sh.manifest then
-      local g = planet(sh.to)
-      local loading = (sh.phase == fleet.LOADING)
-      local bucket = loading and g.load or g.deliver
-      for k, qty in pairs(sh.manifest) do
-        bucket[k] = (bucket[k] or 0) + qty
-        if loading then
-          -- Stamp where this item is loading from + the provider's holdings there, so
-          -- the Monitor can show "from [source] (N avail)". A given (dest,item) is
-          -- almost always loaded from ONE source; on the rare two-source overlap the
-          -- last shipment's source wins (a display approximation, not a decision).
-          g.load_from[k] = sh.from
-          g.load_avail[k] = sh.source_avail and sh.source_avail[k] or nil
-        else
-          -- Keep the soonest ETA per delivering item (a planet may receive the same
-          -- item on more than one ship). Loading ships have no in-flight ETA yet.
-          if sh.eta_ticks then
+    for _, c in ipairs(contributions_of(sh)) do
+      local g = planet(c.planet)
+      if c.status == "loading" then
+        for k, qty in pairs(c.items or {}) do
+          g.load[k] = (g.load[k] or 0) + qty
+          -- where it loads from + the provider's holdings there (Monitor "from (N avail)").
+          -- A given (planet,item) is almost always one source; last contribution wins.
+          g.load_from[k] = c.from
+          g.load_avail[k] = c.avail and c.avail[k] or nil
+        end
+      else -- delivering
+        for k, qty in pairs(c.items or {}) do
+          g.deliver[k] = (g.deliver[k] or 0) + qty
+          -- soonest live ETA per delivering item (a planet may receive it on >1 ship);
+          -- loading items have no in-flight ETA yet.
+          if c.eta_ticks then
             local cur = g.deliver_eta[k]
-            if cur == nil or sh.eta_ticks < cur then
-              g.deliver_eta[k] = sh.eta_ticks
+            if cur == nil or c.eta_ticks < cur then
+              g.deliver_eta[k] = c.eta_ticks
             end
           end
-          -- Record every ship delivering this item so the Monitor's 1s ETA-only
-          -- refresh can recompute the soonest live ETA in place (min over these
-          -- ships). GUI-only and order-independent (a min), so the append order
-          -- doesn't matter; shipments already arrive in sorted-id order regardless.
-          if sh.ship_id ~= nil then
+          -- record every delivering ship for the Monitor's 1s in-place ETA refresh
+          -- (order-independent -- a min over these ships -- so append order is irrelevant).
+          if c.ship_id ~= nil then
             local ships = g.deliver_ships[k]
             if not ships then
               ships = {}
               g.deliver_ships[k] = ships
             end
-            ships[#ships + 1] = sh.ship_id
+            ships[#ships + 1] = c.ship_id
           end
         end
       end
@@ -811,29 +878,32 @@ function viewmodel.gather(tick)
     }
   end
 
+  -- Provider holdings (Monitor display): the GROSS launchable surplus above reserve
+  -- at `node_id` for each item in `manifest` -- "what the provider currently holds it
+  -- could launch". Read off the EXACT node (a node id), so it is force-correct even
+  -- when two forces share a planet name. Deliberately the gross above-reserve count
+  -- (same launchable basis as stock.surplus) WITHOUT min-trip suppression or the
+  -- in-flight-commit subtraction: the player wants the source's holdings to see WHY a
+  -- load is small (the bug-2 lens), not the allocatable remainder. Keyed by the cargo
+  -- qkey; the reserve is per bare NAME. Keyed write over the manifest -> plain pairs is
+  -- fine. nil when the node isn't in this tick's snapshot (degrade: no readout).
+  local function avail_at(node_id, manifest)
+    local n = node_id and snapshot.nodes[node_id]
+    if not (n and n.node and manifest) then
+      return nil
+    end
+    local out = {}
+    for item in pairs(manifest) do
+      local nm = qkey.qparse(item)
+      local v = stock.stock_count(n.node, item) - reserves.reserve(n.node, nm)
+      out[item] = v > 0 and v or 0
+    end
+    return out
+  end
+
   -- assignments, projected to the display-relevant fields.
   local assignments_world = {}
   for id, a in state.sorted_pairs(storage.assignments or {}) do
-    -- Provider holdings (Monitor display): for each item this assignment is
-    -- loading, the GROSS launchable surplus above reserve at the SOURCE -- "what the
-    -- provider currently holds that it could launch". Read off the EXACT source node
-    -- (`a.source`, a node id), so it is force-correct even when two forces share a
-    -- planet name. Deliberately the gross above-reserve count (same launchable basis
-    -- as stock.surplus) WITHOUT min-trip suppression or the in-flight-commit
-    -- subtraction: the player wants the source's holdings to see WHY a load is small
-    -- (the bug-2 lens), not the allocatable remainder. Keyed by the cargo qkey; the
-    -- reserve is per bare NAME. Keyed write over the manifest -> plain pairs is fine.
-    -- nil when the source node isn't in this tick's snapshot (degrade: no readout).
-    local source_avail = nil
-    local snode = a.source and snapshot.nodes[a.source]
-    if snode and snode.node and a.manifest then
-      source_avail = {}
-      for item in pairs(a.manifest) do
-        local sname = qkey.qparse(item)
-        local v = stock.stock_count(snode.node, item) - reserves.reserve(snode.node, sname)
-        source_avail[item] = v > 0 and v or 0
-      end
-    end
     assignments_world[id] = {
       ship = a.ship,
       source_planet = a.source_planet,
@@ -841,9 +911,16 @@ function viewmodel.gather(tick)
       manifest = a.manifest,
       return_manifest = a.return_manifest,
       phase = a.phase,
+      -- The ship's current route stop (1 = source load, 2 = dest turnaround, 3 = source
+      -- drop), so group_demand can tell the forward leg from the return leg. nil until
+      -- the watchdog's first advance -> group_demand treats it as the forward leg.
+      progress_index = a.progress_index,
       deadline_tick = a.deadline_tick,
       force = a.force, -- force stamp (dispatcher.commit) for Monitor scoping
-      source_avail = source_avail, -- provider holdings per loaded item (Monitor display)
+      -- Provider holdings per loaded item (Monitor "from (N avail)"): source for the
+      -- FORWARD load, dest for the RETURN load (loaded at the destination turnaround).
+      source_avail = avail_at(a.source, a.manifest),
+      dest_avail = avail_at(a.dest, a.return_manifest),
     }
   end
 

@@ -2819,14 +2819,16 @@ describe("build: waiting classification + deterministic sort", function()
 end)
 
 describe("group_demand: per-planet delivering/loading/waiting buckets", function()
-  -- Two ships to nauvis: one LOADING steel (at source), one ENROUTE with iron
-  -- (delivering). One ship UNLOADING coal at vulcanus (delivering). Plus open
-  -- demand: copper (no_ship) waits at nauvis; an in_transit iron row is excluded;
-  -- stone (no_source) waits at vulcanus.
+  -- Two ships to nauvis: one LOADING steel (at the source), one ENROUTE with iron
+  -- (delivering). One ship ENROUTE with coal to vulcanus (delivering). A FOURTH ship
+  -- has already arrived at vulcanus (parked UNLOADING tin, progress_index 2) -> its
+  -- cargo is delivered, so it must NOT show. Plus open demand: copper (no_ship) waits
+  -- at nauvis; an in_transit iron row is excluded; stone (no_source) waits at vulcanus.
   local shipments = {
     { to = "nauvis", phase = fleet.LOADING, manifest = { ["steel@normal"] = 50 } },
     { to = "nauvis", phase = fleet.ENROUTE, manifest = { ["iron@normal"] = 200 } },
-    { to = "vulcanus", phase = fleet.UNLOADING, manifest = { ["coal@normal"] = 80 } },
+    { to = "vulcanus", phase = fleet.ENROUTE, manifest = { ["coal@normal"] = 80 } },
+    { to = "vulcanus", phase = fleet.UNLOADING, progress_index = 2, manifest = { ["tin@normal"] = 40 } },
   }
   local waiting = {
     { item = "copper@normal", dest_planet = "nauvis", unmet = 100, reason = "no_ship" },
@@ -2841,7 +2843,7 @@ describe("group_demand: per-planet delivering/loading/waiting buckets", function
   assert_eq(groups[1].counts.loading, 1, "nauvis: steel at source -> 1 loading")
   assert_eq(groups[1].counts.waiting, 1, "nauvis: copper no_ship; in_transit iron excluded")
   assert_eq(groups[2].planet, "vulcanus")
-  assert_eq(groups[2].counts.delivering, 1, "vulcanus: coal unloading counts as delivering")
+  assert_eq(groups[2].counts.delivering, 1, "vulcanus: coal enroute -> delivering (tin already delivered, hidden)")
   assert_eq(groups[2].counts.waiting, 1, "vulcanus: stone no_source")
 
   -- item rows carry status (+ reason on waiting), in delivering/loading/waiting order.
@@ -2897,6 +2899,55 @@ describe("group_demand: loading items carry source planet + provider holdings", 
   assert_eq(iron.status, "delivering", "iron is delivering")
   assert_eq(iron.from, nil, "delivering item has no source readout")
   assert_eq(iron.avail, nil, "delivering item has no avail readout")
+end)
+
+describe("group_demand: two-way return leg surfaces by stop (progress_index + phase)", function()
+  -- A two-way trip nauvis -> gleba -> nauvis: forward iron to gleba, return bioflux home.
+  local fwd = { ["iron@normal"] = 100 }
+  local ret = { ["bioflux@normal"] = 60 }
+  local function ship(phase, pi, extra)
+    local s = { to = "gleba", from = "nauvis", phase = phase, progress_index = pi,
+      manifest = fwd, return_manifest = ret }
+    for k, v in pairs(extra or {}) do s[k] = v end
+    return s
+  end
+
+  -- STOP 1, parked LOADING at the source: forward loading for the destination.
+  local g1 = viewmodel.group_demand({ ship(fleet.LOADING, 1, { source_avail = { ["iron@normal"] = 500 } }) }, {})
+  assert_eq(#g1, 1, "stop1: only the destination group")
+  assert_eq(g1[1].planet, "gleba", "stop1: forward bucketed under the destination")
+  assert_eq(g1[1].items[1].status, "loading", "stop1: forward is loading")
+  assert_eq(g1[1].items[1].from, "nauvis", "stop1: loads from the source")
+  assert_eq(g1[1].items[1].avail, 500, "stop1: shows the source's holdings")
+
+  -- STOP 2, ENROUTE to the dest: forward delivering, return not yet active.
+  local g2 = viewmodel.group_demand({ ship(fleet.ENROUTE, 2) }, {})
+  assert_eq(#g2, 1, "stop2 enroute: only the destination group")
+  assert_eq(g2[1].items[1].status, "delivering", "stop2 enroute: forward delivering to dest")
+
+  -- STOP 2, parked LOADING = the TURNAROUND: the forward cargo has been delivered (the
+  -- pad pulls it on arrival), so it is NO LONGER shown; only the return is LOADING at the
+  -- dest for the source. (Pre-fix the forward stayed "delivering" under the dest for the
+  -- whole return-load -- the "delivering never cleaned up" bug.)
+  local g3 = viewmodel.group_demand({ ship(fleet.LOADING, 2, { dest_avail = { ["bioflux@normal"] = 300 } }) }, {})
+  assert_eq(#g3, 1, "turnaround: only the source group (forward delivered, gone)")
+  assert_eq(g3[1].planet, "nauvis", "turnaround: return surfaces under the SOURCE")
+  assert_eq(g3[1].items[1].item, "bioflux@normal", "turnaround: the return cargo")
+  assert_eq(g3[1].items[1].status, "loading", "turnaround: return is loading")
+  assert_eq(g3[1].items[1].from, "gleba", "turnaround: return loads from the dest")
+  assert_eq(g3[1].items[1].avail, 300, "turnaround: shows the dest's holdings")
+
+  -- STOP 3, ENROUTE home: return delivering to the source; the forward is gone.
+  local g4 = viewmodel.group_demand({ ship(fleet.ENROUTE, 3) }, {})
+  assert_eq(#g4, 1, "stop3 enroute: only the source group (forward delivered, gone)")
+  assert_eq(g4[1].planet, "nauvis", "stop3: return bucketed under the source")
+  assert_eq(g4[1].items[1].item, "bioflux@normal", "stop3: the return cargo")
+  assert_eq(g4[1].items[1].status, "delivering", "stop3: return delivering home")
+
+  -- STOP 3, parked UNLOADING (the drop at the source): the return cargo has been
+  -- delivered -> nothing shown (the watchdog frees the assignment shortly after).
+  local g5 = viewmodel.group_demand({ ship(fleet.UNLOADING, 3) }, {})
+  assert_eq(#g5, 0, "stop3 parked: return delivered -> no groups (cleaned up)")
 end)
 
 -- ---------------------------------------------------------------------------
