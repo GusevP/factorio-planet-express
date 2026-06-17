@@ -10,7 +10,7 @@
 --   unmet(item) = max(0, requested - on_hand - already_inbound_from_fleet)
 --
 -- The `inbound` term is the qty already committed to this node by in-flight
--- assignments (`inbound_commit`, Task 5), so a request isn't dispatched twice.
+-- assignments (`inbound_commit`), so a request isn't dispatched twice.
 --
 -- Design split (per the plan's pure-function seam, same as stock.lua):
 --   * the unmet/flag/priority/sort math is PURE over plain tables -- unit-tested
@@ -122,7 +122,7 @@ end
 -- (it is mod state, not native pad data). Confirm the exact logistic-point /
 -- inventory accessors in-engine before flipping §3 to [confirmed].
 --
--- QUALITY (Task 9, #4b): each request filter carries the quality variant
+-- QUALITY: each request filter carries the quality variant
 -- (`filter.value.quality`, a quality-name string; nil/absent -> "normal"), so
 -- the same item at two qualities is two DISTINCT rows keyed by
 -- `qkey(name, quality)`. On-hand is read per quality via a SINGLE
@@ -180,17 +180,17 @@ end
 demand.reader = read_native_demand
 
 -- ---------------------------------------------------------------------------
--- inbound lookup (mod bookkeeping -- Task 5 fills storage.assignments)
+-- inbound lookup (mod bookkeeping -- the dispatcher fills storage.assignments)
 -- ---------------------------------------------------------------------------
 
 -- Sum the fleet cargo already committed to `node` per item across in-flight
 -- assignments. Deterministic: iterates assignments via the sorted helper.
 -- Returns a plain { [item] = qty } table (empty when nothing is in flight).
 --
--- Two sources of inbound (both two-sided bookkeeping, Task 5/7):
+-- Two sources of inbound (both two-sided bookkeeping):
 --   * forward leg: `inbound_commit`, delivered to the assignment's `dest`.
 --   * return leg: `return_manifest`, carried home and delivered to the
---     assignment's `source` (Task 7). Both must net out a node's demand so an
+--     assignment's `source`. Both must net out a node's demand so an
 --     in-flight delivery isn't requested again.
 function demand.inbound_for(node)
   local totals = {}

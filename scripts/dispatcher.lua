@@ -1,8 +1,8 @@
 -- scripts/dispatcher.lua
 --
--- The matching loop: on the dispatcher tick, join open demand (Task 2) with
--- above-reserve supply (Task 1) across the registry (Task 3), pick a source +
--- an idle eligible ship, write a two-planet route (Task 4), and record two-sided
+-- The matching loop: on the dispatcher tick, join open demand with
+-- above-reserve supply across the registry, pick a source +
+-- an idle eligible ship, write a two-planet route, and record two-sided
 -- bookkeeping so nothing is double-claimed or double-dispatched.
 --
 -- Sourcing is PRODUCTION-AGNOSTIC (re-export allowed): any planet holding
@@ -16,7 +16,7 @@
 --     PURE over a plain SNAPSHOT table -- no engine globals, no `storage` -- so
 --     they load and run under plain `lua` and are unit-tested.
 --   * `build_snapshot` / `commit` / `run` are the thin IO layer: they read the
---     engine via the Task 1-3 wrappers, allocate ids from the monotonic counter,
+--     engine via the IO wrappers, allocate ids from the monotonic counter,
 --     write `storage.assignments`, and call the schedule writer. Verified by
 --     manual playtest (watch a delivery with the debug log on).
 --
@@ -48,7 +48,7 @@ dispatcher.INTERVAL = 300       -- 5s at 60 UPS
 dispatcher.INTERVAL_SETTING = "planet-express-dispatch-interval"
 dispatcher.TIMEOUT = 18000      -- 5 min: every wait-condition has a timeout (invariant #1)
 
--- No-progress watchdog window (Task 6): the watchdog frees a ship that makes NO
+-- No-progress watchdog window: the watchdog frees a ship that makes NO
 -- schedule progress for this long. It must EXCEED one leg's travel + a stop's
 -- wait, because `schedule.current` only advances at a stop boundary (it is the
 -- index of the current DESTINATION, not an arrival flag), so a long inter-planet
@@ -57,14 +57,14 @@ dispatcher.TIMEOUT = 18000      -- 5 min: every wait-condition has a timeout (in
 -- longest route in playtest. (The wait-condition timeout itself stays `TIMEOUT`.)
 dispatcher.NO_PROGRESS_WINDOW = 2 * dispatcher.TIMEOUT
 
--- Max concurrent ships (Task 10). `0` means UNLIMITED for both. The global cap
+-- Max concurrent ships. `0` means UNLIMITED for both. The global cap
 -- bounds the whole fleet's simultaneous assignments; the per-route cap bounds
 -- ships in flight between a single source->dest pair. Both are enforced in the
 -- pure `plan` (over snapshot fields), so they are unit-tested.
 dispatcher.MAX_GLOBAL_SETTING = "planet-express-max-ships-global"
 dispatcher.MAX_ROUTE_SETTING = "planet-express-max-ships-route"
 
--- Two-way return trade (Task 7). When enabled, a finalized forward assignment
+-- Two-way return trade. When enabled, a finalized forward assignment
 -- also picks up a RETURN leg at the destination if the destination has surplus
 -- the source still needs (same two planets). TWO_WAY_DEFAULT is the fallback when
 -- `settings` is absent (the pure-Lua test runner); the planner reads the resolved
@@ -74,7 +74,7 @@ dispatcher.TWO_WAY_DEFAULT = true
 
 -- [provisional] Per-platform cargo capacity is now a SLOT BUDGET (the hub's
 -- main-inventory slot count), NOT an item count -- the slot-aware manifest packer
--- (Task 7) fills this many slots. DEFAULT_CAPACITY is the fallback slot count used
+-- fills this many slots. DEFAULT_CAPACITY is the fallback slot count used
 -- when the hub inventory can't be read (degrade safely). DEFAULT_STACK_SIZE is the
 -- fallback per-item stack size used when a prototype is unavailable (e.g. the
 -- pure-Lua test runner, which has no `prototypes` global). Confirm both in-engine
@@ -89,10 +89,10 @@ dispatcher.DEFAULT_STACK_SIZE = 50
 -- The re-export / thrash guard, the dispatcher's join point. A node's surplus of
 -- `item` is exportable ONLY when the node has no open demand for that same item;
 -- otherwise it would import and export `item` at once (ships passing each other).
--- `stock.surplus` stays pure stock math (Task 1) -- the demand-awareness lives
+-- `stock.surplus` stays pure stock math -- the demand-awareness lives
 -- HERE. Pure over a node snapshot { surplus = {}, unmet_by_item = {} }.
 --
--- QUALITY (Task 10, #4c): `item` is a `qkey(item, quality)` and both `surplus`
+-- QUALITY: `item` is a `qkey(item, quality)` and both `surplus`
 -- and `unmet_by_item` are keyed by qkey, so the guard is PER (item, quality):
 -- a node importing normal-quality iron can still export its uncommon-quality iron
 -- (a different cargo key), and surplus of one quality never masks demand for
@@ -124,7 +124,7 @@ function dispatcher.net_surplus(raw, committed, min_trip)
 end
 
 -- ---------------------------------------------------------------------------
--- pure concurrency accounting (max-ships caps, Task 10)
+-- pure concurrency accounting (max-ships caps)
 -- ---------------------------------------------------------------------------
 
 -- Canonical key for a route (source node id -> dest node id). Used both to count
@@ -398,7 +398,7 @@ end
 -- ---------------------------------------------------------------------------
 
 -- Choose an idle eligible ship for the route source_planet -> dest_planet. A
--- manual `pin` (a fleet key set on the Trade tab, Task 9) overrides auto-pick
+-- manual `pin` (a fleet key set on the Trade tab) overrides auto-pick
 -- when that ship is free and eligible; otherwise auto-pick selects the ship that
 -- DELIVERS SOONEST (min ETA, v1.1): `eta(deadhead, route, factor)` where
 -- `deadhead = distance(ship.planet -> source)`, `route = distance(source -> dest)`,
@@ -417,7 +417,7 @@ end
 -- of ship ids already committed this tick; `distances` is `snapshot.distances`.
 function dispatcher.pick_ship(ships, used, source_planet, dest_planet, pin, distances)
   local function eligible(s)
-    -- `s.ready ~= false` is the ready-signal gate (Task 4): build_snapshot stamps
+    -- `s.ready ~= false` is the ready-signal gate: build_snapshot stamps
     -- `false` only when a gated ship's hub reads `planet-express-ready <= 0`.
     -- Absent / `true` (un-gated or satisfied) stays eligible, so pure tests with
     -- no `ready` field are unaffected.
@@ -450,7 +450,7 @@ function dispatcher.pick_ship(ships, used, source_planet, dest_planet, pin, dist
 end
 
 -- ---------------------------------------------------------------------------
--- pure return-leg selection (two-way trade, Task 7)
+-- pure return-leg selection (two-way trade)
 -- ---------------------------------------------------------------------------
 
 -- Build the return-leg manifest for a forward plan: on the way back, the
@@ -493,7 +493,7 @@ end
 
 -- Plan this tick's assignments over a plain SNAPSHOT, deterministically and with
 -- no IO. Iterates destinations in stable id order; each destination's demand is
--- already priority-sorted (Task 2). For each destination with open demand:
+-- already priority-sorted. For each destination with open demand:
 --   1. pick the best source via `best_source` (production-agnostic, guarded),
 --   2. pick an idle eligible ship via `pick_ship` (else the demand waits),
 --   3. load WIDE up to ship capacity via `schedule.build_manifest`,
@@ -503,13 +503,13 @@ end
 --      via `return_manifest` and DECREMENT the destination's working surplus too.
 --
 -- Every cargo key below (`demand[i].item`, the `surplus`/`unmet_by_item` keys,
--- and the manifest keys) is a `qkey(item, quality)` (Task 10, #4c): a single item
+-- and the manifest keys) is a `qkey(item, quality)`: a single item
 -- at two qualities is two independent cargo keys that match, source, load, and
 -- net out separately. The keys are opaque strings, so coverage, the surplus
 -- decrement, and the caps all carry quality through with no structural change.
 --
 -- snapshot = {
---   two_way = bool,  -- Task 7 gate (set by build_snapshot from the setting)
+--   two_way = bool,  -- two-way gate (set by build_snapshot from the setting)
 --   nodes = { [node_id] = { id, planet, demand = {{item,unmet,priority,stack_size},...},
 --                           surplus = { [qkey]=qty },        -- working (mutated)
 --                           unmet_by_item = { [qkey]=qty },  -- guard input
@@ -526,7 +526,7 @@ function dispatcher.plan(snapshot)
   local used = {}
   local two_way = snapshot.two_way == true
 
-  -- Max-concurrent-ships caps (Task 10). 0 == unlimited. `active_*` are the
+  -- Max-concurrent-ships caps. 0 == unlimited. `active_*` are the
   -- in-flight counts from storage (set by build_snapshot); we add this tick's
   -- commitments as we go so a single tick can't blow past the cap either.
   -- Absent fields default to unlimited, so existing tests are unaffected.
@@ -603,7 +603,7 @@ function dispatcher.plan(snapshot)
           for _, d in ipairs(dnode.demand) do
             local avail = dispatcher.exportable(source, d.item)
             if avail > 0 then
-              -- carry stack_size through (set by build_snapshot) so Task 7's
+              -- carry stack_size through (set by build_snapshot) so the
               -- slot-aware packer sizes each item; `capacity` here is the ship's
               -- slot budget.
               items[#items + 1] = { item = d.item, surplus = avail, unmet = d.unmet, stack_size = d.stack_size }
@@ -684,13 +684,13 @@ end
 -- twice while its rockets are still launching. Deterministic: iterates
 -- assignments via the sorted helper. Returns { [node_id] = { [qkey] = qty } }.
 --
--- QUALITY (Task 10, #4c): `surplus_commit` / `return_manifest` are keyed by
+-- QUALITY: `surplus_commit` / `return_manifest` are keyed by
 -- `qkey(item, quality)` (they are copies of the qkey-keyed manifest), so the
 -- per-node totals are qkey-keyed too and `build_snapshot` subtracts them against
 -- the matching qkey'd `stock.surplus` read -- the demand-side `inbound_for` nets
 -- the same way, so both bookkeeping sides stay uniformly qkey-keyed.
 --
--- Two-way return leg (Task 7): a `return_manifest` is sourced FROM the
+-- Two-way return leg: a `return_manifest` is sourced FROM the
 -- destination planet, so it is committed surplus on `a.dest` -- counted here too
 -- so a destination isn't drained twice for its return cargo either.
 function dispatcher.committed_surplus_by_node()
@@ -729,7 +729,7 @@ end
 -- in-engine before flipping the api-notes seam to [confirmed].
 function dispatcher.planet_name(node)
   local s = node and node.surface
-  -- Guard `.valid` before `.name` (Task 6): a node whose surface was deleted has
+  -- Guard `.valid` before `.name`: a node whose surface was deleted has
   -- an invalid `LuaSurface` handle, and reading `.name` off it errors. Plain test
   -- tables have no `.valid` field (absent => nil), so the guard degrades to the
   -- old behavior under the pure-Lua test runner.
@@ -753,7 +753,7 @@ end
 
 -- [provisional] A platform's cargo capacity as a SLOT BUDGET: the number of slots
 -- in the hub's main inventory (`hub.get_inventory(defines.inventory.hub_main)`,
--- then `#inv`). This is what the slot-aware packer (Task 7) fills. Cargo bays
+-- then `#inv`). This is what the slot-aware packer fills. Cargo bays
 -- enlarge the hub inventory, so a freighter reports more slots than a bare hub.
 -- Falls back to DEFAULT_CAPACITY slots when the hub/inventory can't be read
 -- (degrade safely, never error). Confirm the in-engine accessor before flipping
@@ -774,7 +774,7 @@ function dispatcher.capacity_of(entry)
 end
 
 -- [provisional] The stack size of an item, used by the slot-aware manifest packer
--- (Task 7) to convert an item-count load into a slot count
+-- to convert an item-count load into a slot count
 -- (`ceil(load / stack_size)`). Reads `prototypes.item[name].stack_size`; falls
 -- back to DEFAULT_STACK_SIZE when `prototypes` is unavailable (the pure-Lua test
 -- runner) or the item has no prototype, so callers degrade safely. Confirm the
@@ -804,7 +804,7 @@ function dispatcher.interval()
 end
 
 -- Build the per-tick snapshot the pure planner consumes. Reads demand + surplus
--- through the Task 1-3 wrappers (all per-tick cached) and folds in the supply-
+-- through the IO wrappers (all per-tick cached) and folds in the supply-
 -- side committed-surplus bookkeeping. Surplus is computed ONLY for items some
 -- node actually demands (production-agnostic, but bounded -- we never price items
 -- nobody wants). The map-building loops here are commutative reductions, not
@@ -815,7 +815,7 @@ function dispatcher.build_snapshot(_tick)
   local demanded_items = {}
 
   for id, node in registry.nodes() do
-    -- Skip stale nodes (Task 6): a node whose pad entity or surface went invalid
+    -- Skip stale nodes: a node whose pad entity or surface went invalid
     -- (surface deleted, pad gone) must not be snapshotted -- it can't load or
     -- receive cargo, and reading off the dead `LuaSurface` (planet_name, stock
     -- surface-sum) would error. Skipping it here also kills the
@@ -830,10 +830,10 @@ function dispatcher.build_snapshot(_tick)
       for _, d in ipairs(open) do
         unmet_by_item[d.item] = d.unmet
         demanded_items[d.item] = true
-        -- IO read (Task 6): tag each demanded item with its stack size so the pure
+        -- IO read: tag each demanded item with its stack size so the pure
         -- planner can attach it to manifest `items` for the slot-aware packer (Task
         -- 7). Reading here keeps `plan`/`return_manifest` pure (they only copy the
-        -- snapshot field, never touch `prototypes`). `d.item` is a `qkey` (Task 9),
+        -- snapshot field, never touch `prototypes`). `d.item` is a `qkey`,
         -- but stack_size is a per-NAME physical property (quality-independent), so
         -- decode to the bare item name before the prototype read.
         local name = qkey.qparse(d.item)
@@ -847,7 +847,7 @@ function dispatcher.build_snapshot(_tick)
         demand = open,
         unmet_by_item = unmet_by_item,
         surplus = {},
-        -- The "Preferred ship" pin set on the Trade tab (Task 9): a fleet key
+        -- The "Preferred ship" pin set on the Trade tab: a fleet key
         -- string | nil. This is the PRODUCER for the `dest.pin` consumers in
         -- `pick_ship` / `plan` / `unserved_reason` -- copied straight through so
         -- the pure planner can prefer that ship when it is free + eligible and
@@ -900,16 +900,16 @@ function dispatcher.build_snapshot(_tick)
         capacity = dispatcher.capacity_of(entry),
         force = dispatcher.force_key(platform.force),
         planet = dispatcher.ship_planet(platform), -- ETA deadhead leg (v1.1)
-        -- Learned per-ship ETA calibration (v1.1). Defaults to 1.0 before Task 6
+        -- Learned per-ship ETA calibration (v1.1). Defaults to 1.0 before the watchdog
         -- lands the stored field / before a ship has flown, so the min-ETA pick
         -- treats an un-calibrated ship at its nominal speed.
         eta_factor = entry.eta_factor or 1.0,
-        ready = ready,                             -- ready-signal gate (Task 4)
+        ready = ready,                             -- ready-signal gate
       }
     end
   end
 
-  -- Concurrency caps + current in-flight counts for the pure planner (Task 10).
+  -- Concurrency caps + current in-flight counts for the pure planner.
   local active_global, active_by_route = dispatcher.active_counts(storage and storage.assignments)
 
   return {
@@ -943,7 +943,7 @@ end
 
 -- Realize one plan: allocate a monotonic assignment id, record two-sided
 -- bookkeeping (inbound_commit on the demand side, surplus_commit on the supply
--- side), write the schedule via the Task 4 wrapper, flip the ship to `enroute`,
+-- side), write the schedule via the writer wrapper, flip the ship to `enroute`,
 -- and emit a decision line for the debug log.
 function dispatcher.commit(p, tick)
   -- Write the schedule FIRST. If there is nothing to schedule or the engine write
@@ -982,20 +982,20 @@ function dispatcher.commit(p, tick)
     manifest = p.manifest,
     inbound_commit = p.manifest,  -- demand side (read by demand.inbound_for)
     surplus_commit = p.manifest,  -- supply side (read by committed_surplus_by_node)
-    -- Two-way return leg (Task 7): cargo carried home from the destination back
+    -- Two-way return leg: cargo carried home from the destination back
     -- to the source. Its bookkeeping is read live -- demand.inbound_for credits
     -- it to the SOURCE planet (the return destination) and
     -- committed_surplus_by_node debits it from the DEST planet (the return
     -- source) -- so the second leg is two-sided too and balances on free.
     return_manifest = p.return_manifest,
-    -- No-progress deadline (Task 6): the watchdog resets it to tick + window each
+    -- No-progress deadline: the watchdog resets it to tick + window each
     -- time the ship reaches a new stop, so a legal multi-stop trip is never timed
     -- out -- only a ship that stops making progress for a whole window is freed.
     -- The window must cover travel + wait (see NO_PROGRESS_WINDOW), which is wider
     -- than the per-stop wait `TIMEOUT`.
     deadline_tick = tick + dispatcher.NO_PROGRESS_WINDOW,
     deadline_window = dispatcher.NO_PROGRESS_WINDOW,
-    -- The dest node's force key (Task 8). Stamped so the fleet Monitor can scope
+    -- The dest node's force key. Stamped so the fleet Monitor can scope
     -- the shipment / its alerts to the receiving force (read back in
     -- viewmodel.gather and watchdog.raise_alert detail).
     force = p.dest_force,
@@ -1007,7 +1007,7 @@ function dispatcher.commit(p, tick)
     -- the hold.
     gate_ready = gate_ready,
     phase = "enroute",
-    -- Stamp the order-stable schedule signature so the watchdog (Task 6) can
+    -- Stamp the order-stable schedule signature so the watchdog can
     -- detect a later player edit and withdraw the ship instead of fighting them.
     -- Sign over the CLEANED engine records (station + wait_conditions) -- the same
     -- shape the watchdog reads back from the live LuaSchedule -- so the player-edit
@@ -1044,7 +1044,7 @@ function dispatcher.unserved_reason(snapshot, dest)
   local route_ships = dispatcher.ships_for_force(snapshot.ships, dest.force)
   local ship = dispatcher.pick_ship(route_ships, {}, src.planet, dest.planet, dest.pin, snapshot.distances)
   if not ship then
-    -- Held-aware branch (Task 4): pick_ship returns nil when every candidate is
+    -- Held-aware branch: pick_ship returns nil when every candidate is
     -- held by its ready signal just as it does when there is no eligible ship at
     -- all. Tell them apart so /pe-status + the debug log don't misreport a held
     -- ship as missing. A ship that is idle_eligible (ignoring `ready`) but stamped

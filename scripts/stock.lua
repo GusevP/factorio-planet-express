@@ -84,14 +84,14 @@ end
 -- surplus here, its export stock isn't bot-networked and a deeper inventory read would
 -- be needed.
 --
--- QUALITY (Task 9, #4b): read PER QUALITY via a SINGLE `ItemWithQualityID` table
+-- QUALITY: read PER QUALITY via a SINGLE `ItemWithQualityID` table
 -- (`network.get_item_count{name, quality}`). The old two-arg `(name, quality)` form
 -- crashed in-engine (2.0 `get_item_count` takes 0 or 1 args). A bare item-name key
 -- decodes to "normal" so legacy/quality-agnostic reads still resolve.
 local function read_launchable_stock(node, key)
   local name, quality = qkey.qparse(key)
   local surface, force = node.surface, node.force
-  -- Guard `surface.valid` (Task 6): a deleted surface's handle errors on `.name`.
+  -- Guard `surface.valid`: a deleted surface's handle errors on `.name`.
   -- Plain test tables have no `.valid` field (absent => nil), so `== false` only
   -- fires on a real dead engine handle and the pure-Lua test runner is unaffected.
   if surface and surface.valid == false then
@@ -130,7 +130,7 @@ local cache = { tick = nil, values = {} }
 -- or "?".
 local function cache_key(node, item)
   local sid = node.cache_key
-  -- Guard `surface.valid` (Task 6): a deleted surface's handle errors on `.index`
+  -- Guard `surface.valid`: a deleted surface's handle errors on `.index`
   -- / `.name`. `== false` only fires on a real dead engine handle (plain test
   -- tables have no `.valid` field), so the test runner keeps using node.surface.
   local surface = node.surface
@@ -178,7 +178,7 @@ end
 -- Exportable surplus of the cargo `key` (a `qkey(item, quality)`) on `node`:
 -- cached launchable stock minus the node's reserve floor, min-trip suppressed.
 -- This is pure STOCK math -- demand-awareness (the re-export thrash guard) lives
--- in the dispatcher's `exportable()` (Task 5), not here.
+-- in the dispatcher's `exportable()`, not here.
 --
 -- The reserve floor is keyed by bare item NAME (a reserve applies to ALL
 -- qualities of an item -- per the plan's Decisions), so the qkey is `qparse`d

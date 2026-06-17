@@ -67,8 +67,8 @@ function registry.add_node(entity)
     surface = entity.surface,
     force = entity.force,
     reserves = { default = default_reserve(), items = {} },
-    import_flags = {}, -- per-item `source via fleet` overlay (Task 2/9)
-    priorities = {},   -- per-item request priority overlay (Task 2/9)
+    import_flags = {}, -- per-item `source via fleet` overlay
+    priorities = {},   -- per-item request priority overlay
   }
   storage.nodes[id] = node
   state.debug_log("registry: node added pad#" .. id)
@@ -141,7 +141,7 @@ function registry.add_platform(platform)
   return entry
 end
 
--- Clear any node's "Preferred ship" pin (Task 9) that referenced a now-gone fleet
+-- Clear any node's "Preferred ship" pin that referenced a now-gone fleet
 -- key, so a dangling pin can never persist and silently steer dispatch toward a
 -- ship that no longer exists. `dispatcher.pick_ship` already falls back to
 -- auto-pick when a pinned ship isn't free + eligible, but a stale pin would
@@ -172,7 +172,7 @@ end
 -- surface deletion (called from control.lua on on_pre_surface_deleted)
 -- ---------------------------------------------------------------------------
 
--- A surface is about to be deleted (Task 6). We hook the PRE event because by
+-- A surface is about to be deleted. We hook the PRE event because by
 -- the time `on_surface_deleted` fires the stored `node.surface` handle is
 -- already invalid and can't be matched against `event.surface_index`; in the
 -- pre-event the surface is still valid, so each node's surface index is
@@ -233,7 +233,7 @@ end
 -- A pad or platform-hub was mined/destroyed. Dispatch by prototype name. The
 -- entity is still valid at the moment these events fire, so its name/identity is
 -- readable. (Freeing any in-flight assignment that referenced it is the
--- watchdog's job in Task 6 -- the registry only maintains the index.)
+-- watchdog's job -- the registry only maintains the index.)
 function registry.on_entity_removed(entity)
   if not (entity and entity.valid) then
     return
@@ -260,7 +260,7 @@ function registry.rebuild()
   storage.nodes = storage.nodes or {}
   storage.fleet = storage.fleet or {}
 
-  -- Prune stale ghosts before re-scanning (Task 6). An entry whose live handle
+  -- Prune stale ghosts before re-scanning. An entry whose live handle
   -- went invalid (surface deleted, platform/pad gone without a clean
   -- mine/destroy event) would otherwise linger and get picked as an export
   -- source or dereferenced on the dispatcher tick. Build-then-delete by key is
@@ -286,7 +286,7 @@ function registry.rebuild()
   end
   for _, key in ipairs(dead_ships) do
     storage.fleet[key] = nil
-    -- a pruned ghost can still be referenced by a node's pin (Task 9) -- clear it
+    -- a pruned ghost can still be referenced by a node's pin -- clear it
     -- so the dangling pin doesn't outlive the ship it pointed at.
     registry.clear_pin(key)
   end

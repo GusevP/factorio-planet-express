@@ -1,6 +1,6 @@
 -- scripts/gui/trade_tab.lua
 --
--- The Planet Express Trade overlay on the vanilla Cargo Landing Pad GUI (Task 9).
+-- The Planet Express Trade overlay on the vanilla Cargo Landing Pad GUI.
 -- In Space Age there is exactly one pad per planet, so the pad == the per-planet
 -- trade node; this panel is where the player steers that node's trade.
 --

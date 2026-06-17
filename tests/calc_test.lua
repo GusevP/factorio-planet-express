@@ -124,7 +124,7 @@ local T = {
 }
 
 -- ---------------------------------------------------------------------------
--- Task 0: prove the harness itself works.
+-- Sanity: prove the harness itself works.
 -- ---------------------------------------------------------------------------
 
 describe("harness sanity", function()
@@ -138,7 +138,7 @@ end)
 -- ---------------------------------------------------------------------------
 
 -- ---------------------------------------------------------------------------
--- Task 1: reserves resolution + surplus computation + per-tick cache.
+-- reserves resolution + surplus computation + per-tick cache.
 -- ---------------------------------------------------------------------------
 
 local reserves = require("scripts.reserves")
@@ -250,7 +250,7 @@ describe("stock.surplus end-to-end (stubbed reader, no engine)", function()
 end)
 
 -- ---------------------------------------------------------------------------
--- Task 2: demand reading -- unmet math, fleet flag, priority/shortfall sort.
+-- demand reading -- unmet math, fleet flag, priority/shortfall sort.
 -- ---------------------------------------------------------------------------
 
 local demand = require("scripts.demand")
@@ -340,7 +340,7 @@ describe("demand.build_open -- empty edges", function()
 end)
 
 -- ---------------------------------------------------------------------------
--- Task 3: fleet eligibility -- allow-list + idle/enrolled filter (pure).
+-- fleet eligibility -- allow-list + idle/enrolled filter (pure).
 -- (The registry's event wiring is engine-touching and verified by playtest.)
 -- ---------------------------------------------------------------------------
 
@@ -446,7 +446,7 @@ end)
 
 describe("fleet.enrolled_for_force -- Trade-tab Preferred-ship options", function()
   -- a mixed fleet: two forces, enrolled + un-enrolled, with and without a live
-  -- platform name handle. Keys are the force-qualified fleet keys (Task 7 shape).
+  -- platform name handle. Keys are the force-qualified fleet keys.
   local tbl = {
     ["1/3"] = { enrolled = true, force = 1, platform = { valid = true, name = "Aurora" } },
     ["1/1"] = { enrolled = true, force = 1 },                         -- no platform handle -> caption = id
@@ -475,7 +475,7 @@ describe("fleet.enrolled_for_force -- Trade-tab Preferred-ship options", functio
 end)
 
 -- ---------------------------------------------------------------------------
--- Task 4: schedule builder -- pure route -> records (load clamping, wide load,
+-- schedule builder -- pure route -> records (load clamping, wide load,
 -- 2-stop shape, wait-conditions, zero-manifest). The engine write-wrapper is
 -- verified by playtest.
 -- ---------------------------------------------------------------------------
@@ -618,7 +618,7 @@ describe("schedule.build_records -- 2-stop route + wait-conditions", function()
   -- wait conditions are scoped to the manifest items (per-item item_count), in
   -- stable item order, with the timeout OR-ed on -- never a whole-hold full/empty.
   -- The item_count first_signal carries (name, quality) decoded from the cargo
-  -- qkey (Task 11, #4d); a bare item-name key decodes to "normal".
+  -- qkey; a bare item-name key decodes to "normal".
   local function loaded(item, qty)
     return { type = "item_count", compare_type = "and",
       condition = { comparator = ">=",
@@ -650,7 +650,7 @@ describe("schedule.build_records -- 2-stop route + wait-conditions", function()
   assert_eq(dst.wait_conditions[1], hold_timeout, "final stop HOLDS on the timeout (watchdog clears the route)")
   assert_eq(dst.wait_conditions[2], nil, "no looping ==0 / inactivity conditions on the final stop")
 
-  -- the built manifest is exposed for the dispatcher's bookkeeping (Task 5)
+  -- the built manifest is exposed for the dispatcher's bookkeeping
   assert_eq(built.manifest, { ["iron-plate"] = 500, ["copper-plate"] = 200 },
     "manifest mirrors the source requests")
 end)
@@ -748,7 +748,7 @@ describe("schedule.write -- thin wrapper over the pure builder", function()
 end)
 
 -- ---------------------------------------------------------------------------
--- Task 5: dispatcher -- exportable() thrash guard, best-source selection,
+-- dispatcher -- exportable() thrash guard, best-source selection,
 -- ship pick, and the pure planner (wide load, no-double-claim, re-export,
 -- no-source / all-busy edges). The on_nth_tick wiring + real ship/schedule IO
 -- are verified by manual playtest.
@@ -1417,7 +1417,7 @@ describe("dispatcher.active_counts -- global + per-route tallies", function()
   assert_eq(next(br0), nil, "nil assignments -> empty per-route map")
 end)
 
-describe("dispatcher.plan -- max concurrent ships caps (Task 10)", function()
+describe("dispatcher.plan -- max concurrent ships caps", function()
   -- Two independent routes, each with its own source + idle ship: uncapped this
   -- plans two assignments.
   local function two_route_snapshot(extra)
@@ -1778,7 +1778,7 @@ describe("dispatcher.unserved_reason -- one branch per gate (diagnostic over the
 end)
 
 -- ---------------------------------------------------------------------------
--- Task 6: watchdog -- pure re-clamp amount, order-stable schedule signature,
+-- watchdog -- pure re-clamp amount, order-stable schedule signature,
 -- and deadline expiry. The watchdog loop itself (timeout / destroyed / player-
 -- edit / arrival re-clamp IO) is verified by manual playtest.
 -- ---------------------------------------------------------------------------
@@ -2217,7 +2217,7 @@ describe("watchdog.load_impossible -- abort a trip whose source ran dry", functi
 end)
 
 -- ---------------------------------------------------------------------------
--- Task 7: two-way return leg -- pure return-manifest selection (guarded,
+-- two-way return leg -- pure return-manifest selection (guarded,
 -- capacity-clamped), the 3-stop schedule it produces, the plan gate, and the
 -- two-sided return bookkeeping. The mid-flight IO is verified by manual playtest.
 -- ---------------------------------------------------------------------------
@@ -2454,7 +2454,7 @@ end)
 
 describe("watchdog.schedule_signature -- payload + allows_unloading are NOT signed (engine round-trip safety)", function()
   -- The 2.0 schedule readback does NOT return the item_count CircuitCondition
-  -- payload or `allows_unloading` verbatim, so signing them (the reverted Task 5
+  -- payload or `allows_unloading` verbatim, so signing them (the reverted earlier
   -- behavior) falsely withdrew EVERY mod ship the tick after dispatch -- which
   -- cleared its hub request and stalled all deliveries (playtest 2026-06-10). The
   -- signature therefore IGNORES them: a wait-quantity / unload-flag / comparator /
@@ -2645,7 +2645,7 @@ describe("two-way return bookkeeping balances (inbound + committed surplus)", fu
 end)
 
 -- ---------------------------------------------------------------------------
--- Task 8: monitor view model (pure builders + reason classifier + filters)
+-- monitor view model (pure builders + reason classifier + filters)
 -- ---------------------------------------------------------------------------
 
 local viewmodel = require("scripts.viewmodel")
@@ -2741,7 +2741,7 @@ describe("build: roster/state mapping + summary counts", function()
   assert_eq(view.shipments[1].ticks_left, 300, "ticks_left = 500 - 200")
 end)
 
-describe("build: roster 'held' flag (ready-signal gate, Task 6)", function()
+describe("build: roster 'held' flag (ready-signal gate)", function()
   -- gather stamps `held` onto the fleet entry (idle + gated + signal 0); build
   -- carries it to the roster row as a display-only flag. It is ROW-only -- a held
   -- ship still counts in summary.ships_idle (disjointness deferred per the plan).
@@ -2951,7 +2951,7 @@ describe("group_demand: two-way return leg surfaces by stop (progress_index + ph
 end)
 
 -- ---------------------------------------------------------------------------
--- viewmodel ETA (Task 8 -- Monitor in-flight ETA from the measured progress-rate)
+-- viewmodel ETA (Monitor in-flight ETA from the measured progress-rate)
 -- ---------------------------------------------------------------------------
 
 describe("viewmodel.remaining_eta: current-leg progress-rate math", function()
@@ -3169,7 +3169,7 @@ describe("apply_filters: planet / item / state narrowing", function()
 end)
 
 -- ---------------------------------------------------------------------------
--- viewmodel.build_node_readout (Task 9 -- Trade tab "This planet now")
+-- viewmodel.build_node_readout (Trade tab "This planet now")
 -- ---------------------------------------------------------------------------
 
 describe("viewmodel.build_node_readout", function()
@@ -3233,9 +3233,9 @@ describe("build: alerts newest-first, display-capped, full count in summary", fu
   assert_eq(view.summary.alerts, 25, "summary reports the full backlog, not the capped display")
 end)
 
-describe("apply_force_scope: keeps only the viewing force's rows + nil-force rows (Task 8)", function()
+describe("apply_force_scope: keeps only the viewing force's rows + nil-force rows", function()
   -- A hand-built two-force world (force "a" vs "b") across every projected list,
-  -- plus one nil-force row in each (a pre-Task-8 save). Scoping to "a" must keep
+  -- plus one nil-force row in each (an older save). Scoping to "a" must keep
   -- a's rows AND the nil-force rows, drop b's; the lists stay in their input order.
   local world = {
     fleet = {
@@ -3300,7 +3300,7 @@ describe("apply_force_scope: keeps only the viewing force's rows + nil-force row
     "nil force_key: every row kept")
 end)
 
-describe("apply_force_scope: nil-force rows visible to EVERY viewer (Task 8)", function()
+describe("apply_force_scope: nil-force rows visible to EVERY viewer", function()
   -- A world holding ONLY nil-force rows: every viewer (any force key) sees all of
   -- them -- the pre-existing-save self-heal guarantee.
   local world = {
@@ -3560,7 +3560,7 @@ describe("watchdog.raise_alert caps the stored backlog (oldest evicted)", functi
 end)
 
 -- ---------------------------------------------------------------------------
--- Task 8: quality compound-key helper -- (item, quality) <-> "item@quality"
+-- quality compound-key helper -- (item, quality) <-> "item@quality"
 -- round-trip. Stable string keys keep the decision maps sortable for
 -- state.sorted_pairs determinism. Pure module, no engine globals.
 -- ---------------------------------------------------------------------------
@@ -3636,7 +3636,7 @@ describe("qkey keys sort stably (state.sorted_keys determinism)", function()
 end)
 
 -- ---------------------------------------------------------------------------
--- Task 9: quality threaded through demand + stock reads (#4b). Demand and
+-- quality threaded through demand + stock reads. Demand and
 -- surplus are now keyed by qkey(item, quality); the fleet-flag/priority overlay
 -- AND the reserve floor stay keyed by bare item NAME (decoded via qparse), so a
 -- config for an item applies to ALL of its qualities. compute_unmet/build_open
@@ -3718,7 +3718,7 @@ describe("stock.surplus -- per-quality stock pool, reserve floor shared by item 
 end)
 
 -- ---------------------------------------------------------------------------
--- Task 10: quality threaded through plan + manifest + bookkeeping (#4c). The
+-- quality threaded through plan + manifest + bookkeeping. The
 -- dispatcher's decision maps (surplus, unmet_by_item, the manifest, the commit
 -- maps) are now keyed by qkey(item, quality). The keys are opaque strings, so
 -- exportable/best_source/plan/return_manifest carry quality through unchanged;
@@ -3847,7 +3847,7 @@ describe("plan bookkeeping -- commit maps are uniformly qkey-keyed (forward + re
 end)
 
 -- ---------------------------------------------------------------------------
--- Task 11: quality threaded through the schedule WRITE seam (#4d). The manifest
+-- quality threaded through the schedule WRITE seam. The manifest
 -- stays keyed by the OPAQUE cargo qkey, but the engine-facing wait conditions
 -- (item_count first_signal) DECODE the qkey to {name, quality} -- a different
 -- quality variant of the same item gates on its own item_count. (The set_slot /
@@ -3891,7 +3891,7 @@ describe("schedule.build_records -- quality-tagged requests decode at the wait s
 end)
 
 -- ---------------------------------------------------------------------------
--- Task 12: quality threaded through the monitor + Trade-tab view models,
+-- quality threaded through the monitor + Trade-tab view models,
 -- overlays, and filters (#4e). The view-model cargo keys are qkey(item, quality);
 -- the pure builders carry them OPAQUELY and DECODE at the display/filter
 -- boundary, while the fleet-toggle/priority overlay stays keyed by bare item NAME
@@ -3991,7 +3991,7 @@ describe("apply_filters -- a bare item-NAME filter matches EVERY quality (qkey d
   assert_eq(#bynone.waiting, 0, "no waiting row needs stone")
 end)
 
-describe("Trade-tab overlay round-trips by item NAME across qualities (Task 12)", function()
+describe("Trade-tab overlay round-trips by item NAME across qualities", function()
   local q = qkey.qkey
   -- render_imports reads qkey'd request rows but GROUPS them by bare item NAME and
   -- keys its fleet-toggle / priority widgets by that NAME (the overlay is

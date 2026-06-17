@@ -46,7 +46,7 @@ function common.planet_box(parent, name)
 end
 
 -- ---------------------------------------------------------------------------
--- shared render component: items (icon + name, and compact icon chips)
+-- shared render component: items (icon + name)
 -- ---------------------------------------------------------------------------
 
 -- The rich-text item icon tag for a cargo `key` (a compound `qkey(item, quality)`):
@@ -75,33 +75,6 @@ function common.item_box(parent, key)
     caption = { "", item_tag(name, quality) .. " ", nice }
   end
   return parent.add({ type = "label", caption = caption })
-end
-
--- A compact run of item ICONS with counts as a single rich-text string:
--- "[item=iron-plate]×200 [item=copper-plate]×100". `qty_by_key` is { [qkey]=count }.
--- Sorted by qkey (string sort -> deterministic across peers / save-load). Returns
--- nil for an empty / nil map so callers can skip the cell.
---
--- NOTE: not currently called -- the shared item-chip renderer kept ready for the
--- upcoming cargo view (the Demand section shows status counts, not chips).
-function common.item_chips(qty_by_key)
-  if not qty_by_key then
-    return nil
-  end
-  local keys = {}
-  for k in pairs(qty_by_key) do
-    keys[#keys + 1] = k
-  end
-  if #keys == 0 then
-    return nil
-  end
-  table.sort(keys)
-  local parts = {}
-  for _, k in ipairs(keys) do
-    local name, quality = qkey.qparse(k)
-    parts[#parts + 1] = item_tag(name, quality) .. "×" .. tostring(qty_by_key[k])
-  end
-  return table.concat(parts, " ")
 end
 
 -- Walk `el`'s ancestry upward and return the first ancestor (or `el` itself)

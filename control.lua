@@ -43,7 +43,7 @@ script.on_configuration_changed(function(event)
 end)
 
 -- ---------------------------------------------------------------------------
--- registry event wiring (Task 3)
+-- registry event wiring
 --
 -- The registry is maintained incrementally so the dispatcher never scans all
 -- entities. Build/revive events add pads + platform hubs; mine/death events
@@ -85,7 +85,7 @@ for _, removed_event in ipairs({
   script.on_event(removed_event, on_registry_removed, registry_entity_filter)
 end
 
--- A surface (planet) is about to be deleted (Task 6). We hook the PRE event, not
+-- A surface (planet) is about to be deleted. We hook the PRE event, not
 -- on_surface_deleted: by the time the post event fires the stored node.surface
 -- handle is already invalid and can't be matched against event.surface_index. In
 -- the pre-event the surface is still valid, so the registry can prune every node
@@ -111,7 +111,7 @@ script.on_event(defines.events.on_space_platform_changed_state, function(event)
   registry.add_platform(event.platform)
 end)
 
--- Dispatch + watchdog + Monitor-ETA cadences (Task 11; ETA cadence is v1.3). Three
+-- Dispatch + watchdog + Monitor-ETA cadences. Three
 -- periods drive the on_nth_tick handlers:
 --   * dispatch  -- `dispatcher.run` on its configurable interval (`dispatcher.interval()`)
 --   * watchdog  -- `watchdog.run` on its own constant cadence (`watchdog.INTERVAL`, 5s)
@@ -207,7 +207,7 @@ script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
 end)
 
 -- ---------------------------------------------------------------------------
--- GUI wiring (Task 8/9): fleet Monitor + entity-GUI overlays
+-- GUI wiring: fleet Monitor + entity-GUI overlays
 --
 -- The fleet Monitor is a `gui.screen` panel opened from a top-bar shortcut; it
 -- re-renders on filter changes and the dispatcher tick. All shaping is in the pure

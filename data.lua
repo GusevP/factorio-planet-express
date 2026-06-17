@@ -2,7 +2,7 @@
 --
 -- The "Interplanetary Trade Logistics" technology is the single gate for the
 -- whole mod: the Trade tab on the landing pad GUI and per-platform fleet
--- enrollment both check `force.technologies[...].researched`. Task 8 adds the
+-- enrollment both check `force.technologies[...].researched`. It also adds the
 -- top-bar shortcut that opens the fleet Monitor.
 
 data:extend({
@@ -33,7 +33,7 @@ data:extend({
     },
     order = "e-k-z[planet-express]",
   },
-  -- Top-bar shortcut that opens/closes the fleet Monitor (Task 8). `small_icon`
+  -- Top-bar shortcut that opens/closes the fleet Monitor. `small_icon`
   -- is mandatory for shortcuts in 2.0, so we reuse the single 32x32 asset for
   -- both slots. Both *_size fields must be set to 32: they default to 64, which
   -- would make the engine read a 64x64 rect out of the 32x32 png and fail load.

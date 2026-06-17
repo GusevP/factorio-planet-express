@@ -1,7 +1,7 @@
 -- scripts/watchdog.lua
 --
 -- The robustness layer: it watches every in-flight assignment and enforces the
--- three invariants from the plan that the happy-path dispatcher (Task 5) does
+-- three invariants from the plan that the happy-path dispatcher does
 -- not.
 --
 --   (1) every wait-condition has a timeout  -> per-assignment `deadline_tick`;
@@ -21,11 +21,11 @@
 --   * no-progress timeout (fuel starvation / stranded)  -> free + alert.
 --   * player edited the schedule mid-flight             -> withdraw + free.
 --   * re-clamp on the load stop: while the ship sits on a LOAD stop (the source
---     for the forward leg, the destination for the Task-7 return leg), lower its
+--     for the forward leg, the destination for the two-way return leg), lower its
 --     per-stop request to the CURRENT surplus so a stock drop since dispatch
 --     can't strip-mine that planet below its reserve.
 --   * partial fill: the ship leaves with whatever loaded (its source stop waits
---     on "cargo FULL or timeout", Task 4); on delivery the assignment completes
+--     on "cargo FULL or timeout"); on delivery the assignment completes
 --     and clears its inbound_commit, so any remaining shortfall re-opens and is
 --     reconsidered next dispatcher tick (self-correction via recomputed unmet).
 --     No mid-flight bookkeeping needed -- it falls out of completion.
@@ -81,7 +81,7 @@ end
 -- the periods coincide.
 watchdog.INTERVAL = 300 -- 5s at 60 UPS
 
--- Alert kinds recorded in `storage.alerts` for the monitor GUI (Task 8).
+-- Alert kinds recorded in `storage.alerts` for the monitor GUI.
 watchdog.ALERT_DESTROYED = "ship_destroyed"
 watchdog.ALERT_TIMEOUT = "timeout"
 watchdog.ALERT_PLAYER_EDIT = "player_edit"
@@ -97,7 +97,7 @@ watchdog.ALERT_READY_HELD = "ready_held"
 watchdog.MAX_ALERTS = 100
 
 -- No-progress deadline window (ticks) fallback. The dispatcher stamps the real
--- window on each assignment (`deadline_window`); this covers pre-Task-6 saves.
+-- window on each assignment (`deadline_window`); this covers older saves.
 -- It must exceed a single leg's travel PLUS the per-stop wait timeout, because
 -- `schedule.current` only advances at a stop boundary (it is the index of the
 -- current DESTINATION, not an arrival flag), so a long inter-planet leg shows no
@@ -222,7 +222,7 @@ function watchdog.reclamp_amount(old, current_surplus)
 end
 
 -- Has this assignment's no-progress deadline passed? Pure. A nil deadline never
--- expires (defensive -- every assignment is created with one in Task 5).
+-- expires (defensive -- every assignment is created with one).
 function watchdog.expired(deadline_tick, tick)
   if not deadline_tick then
     return false
@@ -343,7 +343,7 @@ end
 -- It DELIBERATELY does NOT sign the `item_count` condition payload (comparator /
 -- first_signal / constant) or `allows_unloading`: in-engine those do NOT round-trip
 -- verbatim -- the readback normalizes allows_unloading and the circuit-condition
--- fields differently than the mod wrote them -- so signing them (Task 5) made EVERY
+-- fields differently than the mod wrote them -- so signing them made EVERY
 -- mod ship mismatch its own schedule the tick after dispatch and be falsely
 -- withdrawn as a "player edit", which cleared its hub request and stalled ALL
 -- deliveries (playtest 2026-06-10). A player RE-ROUTING the ship still changes the
@@ -464,8 +464,8 @@ function watchdog.free_assignment(id, reason, ship_state, tick)
       ship = a.ship,
       source = a.source_planet,
       dest = a.dest_planet,
-      -- The assignment's force key (Task 8): lets the Monitor scope this alert to
-      -- the owning force. Nil on pre-Task-8 assignments -> the alert is visible to
+      -- The assignment's force key: lets the Monitor scope this alert to
+      -- the owning force. Nil on older assignments -> the alert is visible to
       -- all viewers (apply_force_scope keeps nil-force rows for everyone).
       force = a.force,
     })
@@ -509,7 +509,7 @@ end
 
 -- Did the player (or another mod) change a schedule the mod owns? Compares the
 -- live signature to the one stored at write time. No stored signature (e.g. a
--- pre-Task-6 save) or an unreadable live schedule => not accused.
+-- older save) or an unreadable live schedule => not accused.
 function watchdog.player_edited(a, platform)
   if not a.schedule_signature then
     return false
@@ -770,7 +770,7 @@ end
 -- reserve. `schedule.current` is only the index of the current DESTINATION -- it
 -- covers BOTH the transit toward a stop AND parking on it, NOT the instant of
 -- arrival -- so rather than re-clamp once "on arrival" we re-clamp EVERY tick the
--- ship is on a load stop: the forward load at the source (stop 1) and the Task-7
+-- ship is on a load stop: the forward load at the source (stop 1) and the two-way
 -- return load at the destination TURNAROUND (stop 2). Lower-only and idempotent
 -- when surplus is steady; an over-correction on a transient dip simply under-loads
 -- and re-opens next dispatcher tick. Runs after note_progress in the tick loop.
@@ -793,7 +793,7 @@ function watchdog.maybe_reclamp(a, platform, id)
       a.surplus_commit = m
     end)
   elseif current == 2 and a.return_manifest and next(a.return_manifest) ~= nil then
-    -- return leg (Task 7): the destination turnaround stop loads the return cargo,
+    -- return leg: the destination turnaround stop loads the return cargo,
     -- so honor the DESTINATION reserve here -- a stock drop at the destination
     -- before the ship loads could otherwise export it below its own reserve.
     reclamp_leg(a, platform, id, a.dest, a.dest_planet, a.return_manifest, function(m)

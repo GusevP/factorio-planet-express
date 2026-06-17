@@ -26,11 +26,11 @@
 -- engine globals -- so it loads and runs under plain `lua` and is unit-tested.
 -- The WRITERS mutate `storage.fleet`; the Fleet-tab GUI (gui/fleet_tab.lua)
 -- calls the enrollment writers, and the dispatcher/watchdog drive the
--- state/assignment writers. The registry (Task 3) creates the entries.
+-- state/assignment writers. The registry creates the entries.
 
 local fleet = {}
 
--- Ship lifecycle states. `withdrawn` is the player-wins escape hatch (Task 6):
+-- Ship lifecycle states. `withdrawn` is the player-wins escape hatch:
 -- a ship whose schedule the player edited is parked here until it goes idle so
 -- the dispatcher stops fighting them.
 fleet.IDLE = "idle"
@@ -39,7 +39,7 @@ fleet.LOADING = "loading"
 fleet.UNLOADING = "unloading"
 fleet.WITHDRAWN = "withdrawn"
 
--- The single mod gate (Task 10): a platform can only be enrolled once its force
+-- The single mod gate: a platform can only be enrolled once its force
 -- has researched "Interplanetary Trade Logistics" -- the same technology that
 -- gates the Trade tab. This is the SINGLE source of truth: the Trade tab aliases
 -- `fleet.TECH` / `fleet.tech_researched` so all three GUIs gate identically.
@@ -145,7 +145,7 @@ function fleet.allowed_from_selection(all_planets, allowed_set)
 end
 
 -- The enrolled, same-force ships offered as "Preferred ship" pins on the Trade
--- tab (Task 9). Returns a SORTED list of `{ id, caption }` (sorted by the fleet
+-- tab. Returns a SORTED list of `{ id, caption }` (sorted by the fleet
 -- key id -- a stable string, so the dropdown renders identically on every client
 -- and the GUI can map a `selected_index` back to the key deterministically).
 -- Only entries that are enrolled AND belong to `force_key` are offered; an
@@ -208,7 +208,7 @@ end
 -- Enroll / un-enroll a platform in the fleet. Enrollment is strictly opt-in:
 -- the dispatcher only ever touches enrolled, idle ships.
 --
--- Gated behind the technology (Task 10): a platform cannot be ENROLLED until its
+-- Gated behind the technology: a platform cannot be ENROLLED until its
 -- force has researched "Interplanetary Trade Logistics". Un-enrolling is always
 -- allowed (so a ship can be released even if the gate somehow regressed). The
 -- check is skipped when the entry carries no live platform/force handle (the

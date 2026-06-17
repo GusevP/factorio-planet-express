@@ -75,7 +75,7 @@ end
 
 -- Pure: build the source manifest by packing `items` (already in the caller's
 -- priority order) into a SLOT budget. `slot_budget` is a hub-inventory slot count
--- (Task 6 made ship capacity a slot count, not an item count); each item consumes
+-- (ship capacity is a slot count, not an item count); each item consumes
 -- `ceil(load / stack_size)` slots. Two passes so one high-demand item can't
 -- monopolize a tight hold and starve the rest -- the planet asked for many items,
 -- so a single trip should carry many:
@@ -91,9 +91,9 @@ end
 --
 -- `items` is a list of plain tables { item = <key>, surplus = N, unmet = N,
 -- stack_size = N|nil } (missing stack_size defaults to DEFAULT_STACK_SIZE). The
--- `item` field is the dispatcher's cargo key -- a `qkey(item, quality)` (Task 10,
--- #4c) -- carried through OPAQUELY: the packer keys the manifest by it but never
--- decodes it (the engine write decodes qkey -> name+quality at the seam, Task 11).
+-- `item` field is the dispatcher's cargo key -- a `qkey(item, quality)` --
+-- carried through OPAQUELY: the packer keys the manifest by it but never
+-- decodes it (the engine write decodes qkey -> name+quality at the seam).
 -- `stack_size` is a per-NAME property the dispatcher supplies, so the slot math is
 -- quality-independent.
 function schedule.build_manifest(items, slot_budget)
@@ -154,8 +154,8 @@ end
 -- ---------------------------------------------------------------------------
 
 -- Decode a manifest cargo `key` (a `qkey(item, quality)`) into the engine
--- `item_count` signal it gates on -- `{ type = "item", name, quality }` (Task 11,
--- #4d). The manifest is keyed by the OPAQUE qkey, but an `item_count` wait
+-- `item_count` signal it gates on -- `{ type = "item", name, quality }`. The
+-- manifest is keyed by the OPAQUE qkey, but an `item_count` wait
 -- condition reads a SPECIFIC quality variant of an item, so the signal must carry
 -- both name and quality (normal- and uncommon-quality iron count independently).
 -- A bare item-name key decodes to "normal" so legacy/quality-agnostic manifests
@@ -306,10 +306,10 @@ end
 --     capacity = <ship cargo capacity, in SLOTS (hub inventory slot count)>,
 --     timeout  = <ticks for the wait-condition timeout>,
 --     items    = { { item, surplus, unmet, stack_size }, ... },  -- priority order
---     return_manifest = { [item] = qty } | nil }      -- Task 7 (two-way return)
+--     return_manifest = { [item] = qty } | nil }      -- two-way return
 -- Every `item` key here is the dispatcher's cargo key, a `qkey(item, quality)`
--- (Task 10, #4c), carried OPAQUELY through the records; the engine write decodes
--- it to a real item name + quality at the seam (apply_hub_request, Task 11).
+--, carried OPAQUELY through the records; the engine write decodes
+-- it to a real item name + quality at the seam (apply_hub_request).
 --
 -- Returns a table { records = {...}, manifest = { [item] = qty },
 -- return_manifest = { [item] = qty } | nil } where `records` is the engine-
@@ -322,7 +322,7 @@ end
 -- meant to take the cargo. (Defaulting it on every stop reads confusingly --
 -- "Unload" on a load stop -- and lets a source pad tug a freshly-loaded hold.)
 --
--- Two-way return leg (Task 7): when `return_manifest` is non-empty the route is
+-- Two-way return leg: when `return_manifest` is non-empty the route is
 -- THREE stops in the SAME TWO PLANETS:
 --   source(load fwd) -> dest(TURNAROUND: pad pulls fwd while return loads) -> source(drop return).
 -- The destination is ONE turnaround stop, not an unload-then-reload pair: the hub
@@ -492,7 +492,7 @@ function schedule.apply_hub_request(platform, manifest, import_from)
   -- min is the requested amount, import_from scopes it to the source planet.
   -- The manifest is keyed by the OPAQUE cargo qkey; DECODE it here -- this is the
   -- engine-write seam -- so the filter requests the exact (name, quality) variant
-  -- (Task 11, #4d). A bare item-name key decodes to "normal".
+  --. A bare item-name key decodes to "normal".
   local filters = {}
   for item, qty in state.sorted_pairs(manifest) do
     local name, quality = qkey.qparse(item)

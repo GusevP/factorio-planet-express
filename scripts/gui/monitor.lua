@@ -1,6 +1,6 @@
 -- scripts/gui/monitor.lua
 --
--- The fleet-wide monitoring panel (Task 8). Opened/closed from a top-bar
+-- The fleet-wide monitoring panel. Opened/closed from a top-bar
 -- shortcut; shows the roster, active shipments, waiting demand (with the reason
 -- it is stuck), alerts, and a one-line network summary. Lightweight filters
 -- (planet / item / state) narrow the lists; clicking a ship recenters the view
@@ -168,8 +168,7 @@ local function render_body(body, view)
   else
     -- Two columns: a wide name button (recenters on click) + one info flow reading
     -- "[from] -> [to] · <status> on [planet]". Cargo is intentionally NOT shown for
-    -- now (the manifest still rides on the row for the item filter; the shared
-    -- `common.item_chips` renderer is ready for an upcoming cargo view).
+    -- now (the manifest still rides on the row for the item filter).
     local t = body.add({ type = "table", column_count = 2 })
     for _, r in ipairs(view.roster) do
       -- The fleet key is a force-qualified string ("<force>/<index>"); a "/" is

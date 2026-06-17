@@ -210,7 +210,7 @@ function fleet_tab.open(player, entity)
   end
   -- The fleet id is the force-qualified registry key (registry.fleet_key reads
   -- platform.force internally), NOT the bare platform.index -- that is the key the
-  -- registry/dispatcher/storage.fleet use post-migration (Task 7).
+  -- registry/dispatcher/storage.fleet use post-migration.
   local id = registry.fleet_key(platform)
   local entry = id and fleet.get(id)
   if not entry then

@@ -1,6 +1,6 @@
 -- scripts/viewmodel.lua
 --
--- Pure view-model builders for the fleet monitor GUI (Task 8). The GUI itself
+-- Pure view-model builders for the fleet monitor GUI. The GUI itself
 -- (scripts/gui/monitor.lua) is dumb render code; ALL the shaping logic lives
 -- here as pure functions over plain tables so it is unit-tested under plain
 -- `lua` with no engine globals (the same pure-function seam the rest of the mod
@@ -110,7 +110,7 @@ function viewmodel.classify_waiting(candidates, min_trip, in_transit)
 end
 
 -- ---------------------------------------------------------------------------
--- pure in-flight ETA (Task 8 -- Monitor display)
+-- pure in-flight ETA (Monitor display)
 -- ---------------------------------------------------------------------------
 
 -- Minimum trustworthy progress-rate (Δdistance per tick, where `distance` is the
@@ -222,7 +222,7 @@ function viewmodel.build(world)
         name = e.name, -- platform name for display (nil under the pure test runner)
         state = e.state,
         stranded = e.stranded == true,
-        held = e.held == true, -- ready-signal "held" (Task 6); ROW-only display label
+        held = e.held == true, -- ready-signal "held"; ROW-only display label
         location = e.location, -- planet the ship is currently AT (nil in transit)
         from = a and a.source_planet or nil,
         to = a and a.dest_planet or nil,
@@ -518,7 +518,7 @@ function viewmodel.group_demand(shipments, waiting)
 end
 
 -- ---------------------------------------------------------------------------
--- pure per-node "this planet now" readout (Task 9 Trade tab)
+-- pure per-node "this planet now" readout (Trade tab)
 -- ---------------------------------------------------------------------------
 
 -- Build the "This planet now" readout for a single trade node from a plain
@@ -847,7 +847,7 @@ function viewmodel.gather(tick)
   end
 
   -- Per-ship readiness verdict from the SAME snapshot build_snapshot already
-  -- computed (no third hub read here -- reuse Task 4's stamp). Keyed by fleet id;
+  -- computed (no third hub read here -- reuse the snapshot's stamp). Keyed by fleet id;
   -- only gated ships carry an explicit `false`, so absent/`true` means ready.
   local ready_by_id = {}
   for _, s in ipairs(snapshot.ships or {}) do
@@ -863,12 +863,12 @@ function viewmodel.gather(tick)
       assignment = entry.assignment,
       enrolled = entry.enrolled,
       stranded = entry.stranded, -- watchdog's stuck flag -> summary.ships_stuck
-      -- Ready-signal "held" (Task 6): an idle, gated ship whose hub reads
+      -- Ready-signal "held": an idle, gated ship whose hub reads
       -- `planet-express-ready <= 0` is held back from dispatch -- a distinct roster
       -- label so it isn't mistaken for a missing ship. Reuses the snapshot's
       -- `ready` verdict (no extra read); display-only (the gate already applied).
       held = entry.require_ready == true and entry.state == fleet.IDLE and ready_by_id[id] == false,
-      force = entry.force, -- force stamp (Task 7) for Monitor scoping
+      force = entry.force, -- force stamp for Monitor scoping
       -- Display-only (Monitor roster): the ship's platform name + the planet it is
       -- currently parked at (nil in transit, via the existing space_location seam).
       name = (entry.platform and entry.platform.valid and entry.platform.name) or nil,
@@ -985,8 +985,8 @@ function viewmodel.gather(tick)
   }
 end
 
--- Snapshot the live "this planet now" world for a single trade `node` (Task 9
--- Trade tab). Reuses the dispatcher's per-tick snapshot so the readout matches
+-- Snapshot the live "this planet now" world for a single trade `node` (Trade
+-- tab). Reuses the dispatcher's per-tick snapshot so the readout matches
 -- exactly what the dispatcher would see this tick:
 --   * demand  = the node's open demand (priority-sorted, inbound already netted),
 --   * surplus = its GUARDED exportable surplus (only items some node demands AND
