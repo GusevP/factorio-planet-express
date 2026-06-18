@@ -101,6 +101,18 @@ function dispatcher.exportable(node, item)
   if not node then
     return 0
   end
+  -- A planet physically SHORT of an item it requests is NEVER a source for it --
+  -- even when an in-flight delivery has already netted its `unmet` to 0, it still
+  -- HOLDS less than it asked for, so exporting would strip stock it is itself
+  -- waiting on (the ship then parks where nothing launches and times out). The
+  -- gross-import map is inbound-independent (`max(0, requested - on_hand)`), so it
+  -- stays positive while the planet is short -- unlike `unmet_by_item`, which inbound
+  -- netting drives to 0. Checked FIRST: gross shortfall >= netted unmet pointwise, so
+  -- this subsumes the unmet test, but both are kept for clarity. See demand.import_map.
+  local short = node.import_by_item and node.import_by_item[item] or 0
+  if short > 0 then
+    return 0
+  end
   local unmet = node.unmet_by_item and node.unmet_by_item[item] or 0
   if unmet > 0 then
     return 0
@@ -478,18 +490,55 @@ function dispatcher.return_manifest(snapshot, source_id, dest_id, capacity)
   for _, d in ipairs(return_dest.demand) do
     local avail = dispatcher.exportable(return_src, d.item)
     if avail > 0 then
-      -- carry stack_size through (set by build_snapshot) so the slot-aware packer
-      -- sizes the return cargo too; `capacity` here is the ship's slot budget.
-      items[#items + 1] = { item = d.item, surplus = avail, unmet = d.unmet, stack_size = d.stack_size }
+      -- carry stack_size + perishable through (set by build_snapshot) so the
+      -- slot-aware packer sizes the return cargo and perishable_filter can isolate
+      -- perishables on the return leg too; `capacity` here is the ship's slot budget.
+      items[#items + 1] = { item = d.item, surplus = avail, unmet = d.unmet,
+        stack_size = d.stack_size, perishable = d.perishable }
     end
   end
 
-  return schedule.build_manifest(items, capacity)
+  -- Isolate perishables on the return leg too (same load-time rationale as the
+  -- forward leg) -- see dispatcher.perishable_filter.
+  return schedule.build_manifest(dispatcher.perishable_filter(items), capacity)
 end
 
 -- ---------------------------------------------------------------------------
 -- pure planner
 -- ---------------------------------------------------------------------------
+
+-- Pure: ISOLATE perishables onto their own trip. If ANY candidate item is
+-- perishable, return ONLY the perishable items; otherwise return the list
+-- unchanged. The source stop's load-wait is an AND of every manifest item's
+-- `item_count` (schedule.load_wait), so a perishable bundled with slow bulk cargo
+-- rides the 300s timeout -- spoiling aboard -- until that bulk finishes loading.
+-- Loading the perishables ALONE makes the wait gate on the fast perishables, so the
+-- ship departs the moment they are aboard (the timeout stays only as the invariant-#1
+-- backstop; we just stop perishables from hitting it). `items` is ALREADY scoped to
+-- what the chosen source can EXPORT (callers filter by exportable surplus first), so a
+-- source that can't supply the perishable simply has none in `items` and ships its
+-- normal load -- the perishable then waits for a tick whose chosen source bears it,
+-- and is never starved. Order-preserving (keeps the caller's priority order). Pure
+-- over the items list -- the `perishable` flag is tagged in build_snapshot.
+function dispatcher.perishable_filter(items)
+  local any = false
+  for _, it in ipairs(items) do
+    if it.perishable then
+      any = true
+      break
+    end
+  end
+  if not any then
+    return items
+  end
+  local out = {}
+  for _, it in ipairs(items) do
+    if it.perishable then
+      out[#out + 1] = it
+    end
+  end
+  return out
+end
 
 -- Plan this tick's assignments over a plain SNAPSHOT, deterministically and with
 -- no IO. Iterates destinations in stable id order; each destination's demand is
@@ -512,7 +561,8 @@ end
 --   two_way = bool,  -- two-way gate (set by build_snapshot from the setting)
 --   nodes = { [node_id] = { id, planet, demand = {{item,unmet,priority,stack_size},...},
 --                           surplus = { [qkey]=qty },        -- working (mutated)
---                           unmet_by_item = { [qkey]=qty },  -- guard input
+--                           unmet_by_item = { [qkey]=qty },  -- netted demand
+--                           import_by_item = { [qkey]=qty },  -- gross shortfall (export guard)
 --                           pin = <fleet key>|nil } },       -- Trade-tab "Preferred ship"
 --   ships = { { id, entry, capacity, planet }, ... },  -- planet: where the ship
 --                           is parked now (nil in transit), for no-deadhead pick
@@ -603,12 +653,18 @@ function dispatcher.plan(snapshot)
           for _, d in ipairs(dnode.demand) do
             local avail = dispatcher.exportable(source, d.item)
             if avail > 0 then
-              -- carry stack_size through (set by build_snapshot) so the
-              -- slot-aware packer sizes each item; `capacity` here is the ship's
-              -- slot budget.
-              items[#items + 1] = { item = d.item, surplus = avail, unmet = d.unmet, stack_size = d.stack_size }
+              -- carry stack_size + perishable through (set by build_snapshot) so the
+              -- slot-aware packer sizes each item and perishable_filter can isolate
+              -- perishables; `capacity` here is the ship's slot budget.
+              items[#items + 1] = { item = d.item, surplus = avail, unmet = d.unmet,
+                stack_size = d.stack_size, perishable = d.perishable }
             end
           end
+          -- Isolate perishables onto their own fast trip BEFORE packing, so they
+          -- don't ride the 300s load-wait beside slow bulk cargo and spoil aboard.
+          -- Reassigned in place so the stored plan `items` (re-packed by
+          -- schedule.build_records at write time) matches this manifest exactly.
+          items = dispatcher.perishable_filter(items)
 
           local manifest = schedule.build_manifest(items, ship.capacity)
           local rkey = dispatcher.route_key(s_id, d_id)
@@ -789,6 +845,27 @@ function dispatcher.stack_size_of(name)
   return dispatcher.DEFAULT_STACK_SIZE
 end
 
+-- [provisional] Is `name` a PERISHABLE item -- one that spoils over time (food,
+-- biter eggs, ...)? Reads the prototype's spoil time via `get_spoil_ticks()` (2.0:
+-- a METHOD on LuaItemPrototype returning 0 for non-perishables; its optional quality
+-- arg only scales the DURATION, never WHETHER it spoils, so we pass none and test
+-- `> 0`). We deliberately never read the spoil DURATION: surviving the trip is the
+-- player's concern (a faster ship), so the mod only needs the perishable/not bit.
+-- Quality-independent (perishability is a per-NAME property), so the caller decodes
+-- the qkey to a bare name first -- mirrors stack_size_of. Returns false when
+-- `prototypes` is absent (the pure-Lua test runner) or the item has no prototype, so
+-- callers degrade to "not perishable" and tests are unaffected. Confirm the in-engine
+-- accessor before flipping the api-notes seam.
+function dispatcher.perishable_of(name)
+  if prototypes and prototypes.item then
+    local proto = prototypes.item[name]
+    if proto and proto.get_spoil_ticks then
+      return proto.get_spoil_ticks() > 0
+    end
+  end
+  return false
+end
+
 -- Runtime-global setting reads go through the shared, fallback-guarded
 -- `state.setting` (it floors numeric values, so the integer caps/interval below
 -- stay integers, and degrades to the module default when `settings` is absent --
@@ -825,7 +902,7 @@ function dispatcher.build_snapshot(_tick)
     local entity_ok = not (node.entity and node.entity.valid == false)
     local surface_ok = not (node.surface and node.surface.valid == false)
     if entity_ok and surface_ok then
-      local open = demand.open_demand(node)
+      local open, import_by_item = demand.open_demand(node)
       local unmet_by_item = {}
       for _, d in ipairs(open) do
         unmet_by_item[d.item] = d.unmet
@@ -838,6 +915,10 @@ function dispatcher.build_snapshot(_tick)
         -- decode to the bare item name before the prototype read.
         local name = qkey.qparse(d.item)
         d.stack_size = dispatcher.stack_size_of(name)
+        -- IO read: tag perishability (per-NAME, quality-independent) so the pure
+        -- planner can isolate perishables onto their own fast trip without touching
+        -- `prototypes`. See dispatcher.perishable_filter.
+        d.perishable = dispatcher.perishable_of(name)
       end
       nodes[id] = {
         id = id,
@@ -846,6 +927,11 @@ function dispatcher.build_snapshot(_tick)
         force = dispatcher.force_key(node.force),
         demand = open,
         unmet_by_item = unmet_by_item,
+        -- Gross physical shortfall per item (pre-inbound) -- the export thrash
+        -- guard's real input, so a planet short on an item it requested is never
+        -- chosen as the source for it even once an in-flight delivery nets its
+        -- `unmet` to 0. See demand.import_map / dispatcher.exportable.
+        import_by_item = import_by_item or {},
         surplus = {},
         -- The "Preferred ship" pin set on the Trade tab: a fleet key
         -- string | nil. This is the PRODUCER for the `dest.pin` consumers in
@@ -1067,13 +1153,14 @@ function dispatcher.unserved_reason(snapshot, dest)
   for _, d in ipairs(dest.demand) do
     local avail = dispatcher.exportable(source, d.item)
     if avail > 0 then
-      -- thread stack_size so this diagnostic packs by SLOTS exactly as `plan`
-      -- does; without it the slot budget would be read as an item count and the
-      -- "nothing loads" reason could fire (or not) inconsistently with the planner.
-      items[#items + 1] = { item = d.item, surplus = avail, unmet = d.unmet, stack_size = d.stack_size }
+      -- thread stack_size + perishable so this diagnostic packs by SLOTS and
+      -- isolates perishables EXACTLY as `plan` does; without it the "nothing loads"
+      -- reason could fire (or not) inconsistently with the planner.
+      items[#items + 1] = { item = d.item, surplus = avail, unmet = d.unmet,
+        stack_size = d.stack_size, perishable = d.perishable }
     end
   end
-  if next(schedule.build_manifest(items, ship.capacity)) == nil then
+  if next(schedule.build_manifest(dispatcher.perishable_filter(items), ship.capacity)) == nil then
     return "source=" .. tostring(src.planet) .. " ship#" .. tostring(ship.id)
       .. " but nothing loads (ship capacity " .. tostring(ship.capacity) .. " or every clamp = 0)"
   end

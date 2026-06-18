@@ -1,3 +1,13 @@
+Version: 1.5.1
+Date: 2026-06-18
+  Bugfixes:
+    - The fleet no longer sources an item from a planet that is itself requesting that item but does not yet hold enough of it. Previously, if a planet requested (say) 20 electromagnetic plants and had 15 on hand with the remaining 5 already on the way, those 15 showed up as exportable surplus — so the fleet sent a ship there to load them, the planet wouldn't release stock it still needs, and the ship sat idle until it timed out and failed. A planet that holds less of an item than it has requested is now never chosen as the source for it.
+---------------------------------------------------------------------------------------------------
+Version: 1.5.0
+Date: 2026-06-17
+  Features:
+    - Perishable cargo — biter eggs, food, fish, and anything else that spoils — now ships on its own dedicated trip instead of being bundled in with slow bulk cargo. A ship carrying both used to wait at the source until every item was aboard — up to the five-minute load timeout — with the perishables spoiling the whole time. Now a request that includes a perishable loads only the perishables, so the ship leaves the moment they are aboard. Surviving the trip itself is still up to you (build a faster ship for the long hauls), but nothing spoils waiting behind a slow load. The non-perishable items on that request simply follow on the next trip.
+---------------------------------------------------------------------------------------------------
 Version: 1.4.0
 Date: 2026-06-16
   Locale:

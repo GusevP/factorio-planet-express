@@ -339,6 +339,23 @@ describe("demand.build_open -- empty edges", function()
   assert_eq(open[1], { item = "iron-plate", unmet = 7, priority = 0 }, "missing on_hand/inbound treated as 0")
 end)
 
+describe("demand.import_map -- gross shortfall, pre-inbound, ignores fleet flag", function()
+  -- gross shortfall = max(0, requested - on_hand); INBOUND is intentionally ignored
+  -- (the field exists on the row but import_map never reads it).
+  local rows = {
+    { item = "electromagnetic-plant@normal", requested = 20, on_hand = 15, inbound = 5 }, -- the bug row
+    { item = "iron-plate@normal", requested = 100, on_hand = 100 }, -- satisfied
+    { item = "copper-plate@normal", requested = 50, on_hand = 80 }, -- overstocked
+    { item = "coal@normal", requested = 30 }, -- on_hand defaults 0
+  }
+  assert_eq(demand.import_map(rows), {
+    ["electromagnetic-plant@normal"] = 5,
+    ["coal@normal"] = 30,
+  }, "only physically-short items, by gross shortfall; inbound does NOT net it down")
+  assert_eq(demand.import_map({}), {}, "no rows -> empty")
+  assert_eq(demand.import_map(nil), {}, "nil rows -> empty")
+end)
+
 -- ---------------------------------------------------------------------------
 -- fleet eligibility -- allow-list + idle/enrolled filter (pure).
 -- (The registry's event wiring is engine-touching and verified by playtest.)
@@ -772,6 +789,53 @@ describe("dispatcher.exportable -- thrash guard", function()
   assert_eq(dispatcher.exportable(hub, "uranium-235"), 12, "received-only stock is exportable (re-export)")
 end)
 
+describe("dispatcher.exportable -- gross-import guard (inbound-netted unmet bug)", function()
+  -- THE BUG: a planet requesting 20, holding 15, with the remaining 5 covered by an
+  -- in-flight delivery, has netted unmet 0 -- so the OLD guard (unmet_by_item only)
+  -- let its on-hand 15 read as exportable and the fleet sourced its own pending item
+  -- from it. The gross-import map (requested - on_hand = 5) stays positive regardless
+  -- of inbound, so the planet is correctly NOT a source for it.
+  local short = {
+    surplus = { ["electromagnetic-plant@normal"] = 15 },
+    unmet_by_item = {},                                          -- inbound netted it to 0
+    import_by_item = { ["electromagnetic-plant@normal"] = 5 },   -- but still physically short
+  }
+  assert_eq(dispatcher.exportable(short, "electromagnetic-plant@normal"), 0,
+    "physically short (gross import > 0) -> NOT a source even with unmet netted to 0")
+
+  -- A planet whose request is genuinely satisfied (no gross shortfall) still exports
+  -- its real surplus -- the guard only blocks items the planet itself lacks.
+  local satisfied = {
+    surplus = { ["electromagnetic-plant@normal"] = 80 },
+    unmet_by_item = {}, import_by_item = {},
+  }
+  assert_eq(dispatcher.exportable(satisfied, "electromagnetic-plant@normal"), 80,
+    "no gross shortfall -> genuine surplus still exportable")
+end)
+
+describe("dispatcher.plan -- never sources an item from a planet that is short of it", function()
+  -- New planet ("new") requests 5 electromagnetic plants. Gleba holds 15 but requests
+  -- 20 (5 inbound nets its unmet to 0). Gleba is the ONLY node with the item on hand,
+  -- but it is physically short, so it must NOT be chosen -- the demand stays unserved
+  -- (correctly) rather than dispatching a ship that would park at Gleba and time out.
+  local snapshot = {
+    two_way = false,
+    nodes = {
+      [1] = { id = 1, planet = "new",
+        demand = { { item = "emplant@normal", unmet = 5, stack_size = 1 } },
+        surplus = {}, unmet_by_item = { ["emplant@normal"] = 5 }, import_by_item = { ["emplant@normal"] = 5 } },
+      [2] = { id = 2, planet = "gleba",
+        demand = {},                                       -- netted: unmet 0 (5 inbound)
+        surplus = { ["emplant@normal"] = 15 },             -- 15 on hand looks like surplus
+        unmet_by_item = {},
+        import_by_item = { ["emplant@normal"] = 5 } },      -- but Gleba is short on its own 20 request
+    },
+    ships = { { id = 1, capacity = 1000, planet = "gleba", entry = { enrolled = true, state = fleet.IDLE } } },
+  }
+  assert_eq(#dispatcher.plan(snapshot), 0,
+    "Gleba is short of the item it holds -> NOT a source -> no (failing) dispatch")
+end)
+
 describe("dispatcher.net_surplus -- min-trip re-clamp on the post-committed value", function()
   -- raw already passes min-trip (stock.surplus floors it pre-commit); the NET
   -- value after subtracting in-flight bookkeeping can fall back below min-trip
@@ -1114,6 +1178,79 @@ describe("dispatcher.pick_ship -- ETA-aware pick (v1.1): min delivery time", fun
   assert_eq(dispatcher.pick_ship({ ship(1, "far", nil), ship(2, "near", nil) }, {},
     "src", "dst", nil, distances).id, 2,
     "nil factor reads as 1.0 -> nearer ship wins")
+end)
+
+describe("dispatcher.perishable_filter -- isolates perishables, else passes through", function()
+  local fresh = { item = "iron-plate@normal", surplus = 100, unmet = 100, stack_size = 100 }
+  local egg = { item = "biter-egg@normal", surplus = 10, unmet = 10, stack_size = 1, perishable = true }
+  local fish = { item = "raw-fish@normal", surplus = 5, unmet = 5, stack_size = 1, perishable = true }
+
+  -- no perishable -> the wide load is returned unchanged
+  assert_eq(dispatcher.perishable_filter({ fresh }), { fresh }, "no perishable -> list unchanged")
+  assert_eq(dispatcher.perishable_filter({}), {}, "empty list -> empty")
+
+  -- mixed -> ONLY the perishables, in the caller's (priority) order
+  assert_eq(dispatcher.perishable_filter({ fresh, egg, fish }), { egg, fish },
+    "mixed -> only perishables, order preserved")
+  assert_eq(dispatcher.perishable_filter({ egg, fresh }), { egg },
+    "a single perishable drops every non-perishable")
+
+  -- all perishable -> all kept
+  assert_eq(dispatcher.perishable_filter({ egg, fish }), { egg, fish }, "all perishable -> all kept")
+end)
+
+describe("dispatcher.plan -- a perishable in demand isolates the trip to perishables only", function()
+  -- Dest A(id1) demands an egg (perishable) AND iron (not); source B(id2) exports
+  -- BOTH. The trip must load ONLY the egg, so it departs the moment the egg is aboard
+  -- instead of waiting out the iron load (the egg spoiling beside it). The iron demand
+  -- stays open and ships on a later tick.
+  local snapshot = {
+    two_way = false,
+    nodes = {
+      [1] = { id = 1, planet = "aaa",
+        demand = {
+          { item = "biter-egg@normal", unmet = 10, stack_size = 1, perishable = true },
+          { item = "iron-plate@normal", unmet = 100, stack_size = 100 },
+        },
+        surplus = {}, unmet_by_item = { ["biter-egg@normal"] = 10, ["iron-plate@normal"] = 100 } },
+      [2] = { id = 2, planet = "bbb", demand = {},
+        surplus = { ["biter-egg@normal"] = 50, ["iron-plate@normal"] = 500 }, unmet_by_item = {} },
+    },
+    ships = { { id = 1, capacity = 1000, planet = "bbb", entry = { enrolled = true, state = fleet.IDLE } } },
+  }
+  local plans = dispatcher.plan(snapshot)
+  assert_eq(#plans, 1, "one assignment planned")
+  assert_eq(plans[1].source_planet, "bbb", "sourced from B (holds both)")
+  assert_eq(plans[1].manifest, { ["biter-egg@normal"] = 10 },
+    "manifest carries ONLY the perishable egg -- iron is left for a later trip")
+  -- the stored `items` (re-packed by build_records at write time) must ALSO be
+  -- egg-only, or the engine write would re-introduce the iron.
+  assert_eq(#plans[1].items, 1, "stored items is egg-only (build_records re-packs from it)")
+  assert_eq(plans[1].items[1].item, "biter-egg@normal", "the one stored item is the egg")
+end)
+
+describe("dispatcher.plan -- a source WITHOUT the perishable still ships its normal load", function()
+  -- Dest A(id1) demands an egg + iron; the only source B(id2) holds iron but NO eggs.
+  -- The egg isn't exportable from B, so isolation must NOT empty the trip -- B ships
+  -- its iron and the egg waits for a tick whose chosen source bears it (no starvation).
+  local snapshot = {
+    two_way = false,
+    nodes = {
+      [1] = { id = 1, planet = "aaa",
+        demand = {
+          { item = "biter-egg@normal", unmet = 10, stack_size = 1, perishable = true },
+          { item = "iron-plate@normal", unmet = 100, stack_size = 100 },
+        },
+        surplus = {}, unmet_by_item = { ["biter-egg@normal"] = 10, ["iron-plate@normal"] = 100 } },
+      [2] = { id = 2, planet = "bbb", demand = {},
+        surplus = { ["iron-plate@normal"] = 500 }, unmet_by_item = {} },
+    },
+    ships = { { id = 1, capacity = 1000, planet = "bbb", entry = { enrolled = true, state = fleet.IDLE } } },
+  }
+  local plans = dispatcher.plan(snapshot)
+  assert_eq(#plans, 1, "one assignment planned (not starved by isolation)")
+  assert_eq(plans[1].manifest, { ["iron-plate@normal"] = 100 },
+    "ships the iron it CAN supply; the egg (unavailable here) waits")
 end)
 
 describe("dispatcher.plan -- ETA-gated flip: taken ONLY when it lowers ETA", function()

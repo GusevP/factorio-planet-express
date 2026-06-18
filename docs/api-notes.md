@@ -606,6 +606,20 @@ ships), but correctness rests on the signature compare, not the event.
   pure-Lua test runner) or the item has no prototype. **[provisional — confirm
   `prototypes.item[name].stack_size`; `prototypes` is the 2.0 replacement for the
   old `game.item_prototypes`.]**
+- Per-item perishability — perishable isolation (spoilage support): an item is
+  perishable iff `prototypes.item[name]:get_spoil_ticks() > 0`. In 2.0
+  `get_spoil_ticks` is a **method** on `LuaItemPrototype` (NOT a `.spoil_ticks`
+  attribute), returning a `uint32` (0 = never spoils); its optional `quality?` arg
+  only scales the DURATION, so the perishable/not bit is quality-independent and we
+  call it with no arg. `dispatcher.perishable_of(name)` reads it (tagging each
+  demanded item in `build_snapshot`, like `stack_size`) so the pure planner only
+  copies the boolean; the pure `dispatcher.perishable_filter` then isolates
+  perishables onto their own trip. The mod deliberately never reads the spoil
+  DURATION (trip survival is the player's concern, e.g. a faster ship), only the bit.
+  Degrades to `false` when `prototypes` is absent (the pure-Lua test runner) or the
+  item has no prototype. **[provisional — confirm `LuaItemPrototype:get_spoil_ticks()`
+  in a running 2.0 game; verified against the latest lua-api docs but not yet
+  in-engine.]**
 - Top-bar shortcut prototype + sprite in `data.lua` (Task 8). **[confirmed
   surface.]**
 - Monitor top-left dock (`gui/monitor.lua`): an always-visible folded status panel

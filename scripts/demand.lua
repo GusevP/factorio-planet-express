@@ -216,19 +216,49 @@ function demand.inbound_for(node)
 end
 
 -- ---------------------------------------------------------------------------
+-- pure gross-import map (export thrash-guard input)
+-- ---------------------------------------------------------------------------
+
+-- Pure: the node's GROSS physical shortfall per item, `max(0, requested - on_hand)`
+-- over the raw rows -- PRE-inbound, and IGNORING the source-via-fleet opt-out (a
+-- planet physically short of an item must never EXPORT it, whether or not the fleet
+-- is what fills that request). This is the signal the dispatcher's export thrash
+-- guard needs: the netted `unmet` that `build_open` produces folds inbound in and
+-- hits 0 the moment an in-flight delivery covers the remaining gap -- but the planet
+-- still physically HOLDS LESS than it asked for, so sourcing the item FROM it strips
+-- stock it is itself waiting on (the ship then parks at a planet that won't launch
+-- its own pending stock and times out). Gross shortfall is inbound-independent, so it
+-- stays positive for exactly as long as the planet is short. Keyed by qkey; only
+-- positive entries kept. PURE -- plain arithmetic over the rows.
+function demand.import_map(rows)
+  local out = {}
+  for _, row in ipairs(rows or {}) do
+    local short = (row.requested or 0) - (row.on_hand or 0)
+    if short > 0 then
+      out[row.item] = short
+    end
+  end
+  return out
+end
+
+-- ---------------------------------------------------------------------------
 -- open_demand (IO read + overlay + inbound + pure build)
 -- ---------------------------------------------------------------------------
 
 -- Items this node still needs the fleet to deliver, sorted deterministically
--- (priority then largest shortfall). Reads native rows via `demand.reader`,
--- folds in committed inbound fleet cargo, then runs the pure `build_open`.
+-- (priority then largest shortfall). Reads native rows via `demand.reader`, folds
+-- in committed inbound fleet cargo, then runs the pure `build_open`. Returns TWO
+-- values: the netted open-demand list AND the pre-inbound gross-import map
+-- (`demand.import_map`) the dispatcher uses as its export thrash guard -- both from
+-- the same single read. Callers wanting only the list (`local open = ...`) ignore
+-- the second value harmlessly.
 function demand.open_demand(node)
   local rows = demand.reader(node) or {}
   local inbound = demand.inbound_for(node)
   for _, row in ipairs(rows) do
     row.inbound = (row.inbound or 0) + (inbound[row.item] or 0)
   end
-  return demand.build_open(node, rows)
+  return demand.build_open(node, rows), demand.import_map(rows)
 end
 
 return demand
