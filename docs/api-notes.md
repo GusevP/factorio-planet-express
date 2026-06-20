@@ -637,6 +637,18 @@ ships), but correctness rests on the signature compare, not the event.
   engine-touching. The `stranded` flag itself (`fleet.set_stranded`) is set by the
   watchdog on an assignment timeout and cleared when the ship next works a stop or
   completes a delivery -- it is display-only and never gates dispatch.
+- Monitor close key (E / Esc): the centered Monitor (`gui/monitor.lua`) is a
+  `player.gui.screen` frame. Setting `player.opened = frame` on open makes the engine
+  route the close key to it and fire `on_gui_closed` with `event.element == frame`, so
+  it dismisses without clicking the X. `monitor.on_gui_closed` (wired into control.lua's
+  on_gui_closed dispatch alongside the two tabs) guards on `element.name == FRAME` and
+  calls `monitor.close`, which DESTROYS the frame -- destroying the `player.opened`
+  element clears it without re-firing on_gui_closed, so the X-button path (also a
+  destroy) and the close-key path neither double-handle nor loop. Opening any
+  entity / other window reassigns `player.opened` and closes the Monitor (standard
+  single-opened-GUI behavior). **[provisional -- confirm in 2.0 that assigning a
+  LuaGuiElement to `player.opened` routes E/Esc to on_gui_closed and that a programmatic
+  `destroy()` does NOT re-fire it; verify by playtest.]**
 - Technology researched-state read: `force.technologies["interplanetary-trade-logistics"].researched`
   gates the Trade tab + fleet toggle (Tasks 9/10). **[confirmed]** The minimal
   technology prototype already exists (Task 0 `data.lua`).

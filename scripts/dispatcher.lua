@@ -351,34 +351,47 @@ end
 -- pure best-source selection
 -- ---------------------------------------------------------------------------
 
--- Pick the source that covers the MOST of `dest`'s open demand in one stop, tie-
--- break NEAREST, then lowest node id (deterministic). Coverage sums, per demanded
--- item, min(exportable(source, item), unmet) -- so wide-load potential drives the
--- choice. Only SAME-FORCE sources are considered (force isolation). Returns
--- { id, planet, coverage } or nil when no node can cover anything. Pure over the
--- snapshot; iterates node ids in stable order.
+-- Pick the source for `dest`'s open demand, by the dest force's source strategy
+-- (carried on `dest.strategy`, the Monitor "Source" toggle):
+--   * FASTEST (default): the source that COVERS the most of the request in one stop
+--     -- coverage = sum of min(exportable, unmet) -- so wide-load potential drives it.
+--   * MOST_SURPLUS: the source holding the most TOTAL exportable surplus of the
+--     requested items -- surplus_total = sum of exportable(source, item), uncapped by
+--     unmet -- so the trade is pulled off the biggest relevant stockpile.
+-- BOTH break ties NEAREST, then lowest node id (deterministic). A candidate must still
+-- COVER something (coverage > 0) to qualify; since both sums range over the demanded
+-- items via the guarded `exportable`, surplus_total > 0 <=> coverage > 0, so a
+-- most-surplus pick can always actually serve the request. Only SAME-FORCE sources
+-- (force isolation). Returns { id, planet, coverage, surplus_total, dist } or nil. Pure
+-- over the snapshot; iterates node ids in stable order. A nil/absent `dest.strategy`
+-- resolves to FASTEST, so snapshots without the field behave exactly as before.
 function dispatcher.best_source(snapshot, dest)
+  local by_surplus = dest.strategy == state.SOURCE_SURPLUS
   local best = nil
   for _, sid in ipairs(state.sorted_keys(snapshot.nodes)) do
     local source = snapshot.nodes[sid]
     if sid ~= dest.id and source.force == dest.force then
       local coverage = 0
+      local surplus_total = 0
       for _, d in ipairs(dest.demand) do
         local avail = dispatcher.exportable(source, d.item)
         if avail > 0 then
-          local take = avail < d.unmet and avail or d.unmet
-          coverage = coverage + take
+          coverage = coverage + (avail < d.unmet and avail or d.unmet)
+          surplus_total = surplus_total + avail
         end
       end
       if coverage > 0 then
         -- nearest tie-break over the GUARDED helper (never raw `distances[a][b]`):
-        -- equally-covering sources break toward the shorter route, then lowest id.
+        -- equally-ranked sources break toward the shorter route, then lowest id.
         local dist = dispatcher.distance(snapshot.distances, source.planet, dest.planet)
+        local score = by_surplus and surplus_total or coverage
+        local best_score = best and (by_surplus and best.surplus_total or best.coverage)
         -- strict comparisons + stable id iteration => lowest id wins full ties.
         if best == nil
-          or coverage > best.coverage
-          or (coverage == best.coverage and dist < best.dist) then
-          best = { id = sid, planet = source.planet, coverage = coverage, dist = dist }
+          or score > best_score
+          or (score == best_score and dist < best.dist) then
+          best = { id = sid, planet = source.planet, coverage = coverage,
+            surplus_total = surplus_total, dist = dist }
         end
       end
     end
@@ -920,11 +933,15 @@ function dispatcher.build_snapshot(_tick)
         -- `prototypes`. See dispatcher.perishable_filter.
         d.perishable = dispatcher.perishable_of(name)
       end
+      local fkey = dispatcher.force_key(node.force)
       nodes[id] = {
         id = id,
         planet = dispatcher.planet_name(node),
         node = node,
-        force = dispatcher.force_key(node.force),
+        force = fkey,
+        -- Per-force source-selection strategy (Monitor "Source" toggle), read here so
+        -- the pure best_source ranks by fastest-route vs most-surplus without storage.
+        strategy = state.source_strategy(fkey),
         demand = open,
         unmet_by_item = unmet_by_item,
         -- Gross physical shortfall per item (pre-inbound) -- the export thrash

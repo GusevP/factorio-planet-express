@@ -32,6 +32,13 @@ local FILTERS = "planet-express-monitor-filters"
 local FILTER_PLANET = "planet-express-monitor-filter-planet"
 local FILTER_ITEM = "planet-express-monitor-filter-item"
 local FILTER_STATE = "planet-express-monitor-filter-state"
+local STRATEGY = "planet-express-monitor-strategy"
+-- dropdown index -> stored strategy value (parallel to STRATEGY_CAPTIONS below).
+local STRATEGY_VALUES = { state.SOURCE_FASTEST, state.SOURCE_SURPLUS }
+local STRATEGY_CAPTIONS = {
+  { "planet-express.monitor-strategy-fastest" },
+  { "planet-express.monitor-strategy-surplus" },
+}
 local CLOSE = "planet-express-monitor-close"
 local SCROLL = "planet-express-monitor-scroll"
 local BODY = "planet-express-monitor-body"
@@ -452,6 +459,17 @@ function monitor.open(player)
     items = STATE_OPTIONS,
     selected_index = 1,
   })
+  -- Source-selection strategy for this player's force (persisted per force). Lives in
+  -- the filter row but is NOT a filter -- changing it writes the force's dispatch
+  -- policy (see on_filter_changed); it takes effect on the next dispatcher tick.
+  filters.add({ type = "label", caption = { "planet-express.monitor-strategy-label" } })
+  filters.add({
+    type = "drop-down",
+    name = STRATEGY,
+    items = STRATEGY_CAPTIONS,
+    selected_index = (state.source_strategy(common.force_key(player.force)) == state.SOURCE_SURPLUS) and 2 or 1,
+    tooltip = { "planet-express.monitor-strategy-tip" },
+  })
 
   -- scrollable body.
   local scroll = frame.add({ type = "scroll-pane", name = SCROLL, direction = "vertical" })
@@ -461,6 +479,11 @@ function monitor.open(player)
 
   refresh_frame(frame)
   player.set_shortcut_toggled(monitor.SHORTCUT, true)
+  -- Route the close key (E / Esc) to this frame: with `player.opened` set, the engine
+  -- fires on_gui_closed for it, so the Monitor can be dismissed without aiming for the
+  -- X. Set LAST, once the frame is fully built. Opening any entity / other window
+  -- reassigns player.opened and closes this -- standard single-opened-GUI behavior.
+  player.opened = frame
 end
 
 function monitor.close(player)
@@ -559,6 +582,22 @@ function monitor.on_shortcut(event)
   end
 end
 
+-- The close key (E / Esc) routed through `player.opened` (set in monitor.open). The
+-- engine fires on_gui_closed for whatever GUI is open; act ONLY when it is OUR frame
+-- (guarded by name + validity) so we never touch another mod's / the native GUI's
+-- close. Mirrors monitor.close (destroy + untoggle the shortcut). `monitor.close`
+-- destroys the frame, which clears player.opened without re-firing this -- no loop.
+function monitor.on_gui_closed(event)
+  local element = event.element
+  if not (element and element.valid and element.name == FRAME) then
+    return
+  end
+  local player = game.get_player(event.player_index)
+  if player then
+    monitor.close(player)
+  end
+end
+
 -- Recenter the player on a ship's platform when its roster button is clicked.
 -- Force-gated: only recenter on a ship belonging to the player's OWN force, so a
 -- crafted/foreign ship key (or a foreign ship that slipped into a nil-force
@@ -652,6 +691,14 @@ local function on_filter_changed(event)
     local frame = common.ancestor_frame(el, FRAME)
     if frame then
       refresh_frame(frame)
+    end
+  elseif el.name == STRATEGY then
+    -- Persist the force's source strategy (the dropdown is a control, not a filter).
+    -- Resolve the frame via the element's own ancestry so a same-named widget in
+    -- another layout can't drive OUR force's policy (same trust glue as the filters).
+    local frame = common.ancestor_frame(el, FRAME)
+    if frame then
+      state.set_source_strategy(viewing_force_key(frame), STRATEGY_VALUES[el.selected_index])
     end
   end
 end

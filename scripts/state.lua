@@ -29,6 +29,34 @@ local state = {}
 -- `space_connection` LuaObject, so it stays serializable across save/load).
 state.SCHEMA_VERSION = 2
 
+-- Per-force source-selection strategy (the Monitor's "Source" toggle). FASTEST keeps
+-- the default pick (most coverage, nearest tie-break); SURPLUS prefers the planet
+-- holding the most total exportable surplus of the request. Stored per force in
+-- `storage.source_strategy`; a missing or unknown value resolves to FASTEST, so old
+-- saves (and every force that never touched the toggle) keep today's behavior.
+state.SOURCE_FASTEST = "fastest"
+state.SOURCE_SURPLUS = "most_surplus"
+
+-- Read a force's source strategy, sanitized (anything but SURPLUS -> FASTEST). Guarded
+-- against a missing `storage` so the pure-Lua test runner never trips (the planner
+-- reads the strategy off the snapshot field, not through this).
+function state.source_strategy(forcekey)
+  local m = storage and storage.source_strategy
+  local v = m and m[forcekey]
+  return v == state.SOURCE_SURPLUS and state.SOURCE_SURPLUS or state.SOURCE_FASTEST
+end
+
+-- Set a force's source strategy (sanitized to one of the two values). No-op on a nil
+-- force key (can't key storage by nil).
+function state.set_source_strategy(forcekey, value)
+  if forcekey == nil then
+    return
+  end
+  storage.source_strategy = storage.source_strategy or {}
+  storage.source_strategy[forcekey] =
+    (value == state.SOURCE_SURPLUS) and state.SOURCE_SURPLUS or state.SOURCE_FASTEST
+end
+
 -- ---------------------------------------------------------------------------
 -- storage initialization
 -- ---------------------------------------------------------------------------
@@ -47,6 +75,8 @@ function state.init()
   storage.assignments = storage.assignments or {}
   -- stranded/destroyed/conflict events for the monitor GUI
   storage.alerts = storage.alerts or {}
+  -- per-force source-selection strategy (Monitor "Source" toggle); missing -> fastest
+  storage.source_strategy = storage.source_strategy or {}
 
   -- monotonic id counter for assignment ids (determinism: never reuse table
   -- address / tick as an id).

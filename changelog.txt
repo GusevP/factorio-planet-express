@@ -1,3 +1,18 @@
+Version: 1.7.0
+Date: 2026-06-20
+  Features:
+    - New "Source" toggle in the Fleet Monitor lets you choose how the fleet picks which planet to load from: "Fastest" (the default — the planet that fills the most of a request, with the nearest winning ties) or "Most surplus" (the planet holding the most total stock of what's requested). The choice is per force and takes effect on the next dispatch. The per-ship pick is unchanged — it always sends whichever ship will arrive soonest.
+---------------------------------------------------------------------------------------------------
+Version: 1.6.0
+Date: 2026-06-19
+  Features:
+    - You can now stop the fleet from ever exporting a specific item from a planet. On the planet's Trade tab, set that item's reserve to -1: a reserve normally means "keep this much in stock before exporting", and -1 now means "never export this item from here". Setting the default reserve floor to -1 makes the planet export nothing by default, so you can whitelist individual items by giving them a normal reserve — handy for a planet you only want to receive goods.
+---------------------------------------------------------------------------------------------------
+Version: 1.5.2
+Date: 2026-06-19
+  Features:
+    - The Fleet Monitor now closes when you press E or Escape, the same as the rest of the game's windows — no more reaching for the X in the corner. (Opening another entity or window also closes it, as usual.)
+---------------------------------------------------------------------------------------------------
 Version: 1.5.1
 Date: 2026-06-18
   Bugfixes:

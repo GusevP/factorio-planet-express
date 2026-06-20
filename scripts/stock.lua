@@ -41,7 +41,16 @@ stock.MIN_TRIP_SETTING = "planet-express-min-trip"
 
 -- Pure: launchable stock minus reserve, clamped at zero, then min-trip
 -- suppressed (a positive-but-tiny surplus below `min_trip` reports as 0).
+--
+-- A NEGATIVE reserve is the export-off sentinel (-1 in the Trade tab): the player
+-- has restricted this item from being loaded at this planet at all, so it is NEVER
+-- exportable, whatever the stock. The sign is a FLAG, not a floor -- arithmetically
+-- `stock - (-1)` would ADD to surplus, the opposite of what's intended -- so it must
+-- be caught before the subtraction.
 function stock.compute_surplus(stock_count, reserve_amount, min_trip)
+  if (reserve_amount or 0) < 0 then
+    return 0
+  end
   local s = (stock_count or 0) - (reserve_amount or 0)
   if s < 0 then
     s = 0

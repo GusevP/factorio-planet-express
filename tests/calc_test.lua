@@ -186,6 +186,11 @@ describe("stock.compute_surplus", function()
   assert_eq(stock.compute_surplus(105, 100, 10), 0, "surplus 5 below min-trip 10 -> 0")
   assert_eq(stock.compute_surplus(115, 100, 10), 15, "surplus 15 at/above min-trip 10 -> 15")
   assert_eq(stock.compute_surplus(110, 100, 10), 10, "surplus exactly min-trip -> kept")
+  -- negative reserve is the export-off sentinel (-1 in the Trade tab): never exportable,
+  -- caught BEFORE the subtraction (else stock - (-1) would ADD to surplus).
+  assert_eq(stock.compute_surplus(500, -1, 1), 0, "reserve -1 -> export-off, never surplus")
+  assert_eq(stock.compute_surplus(0, -1, 1), 0, "export-off with no stock -> 0")
+  assert_eq(stock.compute_surplus(500, -50, 1), 0, "any negative reserve -> export-off (sign is a flag)")
   -- nil-safety
   assert_eq(stock.compute_surplus(nil, nil, nil), 0, "nil inputs -> 0")
 end)
@@ -849,6 +854,36 @@ describe("dispatcher.net_surplus -- min-trip re-clamp on the post-committed valu
   assert_eq(dispatcher.net_surplus(40, 0, 50), 0, "raw below min-trip with no commit -> still suppressed")
   assert_eq(dispatcher.net_surplus(100, nil, 50), 100, "nil committed treated as 0")
   assert_eq(dispatcher.net_surplus(80, nil, 50), 80, "nil committed, above min-trip -> full raw")
+end)
+
+describe("dispatcher.best_source -- source strategy: fastest vs most-surplus", function()
+  -- dest "d" wants X (unmet 100). "near" holds exactly 100 (covers it, small pile);
+  -- "far" holds 500 (covers the same 100, but a far bigger pile). "near" is closer.
+  local function snap(strategy)
+    return {
+      distances = { near = { d = 1 }, far = { d = 10 } },
+      nodes = {
+        [1] = { id = 1, planet = "d", strategy = strategy,
+          demand = { { item = "X", unmet = 100 } }, unmet_by_item = { ["X"] = 100 }, surplus = {} },
+        [2] = { id = 2, planet = "near", surplus = { ["X"] = 100 }, unmet_by_item = {} },
+        [3] = { id = 3, planet = "far", surplus = { ["X"] = 500 }, unmet_by_item = {} },
+      },
+    }
+  end
+
+  -- FASTEST: coverage ties at 100 (both fully cover the unmet), so the NEARER wins.
+  local f = snap("fastest")
+  assert_eq(dispatcher.best_source(f, f.nodes[1]).planet, "near", "fastest: equal coverage -> nearest source")
+
+  -- MOST_SURPLUS: the bigger total stockpile wins even though it is farther.
+  local m = snap("most_surplus")
+  local mb = dispatcher.best_source(m, m.nodes[1])
+  assert_eq(mb.planet, "far", "most_surplus: biggest stockpile wins over distance")
+  assert_eq(mb.surplus_total, 500, "surplus_total sums uncapped exportable")
+
+  -- a nil/absent strategy resolves to FASTEST (so existing snapshots are unchanged).
+  local d = snap(nil)
+  assert_eq(dispatcher.best_source(d, d.nodes[1]).planet, "near", "absent strategy -> fastest (nearest)")
 end)
 
 describe("dispatcher.best_source -- most coverage, nearest tie-break, id tie-break", function()

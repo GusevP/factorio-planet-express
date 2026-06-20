@@ -251,6 +251,7 @@ script.on_event(defines.events.on_gui_opened, function(event)
 end)
 
 script.on_event(defines.events.on_gui_closed, function(event)
+  monitor.on_gui_closed(event)
   trade_tab.on_gui_closed(event)
   fleet_tab.on_gui_closed(event)
 end)

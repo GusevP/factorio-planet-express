@@ -91,16 +91,20 @@ local function section_header(parent, caption)
   lbl.style.top_padding = 6
 end
 
--- A numeric textfield seeded with `value` (blank when nil). Clamped to integers,
--- never negative; the caller wires the actual persistence on text change.
-local function numeric_field(parent, name, value, width)
+-- A numeric textfield seeded with `value` (blank when nil). Integers only. `opts`
+-- (optional): `allow_neg` permits a leading `-` (reserve fields use it for the -1
+-- export-off sentinel; priority fields stay non-negative), `tooltip` is a localised
+-- string. The caller wires the actual persistence on text change.
+local function numeric_field(parent, name, value, width, opts)
+  opts = opts or {}
   local tf = parent.add({
     type = "textfield",
     name = name,
     numeric = true,
     allow_decimal = false,
-    allow_negative = false,
+    allow_negative = opts.allow_neg == true,
     text = value ~= nil and tostring(value) or "",
+    tooltip = opts.tooltip,
   })
   tf.style.width = width or 70
   return tf
@@ -134,6 +138,34 @@ local function parse_amount(text)
   end
   return n
 end
+
+-- Parse a RESERVE textfield. Same as parse_amount, except a NEGATIVE value collapses
+-- to -1, the export-off sentinel that stock.compute_surplus reads as "never export
+-- this item here". Blank -> nil (clears a per-item override / falls back to default).
+local function parse_reserve(text)
+  if text == nil then
+    return nil
+  end
+  local trimmed = text:match("^%s*(.-)%s*$")
+  if trimmed == "" then
+    return nil
+  end
+  local n = tonumber(trimmed)
+  if not n then
+    return nil
+  end
+  n = math.floor(n)
+  if n < 0 then
+    return -1
+  elseif n > MAX_AMOUNT then
+    return MAX_AMOUNT
+  end
+  return n
+end
+
+-- Shared options for the reserve numeric fields: allow the -1 export-off sentinel and
+-- explain it in a tooltip.
+local RESERVE_FIELD_OPTS = { allow_neg = true, tooltip = { "planet-express.trade-reserve-tip" } }
 
 -- ---------------------------------------------------------------------------
 -- body render
@@ -218,7 +250,7 @@ local function render_reserves(body, node)
   local cfg = node.reserves or {}
   local default_row = body.add({ type = "flow", direction = "horizontal" })
   default_row.add({ type = "label", caption = { "planet-express.trade-reserve-default" } })
-  numeric_field(default_row, RESERVE_DEFAULT, cfg.default or 0, 70)
+  numeric_field(default_row, RESERVE_DEFAULT, cfg.default or 0, 70, RESERVE_FIELD_OPTS)
 
   -- existing per-item overrides
   local items = cfg.items or {}
@@ -227,7 +259,7 @@ local function render_reserves(body, node)
     local t = body.add({ type = "table", column_count = 3 })
     for _, item in ipairs(names) do
       t.add({ type = "label", caption = item })
-      numeric_field(t, RESERVE_ITEM_PREFIX .. item, items[item], 70)
+      numeric_field(t, RESERVE_ITEM_PREFIX .. item, items[item], 70, RESERVE_FIELD_OPTS)
       t.add({
         type = "sprite-button",
         name = RESERVE_CLEAR_PREFIX .. item,
@@ -245,7 +277,7 @@ local function render_reserves(body, node)
     name = RESERVE_ADD_ITEM,
     elem_type = "item",
   })
-  numeric_field(add_row, RESERVE_ADD_AMOUNT, nil, 70)
+  numeric_field(add_row, RESERVE_ADD_AMOUNT, nil, 70, RESERVE_FIELD_OPTS)
   add_row.add({
     type = "button",
     name = RESERVE_ADD_BTN,
@@ -460,11 +492,12 @@ function trade_tab.on_gui_text_changed(event)
     node.priorities = node.priorities or {}
     node.priorities[item] = parse_amount(el.text) or 0
   elseif name == RESERVE_DEFAULT then
-    reserves.set_default(node, parse_amount(el.text) or 0)
+    reserves.set_default(node, parse_reserve(el.text) or 0)
   elseif has_prefix(name, RESERVE_ITEM_PREFIX) then
     local item = name:sub(#RESERVE_ITEM_PREFIX + 1)
-    -- Blank clears the override (falls back to default); a number sets it.
-    reserves.set_item(node, item, parse_amount(el.text))
+    -- Blank clears the override (falls back to default); a number sets it; -1 means
+    -- "never export this item here" (parse_reserve collapses any negative to -1).
+    reserves.set_item(node, item, parse_reserve(el.text))
   end
 end
 
@@ -488,7 +521,7 @@ function trade_tab.on_gui_click(event)
     local add_item = el.parent[RESERVE_ADD_ITEM]
     local add_amount = el.parent[RESERVE_ADD_AMOUNT]
     local item = add_item and add_item.elem_value
-    local amount = parse_amount(add_amount and add_amount.text)
+    local amount = parse_reserve(add_amount and add_amount.text)
     if item and amount ~= nil then
       reserves.set_item(node, item, amount)
       refresh_frame(frame)

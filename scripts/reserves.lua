@@ -22,6 +22,11 @@ local reserves = {}
 --   * a per-item override wins if present (even if 0),
 --   * else the node's global default,
 --   * else 0 when the node has no reserve config at all.
+-- A NEGATIVE value (-1, set from the Trade tab) is the export-off sentinel: it is
+-- returned verbatim and interpreted downstream by `stock.compute_surplus` as "never
+-- export this item here" (a flag, not a floor). So a -1 per-item override blocks that
+-- item, and a -1 default makes the planet export nothing unless an item overrides it
+-- back to a non-negative floor.
 -- Pure: depends only on the node table handed in.
 function reserves.reserve(node, item)
   local cfg = node and node.reserves
