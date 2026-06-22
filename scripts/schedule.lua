@@ -149,6 +149,32 @@ function schedule.build_manifest(items, slot_budget)
   return manifest
 end
 
+-- Pure: how many hub-inventory SLOTS a built manifest occupies =
+-- `Σ ceil(qty / stack_size)` over every `{ [qkey] = qty }` entry. This mirrors the
+-- EXACT slot arithmetic `build_manifest` charged internally (`ceil(load / ss)` per
+-- item), so the dispatcher's load metric `fill = manifest_slots / capacity` agrees
+-- with the packer at the boundary -- a different slot count here would make `fill`
+-- read wrong and mis-trip the min-load gate.
+--
+-- `stack_size` is looked up per qkey from the matching `items` entry (the same list
+-- build_manifest packed), defaulting to `schedule.DEFAULT_STACK_SIZE` when an item
+-- carries none. The qkey is used OPAQUELY as the lookup key, never decoded. Order-
+-- independent (a sum), so plain `pairs` over the manifest is fine.
+function schedule.manifest_slots(manifest, items)
+  local stack_of = {}
+  for _, it in ipairs(items or {}) do
+    if it.item ~= nil then
+      stack_of[it.item] = it.stack_size or schedule.DEFAULT_STACK_SIZE
+    end
+  end
+  local slots = 0
+  for item, qty in pairs(manifest or {}) do
+    local ss = stack_of[item] or schedule.DEFAULT_STACK_SIZE
+    slots = slots + math.ceil((qty or 0) / ss)
+  end
+  return slots
+end
+
 -- ---------------------------------------------------------------------------
 -- pure wait-condition builders
 -- ---------------------------------------------------------------------------

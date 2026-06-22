@@ -623,6 +623,35 @@ describe("schedule.build_manifest -- packs by SLOTS (ceil(load/stack_size))", fu
     "two same-name qualities each get a fair slot share (300 items apiece)")
 end)
 
+describe("schedule.manifest_slots -- ceil(qty/stack_size) per item, agrees with packer", function()
+  local items = {
+    { item = "iron-plate", surplus = 500, unmet = 800, stack_size = 100 },
+    { item = "copper-plate", surplus = 300, unmet = 200, stack_size = 50 },
+  }
+  -- iron 500/100 = 5 slots; copper 200/50 = 4 slots -> 9.
+  assert_eq(schedule.manifest_slots({ ["iron-plate"] = 500, ["copper-plate"] = 200 }, items),
+    9, "two items -> sum of ceil(qty/stack_size)")
+
+  -- A partial top slot still costs a whole slot: 250/100 -> ceil = 3.
+  assert_eq(schedule.manifest_slots({ ["iron-plate"] = 250 }, items),
+    3, "partial top slot rounds up")
+
+  -- Missing stack_size falls back to DEFAULT_STACK_SIZE (1 item per slot).
+  assert_eq(schedule.manifest_slots({ ["mystery"] = 7 }, {}),
+    7, "unknown item -> default stack size 1")
+
+  -- Round-trips with build_manifest: the packed manifest never exceeds capacity,
+  -- and fills exactly to capacity when demand swamps the hold.
+  local packed = schedule.build_manifest(items, 6)
+  assert_true(schedule.manifest_slots(packed, items) <= 6,
+    "packed manifest fits inside the slot budget")
+  local swamp = {
+    { item = "iron-plate", surplus = 100000, unmet = 100000, stack_size = 100 },
+  }
+  assert_eq(schedule.manifest_slots(schedule.build_manifest(swamp, 6), swamp),
+    6, "demand swamps the hold -> manifest packs exactly to capacity")
+end)
+
 describe("schedule.build_records -- 2-stop route + wait-conditions", function()
   local built = schedule.build_records({
     source = "nauvis",
