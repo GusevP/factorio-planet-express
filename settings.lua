@@ -13,8 +13,10 @@
 --   planet-express-max-ships-global -> scripts/dispatcher.lua (global concurrency cap)
 --   planet-express-max-ships-route  -> scripts/dispatcher.lua (per-route concurrency cap)
 --   planet-express-two-way-return   -> scripts/dispatcher.lua (return-leg gate)
+--   planet-express-min-load         -> scripts/dispatcher.lua (two-pass min-load gate)
 --
 -- `0` means "unlimited" for both max-ships caps.
+-- `planet-express-min-load` is a percent (0-100); `0` disables the gate (ship any load).
 
 data:extend({
   {
@@ -75,5 +77,14 @@ data:extend({
     setting_type = "runtime-global",
     default_value = true,
     order = "f-two-way-return",
+  },
+  {
+    type = "int-setting",
+    name = "planet-express-min-load",
+    setting_type = "runtime-global",
+    default_value = 80,
+    minimum_value = 0,
+    maximum_value = 100,
+    order = "g-min-load",
   },
 })
