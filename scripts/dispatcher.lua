@@ -72,6 +72,15 @@ dispatcher.MAX_ROUTE_SETTING = "planet-express-max-ships-route"
 dispatcher.TWO_WAY_SETTING = "planet-express-two-way-return"
 dispatcher.TWO_WAY_DEFAULT = true
 
+-- Minimum-load gate (v1.8.0). A percent int 0..100: a ship is only dispatched in
+-- Pass 1 when its manifest fills at least this fraction of its slot budget
+-- (`0` disables the gate -> ship any load). Read here, converted to a 0..1
+-- fraction on the snapshot (`min_load_fraction`) so the pure two-pass planner
+-- gates without touching `settings`. MIN_LOAD_DEFAULT is the fallback when
+-- `settings` is absent (the pure-Lua test runner); 80% mirrors settings.lua.
+dispatcher.MIN_LOAD_SETTING = "planet-express-min-load"
+dispatcher.MIN_LOAD_DEFAULT = 80
+
 -- [provisional] Per-platform cargo capacity is now a SLOT BUDGET (the hub's
 -- main-inventory slot count), NOT an item count -- the slot-aware manifest packer
 -- fills this many slots. DEFAULT_CAPACITY is the fallback slot count used
@@ -1041,6 +1050,12 @@ function dispatcher.build_snapshot(_tick)
         -- the pure planner can prefer that ship when it is free + eligible and
         -- fall through to auto-pick otherwise.
         pin = node.pin_ship,
+        -- Aging clock (v1.8.0): the tick this node last received a forward
+        -- manifest, copied straight from `storage.nodes[id].last_served_tick`.
+        -- `nil` for never-served nodes -- the pure `dest_order` comparator coerces
+        -- that to a sentinel strictly less than any real tick so it sorts oldest
+        -- (fairest: it has waited since map start). Written back by `commit`.
+        last_served = node.last_served_tick,
       }
     end
   end
@@ -1109,6 +1124,12 @@ function dispatcher.build_snapshot(_tick)
     two_way = two_way_enabled(),
     max_ships_global = state.setting(dispatcher.MAX_GLOBAL_SETTING, 0),
     max_ships_route = state.setting(dispatcher.MAX_ROUTE_SETTING, 5),
+    -- Minimum-load gate as a 0..1 fraction (v1.8.0). The setting is a percent int
+    -- 0..100 (floored by state.setting); divide to a fraction and clamp so the
+    -- pure two-pass planner can gate on `fill >= min_load_fraction`. Absent setting
+    -- (test runner) -> MIN_LOAD_DEFAULT, so the gate is well-defined everywhere.
+    min_load_fraction = math.max(0, math.min(100,
+      state.setting(dispatcher.MIN_LOAD_SETTING, dispatcher.MIN_LOAD_DEFAULT))) / 100,
     active_global = active_global,
     active_by_route = active_by_route,
   }
