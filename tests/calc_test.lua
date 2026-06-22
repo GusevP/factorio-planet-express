@@ -4230,6 +4230,217 @@ describe("qkey.label / label_parts -- player-facing display decode", function()
 end)
 
 -- ---------------------------------------------------------------------------
+-- anti-starvation aging order + two-pass min-load gate (v1.8.0).
+-- dest_order ranks destinations by (last_served ASC, id ASC); plan runs two
+-- passes over that frozen order -- Pass 1 commits worthwhile/perishable loads,
+-- Pass 2 mops up sub-threshold leftovers with whatever ships are still idle.
+-- ---------------------------------------------------------------------------
+
+describe("dispatcher.dest_order -- aging comparator (nil = oldest, id tie-break)", function()
+  -- The crash-guard case: a `nil` last_served sitting beside real integer ticks
+  -- forces the nil-vs-number comparison the comparator must coerce (-1 sentinel)
+  -- before table.sort's `<`. nil sorts ahead of every real tick (incl. 0).
+  local nodes = {
+    [3] = { id = 3, last_served = 50 },
+    [1] = { id = 1, last_served = 100 },
+    [2] = { id = 2, last_served = nil },   -- never served -> oldest
+  }
+  assert_eq(dispatcher.dest_order(nodes), { 2, 3, 1 },
+    "nil (never served) first, then ascending last_served")
+
+  -- equal ages -> lower node id wins (total deterministic order).
+  local tied = {
+    [5] = { id = 5, last_served = 200 },
+    [2] = { id = 2, last_served = 200 },
+    [9] = { id = 9, last_served = 200 },
+  }
+  assert_eq(dispatcher.dest_order(tied), { 2, 5, 9 }, "equal ages -> ascending id tie-break")
+
+  -- two never-served nodes both coerce to the sentinel -> id breaks the tie
+  -- (the all-nil startup state must not crash and must stay deterministic).
+  local both_nil = { [7] = { id = 7, last_served = nil }, [4] = { id = 4, last_served = nil } }
+  assert_eq(dispatcher.dest_order(both_nil), { 4, 7 }, "all-nil -> pure id order, no crash")
+end)
+
+describe("dispatcher.plan -- aging order under scarcity (oldest dest wins the one ship)", function()
+  -- Three demanders share ONE source and ONE idle ship. Lower node id (1) was
+  -- served most recently; the never-served node (2) is oldest and must win the
+  -- contested pick even though a lower id (1) also demands. This is the exact
+  -- nil-vs-integer comparison from the bug report -- a raw `<` would crash here.
+  local function snap()
+    return {
+      nodes = {
+        [1] = { id = 1, planet = "p1", last_served = 100,
+          demand = { { item = "iron", unmet = 100 } }, surplus = {}, unmet_by_item = {} },
+        [2] = { id = 2, planet = "p2", last_served = nil,   -- oldest
+          demand = { { item = "iron", unmet = 100 } }, surplus = {}, unmet_by_item = {} },
+        [3] = { id = 3, planet = "p3", last_served = 50,
+          demand = { { item = "iron", unmet = 100 } }, surplus = {}, unmet_by_item = {} },
+        [4] = { id = 4, planet = "src", surplus = { ["iron"] = 1000 }, unmet_by_item = {} },
+      },
+      ships = { { id = 1, capacity = 1000, entry = { enrolled = true, state = fleet.IDLE } } },
+    }
+  end
+  local plans = dispatcher.plan(snap())
+  assert_eq(#plans, 1, "one ship -> one assignment")
+  assert_eq(plans[1].dest_id, 2, "never-served (oldest) destination wins the scarce ship")
+
+  -- equal ages -> the lower-id demander wins the ship.
+  local tied = snap()
+  tied.nodes[1].last_served = 200
+  tied.nodes[2].last_served = 200
+  tied.nodes[3].last_served = 200
+  local tplans = dispatcher.plan(tied)
+  assert_eq(#tplans, 1, "still one ship -> one assignment")
+  assert_eq(tplans[1].dest_id, 1, "equal ages -> lowest-id destination wins")
+end)
+
+describe("dispatcher.plan -- no regression: plentiful ships serve every destination", function()
+  -- Three demanders, three ships, distinct sources. Aging order changes WHO goes
+  -- first but never WHO goes -- with ships to spare all three are served.
+  local snapshot = {
+    nodes = {
+      [1] = { id = 1, planet = "d1", last_served = 100,
+        demand = { { item = "a", unmet = 100 } }, surplus = {}, unmet_by_item = {} },
+      [2] = { id = 2, planet = "d2", last_served = nil,
+        demand = { { item = "b", unmet = 100 } }, surplus = {}, unmet_by_item = {} },
+      [3] = { id = 3, planet = "d3", last_served = 50,
+        demand = { { item = "c", unmet = 100 } }, surplus = {}, unmet_by_item = {} },
+      [4] = { id = 4, planet = "s1", surplus = { ["a"] = 500 }, unmet_by_item = {} },
+      [5] = { id = 5, planet = "s2", surplus = { ["b"] = 500 }, unmet_by_item = {} },
+      [6] = { id = 6, planet = "s3", surplus = { ["c"] = 500 }, unmet_by_item = {} },
+    },
+    ships = {
+      { id = 1, capacity = 1000, entry = { enrolled = true, state = fleet.IDLE } },
+      { id = 2, capacity = 1000, entry = { enrolled = true, state = fleet.IDLE } },
+      { id = 3, capacity = 1000, entry = { enrolled = true, state = fleet.IDLE } },
+    },
+  }
+  local served = {}
+  for _, p in ipairs(dispatcher.plan(snapshot)) do served[p.dest_id] = true end
+  assert_eq(served, { [1] = true, [2] = true, [3] = true },
+    "ample ships -> every demanding destination served regardless of order")
+end)
+
+describe("dispatcher.plan -- two-pass min-load gate (full load wins Pass 1, leftover ships Pass 2)", function()
+  -- A full-load route (fill 1.0) and a sub-threshold route (fill 0.1) at
+  -- min_load_fraction 0.5. The sub route is OLDER, so it is tried first in Pass 1
+  -- and DEFERRED (gate), letting the full load take the lone ship. Capacity is in
+  -- slots; stack_size 100 so 1000 items = 10 slots = a full hold.
+  local function snap()
+    return {
+      min_load_fraction = 0.5,
+      nodes = {
+        -- sub route is OLDER (nil) so Pass 1 reaches it first and must still defer it.
+        [1] = { id = 1, planet = "subdest", last_served = nil,
+          demand = { { item = "b", unmet = 100, stack_size = 100 } }, surplus = {}, unmet_by_item = {} },
+        [2] = { id = 2, planet = "fulldest", last_served = 10,
+          demand = { { item = "a", unmet = 1000, stack_size = 100 } }, surplus = {}, unmet_by_item = {} },
+        [3] = { id = 3, planet = "asrc", surplus = { ["a"] = 1000 }, unmet_by_item = {} },
+        [4] = { id = 4, planet = "bsrc", surplus = { ["b"] = 100 }, unmet_by_item = {} },
+      },
+      ships = { { id = 1, capacity = 10, entry = { enrolled = true, state = fleet.IDLE } } },
+    }
+  end
+  -- one ship: the full load wins Pass 1; the sub-threshold route is deferred and
+  -- finds no idle ship in Pass 2.
+  local one = dispatcher.plan(snap())
+  assert_eq(#one, 1, "one ship -> only the worthwhile load ships")
+  assert_eq(one[1].dest_id, 2, "full-load destination wins Pass 1 over the older sub-threshold one")
+  assert_eq(one[1].pass, 1, "worthwhile load committed in Pass 1")
+
+  -- two ships: Pass 1 ships the full load, Pass 2 mops up the sub-threshold route.
+  local s2 = snap()
+  s2.ships[2] = { id = 2, capacity = 10, entry = { enrolled = true, state = fleet.IDLE } }
+  local two = dispatcher.plan(s2)
+  assert_eq(#two, 2, "spare ship -> sub-threshold route also ships")
+  local by_dest = {}
+  for _, p in ipairs(two) do by_dest[p.dest_id] = p end
+  assert_eq(by_dest[2].pass, 1, "full load still Pass 1")
+  assert_eq(by_dest[1].pass, 2, "sub-threshold load deferred to Pass 2")
+end)
+
+describe("dispatcher.plan -- perishable trip is exempt from the min-load gate (ships Pass 1)", function()
+  -- A tiny perishable load (fill 0.1) under a near-total gate (0.9) must NOT wait
+  -- to batch -- it would rot. Perishables are exempt, so it commits in Pass 1.
+  local snapshot = {
+    min_load_fraction = 0.9,
+    nodes = {
+      [1] = { id = 1, planet = "dest",
+        demand = { { item = "egg@normal", unmet = 10, stack_size = 1, perishable = true } },
+        surplus = {}, unmet_by_item = {} },
+      [2] = { id = 2, planet = "src", demand = {},
+        surplus = { ["egg@normal"] = 50 }, unmet_by_item = {} },
+    },
+    ships = { { id = 1, capacity = 100, entry = { enrolled = true, state = fleet.IDLE } } },
+  }
+  local plans = dispatcher.plan(snapshot)
+  assert_eq(#plans, 1, "perishable trip ships despite the sub-threshold fill")
+  assert_eq(plans[1].pass, 1, "perishable exemption commits it in Pass 1, not deferred")
+  assert_eq(plans[1].manifest, { ["egg@normal"] = 10 }, "the small perishable load")
+end)
+
+describe("dispatcher.plan -- no deadlock: min_load 100 + tiny demand still ships (Pass 2)", function()
+  -- A permanently-sub-threshold demand (smaller than one full ship) under
+  -- min_load_fraction 1.0 can NEVER pass Pass 1, but an idle fleet must still
+  -- serve it in Pass 2 -- the gate lowers priority, it never blocks forever.
+  local snapshot = {
+    min_load_fraction = 1.0,
+    nodes = {
+      [1] = { id = 1, planet = "dest",
+        demand = { { item = "a", unmet = 100, stack_size = 100 } }, surplus = {}, unmet_by_item = {} },
+      [2] = { id = 2, planet = "src", surplus = { ["a"] = 100 }, unmet_by_item = {} },
+    },
+    ships = { { id = 1, capacity = 10, entry = { enrolled = true, state = fleet.IDLE } } },
+  }
+  local plans = dispatcher.plan(snapshot)
+  assert_eq(#plans, 1, "tiny demand is never permanently stranded")
+  assert_eq(plans[1].pass, 2, "served in Pass 2 (could never clear the 100% gate)")
+  assert_eq(plans[1].manifest, { ["a"] = 100 }, "the whole tiny demand still ships")
+end)
+
+describe("dispatcher.plan -- min_load_fraction absent reverts to old behavior (ship anything)", function()
+  -- No min_load_fraction on the snapshot (the test-runner / disabled-gate case):
+  -- a sub-threshold load ships immediately in Pass 1, exactly as pre-v1.8.
+  local snapshot = {
+    nodes = {
+      [1] = { id = 1, planet = "dest",
+        demand = { { item = "a", unmet = 100, stack_size = 100 } }, surplus = {}, unmet_by_item = {} },
+      [2] = { id = 2, planet = "src", surplus = { ["a"] = 100 }, unmet_by_item = {} },
+    },
+    ships = { { id = 1, capacity = 10, entry = { enrolled = true, state = fleet.IDLE } } },
+  }
+  local plans = dispatcher.plan(snapshot)
+  assert_eq(#plans, 1, "absent gate -> sub-threshold load ships")
+  assert_eq(plans[1].pass, 1, "no gate -> committed immediately in Pass 1")
+end)
+
+describe("dispatcher.plan -- deterministic: identical snapshot -> identical plan output", function()
+  -- plan mutates working surplus in place, so each run gets a freshly-built
+  -- snapshot; the two outputs must deep-equal (no pairs()-order leak, no
+  -- wall-clock / address-derived ids).
+  local function snap()
+    return {
+      min_load_fraction = 0.5,
+      nodes = {
+        [1] = { id = 1, planet = "d1", last_served = nil,
+          demand = { { item = "a", unmet = 1000, stack_size = 100 } }, surplus = {}, unmet_by_item = {} },
+        [2] = { id = 2, planet = "d2", last_served = 5,
+          demand = { { item = "b", unmet = 1000, stack_size = 100 } }, surplus = {}, unmet_by_item = {} },
+        [3] = { id = 3, planet = "s1", surplus = { ["a"] = 1000 }, unmet_by_item = {} },
+        [4] = { id = 4, planet = "s2", surplus = { ["b"] = 1000 }, unmet_by_item = {} },
+      },
+      ships = {
+        { id = 1, capacity = 10, entry = { enrolled = true, state = fleet.IDLE } },
+        { id = 2, capacity = 10, entry = { enrolled = true, state = fleet.IDLE } },
+      },
+    }
+  end
+  assert_eq(dispatcher.plan(snap()), dispatcher.plan(snap()),
+    "same snapshot -> byte-identical plan (deterministic across runs)")
+end)
+
+-- ---------------------------------------------------------------------------
 -- (reserved for future tasks)
 -- ---------------------------------------------------------------------------
 
