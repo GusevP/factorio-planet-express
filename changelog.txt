@@ -1,3 +1,11 @@
+Version: 1.8.0
+Date: 2026-06-22
+  Features:
+    - The fleet no longer lets a short, busy route hog every freed ship while a far planet with a huge backlog waits forever. Each planet now tracks how long it has gone unserved, and when ships are scarce the one that has waited longest wins the next ship — so a starved planet (say a distant Gleba with hundreds of outstanding requests) climbs the queue instead of being shut out by a fast Vulcanus-to-Nauvis science loop. The order is fully deterministic and survives save/load and multiplayer.
+    - New "Minimum load" setting (runtime-global, default 80%): a ship now waits to fill at least this fraction of its cargo before it dispatches, instead of burning a whole trip on a tiny partial load. Demand that can't fill a ship yet accumulates at the source and ships once it batches into a worthwhile load. Set it to 0 to ship any load immediately (the old behaviour). Perishable cargo and trips that would otherwise leave a ship idle are always exempt, so nothing rots or strands waiting to batch.
+  Changes:
+    - Lowering "Max ships per route" is no longer the recommended way to spread ships across planets — the new anti-starvation ordering distributes a scarce fleet fairly on its own.
+---------------------------------------------------------------------------------------------------
 Version: 1.7.0
 Date: 2026-06-20
   Features:
