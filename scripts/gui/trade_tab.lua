@@ -463,7 +463,7 @@ function trade_tab.on_gui_checked_state_changed(event)
   if not (el and el.valid and has_prefix(el.name, FLEET_TOGGLE_PREFIX)) then
     return
   end
-  local node = context(el)
+  local node, frame = context(el)
   if not node then
     return
   end
@@ -474,6 +474,11 @@ function trade_tab.on_gui_checked_state_changed(event)
   else
     node.import_flags[item] = false
   end
+  -- Re-render so the change shows immediately (e.g. the "this planet now" readout
+  -- drops/re-adds the item) instead of only on the next open. Safe for a checkbox:
+  -- the click already registered before the body rebuild. Mirrors the reserve
+  -- add/clear buttons (on_gui_click) and the Fleet tab's enroll toggle.
+  refresh_frame(frame)
 end
 
 -- Textfields: priority, default reserve, and per-item reserve overrides all
