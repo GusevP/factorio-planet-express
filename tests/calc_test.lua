@@ -4416,6 +4416,84 @@ describe("dispatcher.plan -- perishable trip is exempt from the min-load gate (s
   assert_eq(plans[1].manifest, { ["egg@normal"] = 10 }, "the small perishable load")
 end)
 
+describe("dispatcher.plan -- a RETURN-leg perishable also exempts the trip (ships Pass 1)", function()
+  -- Regression (Codex finding): the gate's perishable exemption originally scanned
+  -- only the FORWARD items, so a perishable carried HOME on the return leg could be
+  -- deferred -- and stranded under contention. Reproduction: dest S(1) is fully served
+  -- a NORMAL load by E(3), so best_source(S) = E and the perishable egg held by D(2)
+  -- never gets its own forward route. The egg's only path home is the RETURN leg of
+  -- the sub-threshold S->D filler route. Under min_load 0.9 that forward filler is
+  -- sub-threshold; with the fix the return-leg egg exempts it into Pass 1 (without it,
+  -- the route falls to Pass 2 and, with one ship, never ships).
+  local function snap()
+    return {
+      two_way = true,
+      min_load_fraction = 0.9,
+      nodes = {
+        -- S: still demands the egg + a big normal load; exports the filler D wants.
+        [1] = { id = 1, planet = "S", last_served = 100,
+          demand = {
+            { item = "egg@normal", unmet = 10, stack_size = 1, perishable = true },
+            { item = "n", unmet = 1000, stack_size = 100 },
+          },
+          surplus = { ["f"] = 100 }, unmet_by_item = { ["egg@normal"] = 10, ["n"] = 1000 } },
+        -- D: oldest (nil) so Pass 1 reaches it first; wants the filler, exports the egg.
+        [2] = { id = 2, planet = "D", last_served = nil,
+          demand = { { item = "f", unmet = 100, stack_size = 100 } },
+          surplus = { ["egg@normal"] = 50 }, unmet_by_item = { ["f"] = 100 } },
+        -- E: covers S's whole normal load in one stop -> best_source(S) = E, not D.
+        [3] = { id = 3, planet = "E",
+          demand = {}, surplus = { ["n"] = 1000 }, unmet_by_item = {} },
+      },
+      -- Two ships so both routes can ship; the discriminator is which PASS the
+      -- return-perishable route lands in (Pass 1 with the fix, Pass 2 without it).
+      ships = {
+        { id = 1, capacity = 10, entry = { enrolled = true, state = fleet.IDLE } },
+        { id = 2, capacity = 10, entry = { enrolled = true, state = fleet.IDLE } },
+      },
+    }
+  end
+  local plans = dispatcher.plan(snap())
+  local by_dest = {}
+  for _, p in ipairs(plans) do by_dest[p.dest_id] = p end
+  assert_true(by_dest[2] ~= nil, "the sub-threshold S->D filler route ships (its return leg carries the egg)")
+  assert_eq(by_dest[2].pass, 1, "return-leg perishable exempts the trip -> Pass 1 (was Pass 2 before the fix)")
+  assert_eq(by_dest[2].return_manifest, { ["egg@normal"] = 10 }, "the return leg carries the perishable egg home")
+  assert_eq(by_dest[2].manifest, { ["f"] = 100 }, "the forward leg still carries only the sub-threshold filler")
+end)
+
+describe("dispatcher.plan -- a netted (unmet=0) return-leg perishable does NOT exempt the trip", function()
+  -- Regression (Codex finding): return_perishable must mirror build_manifest's
+  -- loadability gate (surplus>0 AND unmet>0), not just surplus>0. Same topology as
+  -- the test above, but the source Y(1)'s egg demand is ALREADY netted to 0 (inbound
+  -- covers it). The return leg therefore carries NOTHING (build_manifest drops the
+  -- unmet==0 egg), so the perishable rationale for exempting the forward filler is
+  -- false. With the bug the phantom egg promotes the sub-threshold X->Y... (forward
+  -- f, dest X) filler into Pass 1; with the fix it stays sub-threshold and, being the
+  -- only route, ships in Pass 2 instead. One ship makes the PASS the discriminator.
+  local snapshot = {
+    two_way = true,
+    min_load_fraction = 0.9,
+    nodes = {
+      -- Y: the forward SOURCE -- exports the filler f, and wants the egg back, but its
+      -- egg demand is already netted to 0, so the return leg can load nothing.
+      [1] = { id = 1, planet = "Y", last_served = 100,
+        demand = { { item = "egg@normal", unmet = 0, stack_size = 1, perishable = true } },
+        surplus = { ["f"] = 100 }, unmet_by_item = {} },
+      -- X: oldest (nil) so Pass 1 reaches it first; wants the filler f, exports the egg.
+      [2] = { id = 2, planet = "X", last_served = nil,
+        demand = { { item = "f", unmet = 100, stack_size = 100 } },
+        surplus = { ["egg@normal"] = 50 }, unmet_by_item = { ["f"] = 100 } },
+    },
+    ships = { { id = 1, capacity = 10, entry = { enrolled = true, state = fleet.IDLE } } },
+  }
+  local plans = dispatcher.plan(snapshot)
+  assert_eq(#plans, 1, "the single ship serves one route")
+  assert_eq(plans[1].dest_id, 2, "X (oldest) wins the ship; the forward leg carries the filler f")
+  assert_eq(plans[1].pass, 2, "sub-threshold filler is deferred to Pass 2 -- the unmet=0 egg must NOT exempt it (was Pass 1 with the bug)")
+  assert_true(plans[1].return_manifest == nil, "no return leg: the egg's unmet is 0, so nothing rides home")
+end)
+
 describe("dispatcher.plan -- no deadlock: min_load 100 + tiny demand still ships (Pass 2)", function()
   -- A permanently-sub-threshold demand (smaller than one full ship) under
   -- min_load_fraction 1.0 can NEVER pass Pass 1, but an idle fleet must still

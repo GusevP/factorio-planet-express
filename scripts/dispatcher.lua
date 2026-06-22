@@ -525,6 +525,40 @@ function dispatcher.return_manifest(snapshot, source_id, dest_id, capacity)
   return schedule.build_manifest(dispatcher.perishable_filter(items), capacity)
 end
 
+-- Pure: would the return leg (dest -> source) carry a PERISHABLE? Scans the same
+-- candidates `return_manifest` would load -- items the SOURCE still demands that the
+-- DEST can export (guarded by the same `exportable`) -- but tests ONLY the perishable
+-- bit. Used to extend the min-load gate's perishable exemption to the return leg: a
+-- perishable carried HOME rots if deferred to batch exactly like a forward-leg one,
+-- and because aging orders DESTINATIONS (not sources) the perishable's own forward
+-- route may never be the chosen source, leaving the return leg its only path (a
+-- higher-coverage source keeps winning the demander). A true result implies a
+-- non-empty perishable return manifest: the candidate has exportable surplus and open
+-- unmet, so `build_manifest` packs it (and `perishable_filter` isolates it). Same
+-- (source_id, dest_id) convention as `return_manifest`. Pure over the snapshot.
+function dispatcher.return_perishable(snapshot, source_id, dest_id)
+  local return_dest = snapshot.nodes[source_id]   -- source planet (wants items back)
+  local return_src = snapshot.nodes[dest_id]      -- dest planet (offers surplus back)
+  if not (return_dest and return_src and return_dest.demand) then
+    return false
+  end
+  for _, d in ipairs(return_dest.demand) do
+    -- Mirror build_manifest's loadability gate EXACTLY (surplus>0 AND unmet>0):
+    -- exportable surplus is the `surplus>0` half, but a perishable whose `d.unmet`
+    -- has been netted to 0 -- by upstream inbound netting OR by this tick's
+    -- credit_inbound when the source already received a return leg -- does NOT load
+    -- on the return leg (build_manifest drops unmet==0 items). Without the unmet
+    -- check this predicate returns true while return_manifest packs {}, falsely
+    -- exempting a sub-threshold forward trip into Pass 1. Requiring open unmet keeps
+    -- it truthful: true <=> return_manifest actually carries a perishable home.
+    if d.perishable and (d.unmet or 0) > 0
+      and dispatcher.exportable(return_src, d.item) > 0 then
+      return true
+    end
+  end
+  return false
+end
+
 -- ---------------------------------------------------------------------------
 -- pure planner
 -- ---------------------------------------------------------------------------
@@ -750,6 +784,17 @@ function dispatcher.plan(snapshot)
           local perishable_trip = false
           for _, it in ipairs(items) do
             if it.perishable then perishable_trip = true break end
+          end
+          -- A perishable rides HOME on the return leg too (return_manifest runs the
+          -- same perishable_filter), and it rots if deferred to batch -- so a
+          -- return-leg perishable exempts the WHOLE trip from the gate exactly like a
+          -- forward-leg one. Without this, a sub-threshold forward load whose return
+          -- leg is a perishable's only path is stranded under contention: aging orders
+          -- destinations, so best_source can keep choosing a higher-coverage source and
+          -- the perishable's own forward route never fires. Look ahead here (pure); the
+          -- return manifest itself is still built + drained below only on commit.
+          if not perishable_trip and two_way then
+            perishable_trip = dispatcher.return_perishable(snapshot, s_id, d_id)
           end
           local fill = 0
           if next(manifest) ~= nil then
