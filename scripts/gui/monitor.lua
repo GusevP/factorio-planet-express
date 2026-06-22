@@ -60,8 +60,16 @@ local DOCK_COLOR_STUCK = { r = 1.0, g = 0.55, b = 0.55 }
 local DOCK_COLOR_OK = { r = 1.0, g = 1.0, b = 1.0 }
 
 -- The state-filter dropdown options. Index 1 is "any"; the rest map to fleet
--- lifecycle states. Kept in one place so the dropdown and the lookup agree.
+-- lifecycle states. STATE_OPTIONS holds the internal VALUES (the filter handler maps
+-- selected_index -> value); STATE_CAPTIONS is the parallel LOCALISED dropdown labels,
+-- derived 1:1 so they never drift. The `state-<value>` keys are SHARED with the
+-- per-ship status label below (idle/enroute/loading/unloading/withdrawn localise the
+-- same way in both places).
 local STATE_OPTIONS = { "any", fleet.IDLE, fleet.ENROUTE, fleet.LOADING, fleet.UNLOADING, fleet.WITHDRAWN }
+local STATE_CAPTIONS = {}
+for i = 1, #STATE_OPTIONS do
+  STATE_CAPTIONS[i] = { "planet-express.state-" .. STATE_OPTIONS[i] }
+end
 
 -- Caption prefix for a live in-flight ETA label. Shared between the full render
 -- (below) and the 1s ETA-only refresh (`refresh_eta`) so the in-place repaint
@@ -210,12 +218,19 @@ local function render_body(body, view)
       -- here too so the expanded roster agrees with the dock's "N stuck". A "held"
       -- ship (idle + ready-signal gate reading 0) shows "held" so it isn't mistaken
       -- for a missing ship -- ROW-only label (it still counts as idle in the dock).
-      info.add({ type = "label", caption = r.stranded and "stuck" or (r.held and "held") or (r.state or "-") })
+      local status_caption =
+        (r.stranded and { "planet-express.state-stuck" })
+        or (r.held and { "planet-express.state-held" })
+        or (r.state and { "planet-express.state-" .. r.state })
+        or { "planet-express.state-unknown" }
+      info.add({ type = "label", caption = status_caption })
       -- "on <planet>" only when the ship is actually parked somewhere (in transit
-      -- has no current planet).
+      -- has no current planet). ONE localised label with the planet as a __1__ param
+      -- (planet_caption carries the planet's own icon + localised name), so each
+      -- language controls the word order around the planet -- a standalone "on" word
+      -- can't (e.g. Japanese/Korean put the particle AFTER the planet).
       if r.location then
-        info.add({ type = "label", caption = " on " })
-        common.planet_box(info, r.location)
+        info.add({ type = "label", caption = { "planet-express.state-located", common.planet_caption(r.location) } })
       end
       -- Live ETA for an in-flight ship (gather measured a usable progress-rate);
       -- absent for parked / just-departed ships (rate not yet trustworthy). Tagged
@@ -456,7 +471,7 @@ function monitor.open(player)
   filters.add({
     type = "drop-down",
     name = FILTER_STATE,
-    items = STATE_OPTIONS,
+    items = STATE_CAPTIONS,
     selected_index = 1,
   })
   -- Source-selection strategy for this player's force (persisted per force). Lives in

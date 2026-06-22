@@ -27,7 +27,7 @@ local common = {}
 -- `game.planets[name].prototype.localised_name` is the display name (api-notes §5,
 -- confirmed); `[planet=<name>]` is the icon (rich text, provisional). Local so the
 -- caption shaping stays in one place.
-local function planet_caption(name)
+function common.planet_caption(name)
   if name == nil then
     return "—"
   end
@@ -42,7 +42,7 @@ end
 -- everywhere. Adds the box to `parent` and returns the element. A nil / unknown
 -- `name` degrades to a plain dash, so callers never special-case a missing planet.
 function common.planet_box(parent, name)
-  return parent.add({ type = "label", caption = planet_caption(name) })
+  return parent.add({ type = "label", caption = common.planet_caption(name) })
 end
 
 -- ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ Date: 2026-06-22
     - A ship on a two-way route could occasionally get stuck at a loading stop requesting the wrong leg's cargo — the goods meant for the trip home instead of the ones it was supposed to pick up there — so the load never completed and the ship eventually left only partly full. This happened when a refuel or rearm interrupt briefly bumped the ship off its loading stop and back. The mod now re-checks and corrects each ship's hub request every fleet tick, so a request that drifted onto the wrong leg fixes itself within moments instead of stranding the ship until its load timer runs out.
   Locale:
     - Item and quality names now display in your game language, with their icons, wherever the mod lists cargo — the Cargo Landing Pad's Trade panel (requested items, reserves, and the "this planet now" readout) and the Fleet Monitor — instead of raw internal names like "iron-plate (uncommon)".
+    - More of the Fleet Monitor is now translated: each ship's status (in transit, loading on a planet, unloading, idle, stuck, held), the state filter, and the Source toggle. The Source toggle's "Fastest / Most surplus" labels had been English-only since they were added; they — and the new status/filter labels — are now translated across all 15 supported languages.
 ---------------------------------------------------------------------------------------------------
 Version: 1.8.0
 Date: 2026-06-22
