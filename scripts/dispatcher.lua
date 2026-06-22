@@ -1227,10 +1227,27 @@ function dispatcher.commit(p, tick)
   fleet.set_state(p.ship_id, fleet.ENROUTE)
   fleet.set_assignment(p.ship_id, id)
 
+  -- Aging clock (v1.8.0): stamp the node that PHYSICALLY received this forward
+  -- manifest -- `p.dest_id` (post-flip-relabel; see the route-flip section in the
+  -- plan), so the clock is always truthful about who just got served. Only on a
+  -- successful write (the `built` branch above already returned on failure), so a
+  -- skipped/failed dispatch never advances a node's clock and it keeps aging.
+  -- Guard the node table: a pad de-registered between snapshot and commit leaves no
+  -- `storage.nodes` entry, and we must not error stamping a clock onto nothing.
+  local dest_node = storage.nodes and storage.nodes[p.dest_id]
+  if dest_node then
+    dest_node.last_served_tick = tick
+  end
+
+  -- Debug breadcrumbs: which pass committed this (1 = worthwhile load, 2 =
+  -- leftover) and the dest's age in ticks (tick - last_served; "new" for a
+  -- never-served node whose `last_served` is nil).
+  local age = p.last_served and (tick - p.last_served) or nil
   state.debug_log(string.format(
-    "dispatch a#%d: %s -> %s via ship#%s %s",
+    "dispatch a#%d: %s -> %s via ship#%s %s [pass %s age %s]",
     id, tostring(p.source_planet), tostring(p.dest_planet),
-    tostring(p.ship_id), manifest_str(p.manifest)))
+    tostring(p.ship_id), manifest_str(p.manifest),
+    tostring(p.pass or "?"), age and tostring(age) or "new"))
 
   return id
 end
@@ -1283,9 +1300,30 @@ function dispatcher.unserved_reason(snapshot, dest)
         stack_size = d.stack_size, perishable = d.perishable }
     end
   end
-  if next(schedule.build_manifest(dispatcher.perishable_filter(items), ship.capacity)) == nil then
+  items = dispatcher.perishable_filter(items)
+  local manifest = schedule.build_manifest(items, ship.capacity)
+  if next(manifest) == nil then
     return "source=" .. tostring(src.planet) .. " ship#" .. tostring(ship.id)
       .. " but nothing loads (ship capacity " .. tostring(ship.capacity) .. " or every clamp = 0)"
+  end
+  -- Min-load gate (v1.8.0): a non-empty but sub-threshold load is DEFERRED, not
+  -- dropped -- Pass 2 would ship it if a ship were free. Slotted BEFORE the route-cap
+  -- check so a deferred load isn't misreported as a cap problem. Mirror `plan`'s fill
+  -- math exactly (slots / capacity), and exempt perishable trips just as the planner
+  -- does. NOTE: this can't tell "deferred, would ship in Pass 2 once a ship frees" from
+  -- "no ship at all this tick" -- `used` is empty here, so it answers "could ANY ship
+  -- serve it" -- acceptable for a diagnostic.
+  local min_fill = snapshot.min_load_fraction or 0
+  local perishable_trip = false
+  for _, it in ipairs(items) do
+    if it.perishable then perishable_trip = true break end
+  end
+  local fill = schedule.manifest_slots(manifest, items) / ship.capacity
+  if min_fill > 0 and fill < min_fill and not perishable_trip then
+    return string.format(
+      "source=%s ship#%s ready, but the load is SUB-THRESHOLD (fill %d%% < min-load %d%%) -- "
+        .. "deferred to Pass 2; it ships once a ship is free or the demand accumulates to a full load",
+      tostring(src.planet), tostring(ship.id), math.floor(fill * 100), math.floor(min_fill * 100))
   end
   local rkey = dispatcher.route_key(src.id, dest.id)
   local max_route = snapshot.max_ships_route or 0
@@ -1354,10 +1392,11 @@ function dispatcher.diagnose()
   local lines = {}
   local function add(s) lines[#lines + 1] = s end
 
-  add(string.format("settings: debug=%s interval=%d two_way=%s min_trip=%d max_global=%d max_route=%d",
+  add(string.format("settings: debug=%s interval=%d two_way=%s min_trip=%d max_global=%d max_route=%d min_load=%d%%",
     tostring(state.debug_enabled()), dispatcher.interval(), tostring(two_way_enabled()),
     stock.min_trip(), state.setting(dispatcher.MAX_GLOBAL_SETTING, 0),
-    state.setting(dispatcher.MAX_ROUTE_SETTING, 5)))
+    state.setting(dispatcher.MAX_ROUTE_SETTING, 5),
+    state.setting(dispatcher.MIN_LOAD_SETTING, dispatcher.MIN_LOAD_DEFAULT)))
 
   local node_ids = state.sorted_keys(snapshot.nodes)
   add("nodes: " .. #node_ids)
