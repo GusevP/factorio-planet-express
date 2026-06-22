@@ -584,6 +584,39 @@ end
 -- Returns a list of plans: { source_id, source_planet, dest_id, dest_planet,
 --   ship_id, ship, manifest = {[qkey]=qty}, items = {{item=qkey,surplus,unmet,
 --   stack_size},...}, return_manifest = {[qkey]=qty}|nil }.
+
+-- Pure destination-ordering comparator (anti-starvation aging clock).
+--
+-- Returns the list of node ids sorted by (last_served ASC, id ASC): the node
+-- that has waited longest since it was last served wins the contested ship pick
+-- first; ties break by node id for a total deterministic order (multiplayer +
+-- save/load safe). `last_served` is `node.last_served_tick` copied onto the
+-- snapshot node by `build_snapshot` -- `nil` for a never-served node.
+--
+-- CRITICAL: coerce `nil` to a sentinel STRICTLY LESS THAN ANY REAL TICK before
+-- the `<` so `table.sort` never compares `nil` with a number (which crashes the
+-- dispatcher tick -- the normal state is a mix of served + never-served nodes).
+-- Use -1, NOT 0: tick 0 is a valid game tick, so a never-served node must sort
+-- ahead of a node served at tick 0. A never-served node is "infinitely old"
+-- (waiting since map start) and fairly sorts first.
+--
+-- Pure: no engine globals, no `storage`. (`state.sorted_keys` stays the order
+-- for order-independent loops elsewhere; this is the decision order for the
+-- destination loop only.)
+function dispatcher.dest_order(nodes)
+  local ids = {}
+  for id in pairs(nodes) do
+    ids[#ids + 1] = id
+  end
+  table.sort(ids, function(a_id, b_id)
+    local ta = nodes[a_id].last_served or -1
+    local tb = nodes[b_id].last_served or -1
+    if ta ~= tb then return ta < tb end   -- oldest (incl. nil) first
+    return a_id < b_id                     -- integer-id tiebreak -> total order
+  end)
+  return ids
+end
+
 function dispatcher.plan(snapshot)
   local plans = {}
   local used = {}
