@@ -582,36 +582,40 @@ end
 function watchdog.note_progress(a, platform, tick)
   local sched = platform and platform.valid and platform.schedule
   local current = sched and sched.current
-  if not watchdog.advanced(a.progress_index, current) then
+  -- Interrupt guard: only act on a stop that is one of OUR route stations. A
+  -- refuel/rearm INTERRUPT can splice in its own record(s) (the simplified schedule
+  -- the mod wrote excludes interrupts), shifting `current` onto a station we never
+  -- wrote; re-pointing the single hub request off that foreign index (stop_request
+  -- keys by index) would request the wrong leg's cargo. Skip WITHOUT touching the
+  -- request -- it self-corrects once the ship is back on one of our stops.
+  -- (Interrupt behavior still-to-confirm in-engine -- docs/api-notes.md §1.)
+  if not watchdog.current_is_ours(a, sched and sched.records, current) then
     return
   end
-  -- Interrupt guard: only re-point/commit on a stop that is one of OUR route
-  -- stations. A refuel/rearm INTERRUPT can splice in its own record(s) (the
-  -- simplified schedule the mod wrote excludes interrupts), shifting `current` onto
-  -- a station we never wrote; re-pointing the single hub request off that foreign
-  -- index (stop_request keys by index) would request the wrong leg's cargo. Skip
-  -- WITHOUT committing progress, so the advance is re-detected and handled once the
-  -- ship returns to a route stop. (Interrupt behavior still-to-confirm in-engine --
-  -- docs/api-notes.md §1; defensive hygiene regardless.)
-  if not watchdog.current_is_ours(a, sched.records, current) then
-    return
-  end
-  -- Re-point the single global hub request to whatever this stop should load
-  -- (forward at the source, cleared during unload, the return manifest at the
-  -- return-load stop, cleared on the drop -- see `stop_request`). Commit the new
-  -- progress index + reset the no-progress deadline ONLY when the re-point
-  -- succeeds: a failed hub write leaves `progress_index` behind so the advance is
-  -- re-detected and retried next tick, instead of silently skipping (e.g.) the
-  -- return-load request and carrying nothing home. A ship whose hub stays
-  -- unreachable still trips the existing deadline and is freed. At the source
-  -- (stop 1) the request is then refined by `maybe_reclamp`, which runs after
-  -- note_progress in the tick loop.
+  -- Re-point the single global hub request to whatever the CURRENT stop should load
+  -- (forward at the source, the return manifest at the return-load stop, cleared on
+  -- unload/drop -- see `stop_request`) EVERY tick the ship is on one of our stops --
+  -- NOT only on a monotonic advance. `progress_index` advances one-way, so an
+  -- advance-only re-point could never move the request BACK: a refuel/rearm interrupt
+  -- that bounces `current` off the forward load stop (advancing it to the return leg
+  -- and back) would strand the request on the RETURN manifest, so the forward cargo
+  -- is never requested and the ship waits out the timeout with a partial load.
+  -- (Observed: a Gleba->Nauvis two-way trip parked at the Gleba load stop still
+  -- requesting biter-egg FROM NAUVIS -- the return leg.) Re-pointing by `current`
+  -- every tick self-heals it; the write is idempotent when the request already matches.
   local manifest, import_from = watchdog.stop_request(a, current)
   if watchdog.rewrite_source_request(platform, manifest, import_from) == false then
-    return
+    return -- hub unreachable; retry next tick (the no-progress deadline still trips)
   end
-  a.progress_index = current
-  a.deadline_tick = tick + (a.deadline_window or watchdog.DEADLINE_WINDOW)
+  -- Reset the no-progress deadline ONLY on a genuine ADVANCE to a new stop. The
+  -- deadline is a NO-PROGRESS watchdog (a stuck ship is freed); re-pointing the
+  -- request on a steady `current` must not keep resetting it, or a stuck ship would
+  -- never time out. At the source (stop 1) the request is then refined by
+  -- `maybe_reclamp`, which runs after note_progress in the tick loop.
+  if watchdog.advanced(a.progress_index, current) then
+    a.progress_index = current
+    a.deadline_tick = tick + (a.deadline_window or watchdog.DEADLINE_WINDOW)
+  end
 end
 
 -- A SpaceLocationID is recorded as a name string, but stay robust if the runtime
