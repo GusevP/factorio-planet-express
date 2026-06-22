@@ -59,22 +59,31 @@ local function item_tag(name, quality)
   return "[item=" .. name .. ",quality=" .. quality .. "]"
 end
 
--- A planet's item-box sibling: one element showing an item's icon + localised name
--- (with the quality parenthesised when not normal), for the line-per-item views
--- (Monitor waiting detail, future cargo views). `key` is the compound qkey;
--- `prototypes.item[name].localised_name` is the display name (2.0 `prototypes`),
--- falling back to the raw name. Adds the box to `parent` and returns it.
-function common.item_box(parent, key)
-  local name, quality = qkey.qparse(key)
-  local proto = prototypes and prototypes.item and prototypes.item[name]
-  local nice = proto and proto.localised_name or name
-  local caption
-  if quality ~= qkey.DEFAULT_QUALITY then
-    caption = { "", item_tag(name, quality) .. " ", nice, " (", quality, ")" }
-  else
-    caption = { "", item_tag(name, quality) .. " ", nice }
+-- Localised caption for an item: icon + the item's LOCALISED name, with the
+-- LOCALISED quality name parenthesised when not normal. Returns a localised-string
+-- ARRAY (not an element) so callers can compose it -- e.g. append a count. `name` /
+-- `quality` are the bare item name + quality (a decoded qkey).
+-- `prototypes.item[name].localised_name` and `prototypes.quality[quality].localised_name`
+-- (both inherit LuaPrototypeBase.localised_name, 2.0 `prototypes`) are the display
+-- names, each falling back to the raw internal name when the prototype is absent (the
+-- pure-Lua test runner). Centralised here so every view localises items identically.
+function common.item_caption(name, quality)
+  local iproto = prototypes and prototypes.item and prototypes.item[name]
+  local iname = iproto and iproto.localised_name or name
+  if quality == nil or quality == qkey.DEFAULT_QUALITY then
+    return { "", item_tag(name, quality) .. " ", iname }
   end
-  return parent.add({ type = "label", caption = caption })
+  local qproto = prototypes and prototypes.quality and prototypes.quality[quality]
+  local qname = qproto and qproto.localised_name or quality
+  return { "", item_tag(name, quality) .. " ", iname, " (", qname, ")" }
+end
+
+-- A planet's item-box sibling: one element showing an item's icon + localised name
+-- (quality parenthesised when not normal), for the line-per-item views (Monitor
+-- waiting detail, future cargo views). `key` is the compound qkey. Adds the box to
+-- `parent` and returns it.
+function common.item_box(parent, key)
+  return parent.add({ type = "label", caption = common.item_caption(qkey.qparse(key)) })
 end
 
 -- Walk `el`'s ancestry upward and return the first ancestor (or `el` itself)

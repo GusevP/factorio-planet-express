@@ -201,7 +201,7 @@ local function render_imports(body, node)
   t.add({ type = "label", caption = { "planet-express.trade-col-fleet" } })
   t.add({ type = "label", caption = { "planet-express.trade-col-priority" } })
   for _, name in ipairs(names) do
-    t.add({ type = "label", caption = name })
+    common.item_box(t, name)  -- icon + localised name (import flags are per bare name)
     t.add({
       type = "checkbox",
       name = FLEET_TOGGLE_PREFIX .. name,
@@ -258,7 +258,7 @@ local function render_reserves(body, node)
   if #names > 0 then
     local t = body.add({ type = "table", column_count = 3 })
     for _, item in ipairs(names) do
-      t.add({ type = "label", caption = item })
+      common.item_box(t, item)  -- icon + localised name (reserves are per bare name)
       numeric_field(t, RESERVE_ITEM_PREFIX .. item, items[item], 70, RESERVE_FIELD_OPTS)
       t.add({
         type = "sprite-button",
@@ -290,7 +290,8 @@ local function render_readout(body, node)
   local view = viewmodel.build_node_readout(viewmodel.gather_node(node, game and game.tick or 0))
 
   -- build_node_readout decodes each cargo qkey into a bare item NAME + quality;
-  -- qkey.label_parts renders that as "iron-plate" (or "iron-plate (uncommon)").
+  -- common.item_caption renders that as an icon + LOCALISED item name (and localised
+  -- quality in parens), composed here with the plain count suffix.
   body.add({ type = "label", caption = { "planet-express.trade-now-demand" } })
   if #view.demand == 0 then
     body.add({ type = "label", caption = { "planet-express.trade-none" } })
@@ -298,7 +299,7 @@ local function render_readout(body, node)
     for _, d in ipairs(view.demand) do
       body.add({
         type = "label",
-        caption = string.format("  %s x%d (p%d)", qkey.label_parts(d.item, d.quality), d.unmet, d.priority),
+        caption = { "", "  ", common.item_caption(d.item, d.quality), " x" .. d.unmet .. " (p" .. d.priority .. ")" },
       })
     end
   end
@@ -308,7 +309,7 @@ local function render_readout(body, node)
     body.add({ type = "label", caption = { "planet-express.trade-none" } })
   else
     for _, s in ipairs(view.surplus) do
-      body.add({ type = "label", caption = string.format("  %s x%d", qkey.label_parts(s.item, s.quality), s.qty) })
+      body.add({ type = "label", caption = { "", "  ", common.item_caption(s.item, s.quality), " x" .. s.qty } })
     end
   end
 
@@ -317,7 +318,7 @@ local function render_readout(body, node)
     body.add({ type = "label", caption = { "planet-express.trade-none" } })
   else
     for _, i in ipairs(view.inbound) do
-      body.add({ type = "label", caption = string.format("  %s x%d", qkey.label_parts(i.item, i.quality), i.qty) })
+      body.add({ type = "label", caption = { "", "  ", common.item_caption(i.item, i.quality), " x" .. i.qty } })
     end
   end
 end
