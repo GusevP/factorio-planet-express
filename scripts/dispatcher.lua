@@ -633,7 +633,21 @@ function dispatcher.plan(snapshot)
   local committed_global = 0
   local committed_by_route = {}
 
-  for _, dest_id in ipairs(state.sorted_keys(snapshot.nodes)) do
+  -- Destinations committed this tick (Pass 1 or Pass 2). Guards Pass 2 so a
+  -- destination already served isn't reconsidered.
+  local committed_dest = {}
+
+  -- Per-destination "compute candidate + maybe commit" body, run in two passes
+  -- with different `min_fill` thresholds over the SAME aging order. Shared state
+  -- (used, committed_global, committed_by_route, committed_dest, plans) is
+  -- captured so the concurrency caps hold across the WHOLE tick, not per pass.
+  --
+  -- INVARIANT: best_source / items / manifest / fill are recomputed fresh on
+  -- every call -- NEVER cached across passes -- so Pass 2 observes Pass 1's
+  -- surplus drains and inbound credits. Do not "optimize" by caching the Pass-1
+  -- manifest: a dest deferred in Pass 1 must see the up-to-date working surplus
+  -- when reconsidered in Pass 2.
+  local function try_plan_dest(dest_id, min_fill, pass)
     local dest = snapshot.nodes[dest_id]
     if dest.demand and #dest.demand > 0 then
       local src = dispatcher.best_source(snapshot, dest)
@@ -718,8 +732,24 @@ function dispatcher.plan(snapshot)
             or (active_global + committed_global < max_global)
           local within_route = (max_route <= 0)
             or ((active_by_route[rkey] or 0) + (committed_by_route[rkey] or 0) < max_route)
-          if next(manifest) ~= nil and within_global and within_route then
+          -- Min-load gate input. `fill` = used slots / ship slot budget; a trip is
+          -- exempt when it carries any perishable (isolated to its own fast trip by
+          -- perishable_filter -- it must not wait to batch or it rots). Compute fill
+          -- ONLY when the manifest is non-empty: build_manifest returns {} for a
+          -- 0-capacity ship, and `next(manifest) ~= nil` (kept FIRST in the guard's
+          -- `and` chain) short-circuits before the `slots / ship.capacity` division.
+          local perishable_trip = false
+          for _, it in ipairs(items) do
+            if it.perishable then perishable_trip = true break end
+          end
+          local fill = 0
+          if next(manifest) ~= nil then
+            fill = schedule.manifest_slots(manifest, items) / ship.capacity
+          end
+          if next(manifest) ~= nil and within_global and within_route
+            and (fill >= min_fill or perishable_trip) then
             used[ship.id] = true
+            committed_dest[dest_id] = true
             committed_global = committed_global + 1
             committed_by_route[rkey] = (committed_by_route[rkey] or 0) + 1
             -- supply-side within-tick bookkeeping: drain the working surplus so
@@ -767,10 +797,32 @@ function dispatcher.plan(snapshot)
               manifest = manifest,
               items = items,
               return_manifest = return_manifest,
+              -- Debug-log breadcrumbs (rendered by commit): which pass committed
+              -- this route, and the dest's aging clock (last_served tick, nil =
+              -- never served). commit computes elapsed age = tick - last_served.
+              pass = pass,
+              last_served = dest.last_served,
             }
           end
         end
       end
+    end
+  end
+
+  -- Frozen aging order, computed ONCE and reused for both passes; the clock is
+  -- written in `commit` (to storage), never to snapshot.nodes mid-tick, so the
+  -- sort can't shift between passes.
+  local order = dispatcher.dest_order(snapshot.nodes)
+  -- Pass 1: commit only worthwhile loads (fill >= min_load) or perishable trips.
+  for _, dest_id in ipairs(order) do
+    try_plan_dest(dest_id, snapshot.min_load_fraction or 0, 1)
+  end
+  -- Pass 2: leftovers -- ships Pass 1 left idle haul the remaining sub-threshold
+  -- routes (still aging order, min_fill 0). A node no ship reached in either pass
+  -- keeps aging and wins next tick.
+  for _, dest_id in ipairs(order) do
+    if not committed_dest[dest_id] then
+      try_plan_dest(dest_id, 0, 2)
     end
   end
 
