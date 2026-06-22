@@ -1032,6 +1032,26 @@ function dispatcher.interval()
   return state.setting(dispatcher.INTERVAL_SETTING, dispatcher.INTERVAL)
 end
 
+-- The node ids that PHYSICALLY receive cargo from a committed plan: the forward
+-- destination always, plus the source when a two-way return leg carries goods back
+-- to it. `commit` stamps the aging clock (`last_served_tick`) on each.
+--
+-- Both endpoints must be stamped because a two-way trade serves BOTH planets'
+-- demand -- the forward leg the dest, the return leg the source. Stamping only the
+-- forward dest (the v1.8.0 bug) starves a reciprocal pair under a scarce fleet: the
+-- ETA flip relabels the route so the iterated low-id demander becomes the SOURCE and
+-- is served by the return leg, so its clock never advances, so it perpetually sorts
+-- oldest in `dest_order` and monopolizes the only ship (the observed Nauvis<->Gleba
+-- loop that ignored every other planet). Pure: plain table reads, no engine globals.
+function dispatcher.served_nodes(p)
+  local ids = { p.dest_id }
+  if p.return_manifest and next(p.return_manifest) ~= nil
+    and p.source_id ~= nil and p.source_id ~= p.dest_id then
+    ids[#ids + 1] = p.source_id
+  end
+  return ids
+end
+
 -- Build the per-tick snapshot the pure planner consumes. Reads demand + surplus
 -- through the IO wrappers (all per-tick cached) and folds in the supply-
 -- side committed-surplus bookkeeping. Surplus is computed ONLY for items some
@@ -1272,16 +1292,19 @@ function dispatcher.commit(p, tick)
   fleet.set_state(p.ship_id, fleet.ENROUTE)
   fleet.set_assignment(p.ship_id, id)
 
-  -- Aging clock (v1.8.0): stamp the node that PHYSICALLY received this forward
-  -- manifest -- `p.dest_id` (post-flip-relabel; see the route-flip section in the
-  -- plan), so the clock is always truthful about who just got served. Only on a
-  -- successful write (the `built` branch above already returned on failure), so a
-  -- skipped/failed dispatch never advances a node's clock and it keeps aging.
-  -- Guard the node table: a pad de-registered between snapshot and commit leaves no
-  -- `storage.nodes` entry, and we must not error stamping a clock onto nothing.
-  local dest_node = storage.nodes and storage.nodes[p.dest_id]
-  if dest_node then
-    dest_node.last_served_tick = tick
+  -- Aging clock (v1.8.0): stamp every node this plan PHYSICALLY delivered to --
+  -- the forward dest and, on a two-way trade, the return-leg source (see
+  -- dispatcher.served_nodes for why BOTH must advance, or a reciprocal pair starves
+  -- the rest of the fleet). Only on a successful write (the `built` branch above
+  -- already returned on failure), so a skipped/failed dispatch never advances a
+  -- clock and the node keeps aging. Guard the node table: a pad de-registered
+  -- between snapshot and commit leaves no `storage.nodes` entry, and we must not
+  -- error stamping a clock onto nothing.
+  for _, nid in ipairs(dispatcher.served_nodes(p)) do
+    local node = storage.nodes and storage.nodes[nid]
+    if node then
+      node.last_served_tick = tick
+    end
   end
 
   -- Debug breadcrumbs: which pass committed this (1 = worthwhile load, 2 =

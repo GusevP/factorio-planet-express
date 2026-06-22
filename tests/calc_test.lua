@@ -4339,6 +4339,23 @@ describe("dispatcher.plan -- no regression: plentiful ships serve every destinat
     "ample ships -> every demanding destination served regardless of order")
 end)
 
+describe("dispatcher.served_nodes -- a two-way trade ages BOTH endpoints (flip-starvation fix)", function()
+  -- One-way trade: only the forward dest physically received cargo, so only it ages.
+  assert_eq(dispatcher.served_nodes({ source_id = 2, dest_id = 1, return_manifest = nil }),
+    { 1 }, "one-way trade -> only the forward dest is served")
+  assert_eq(dispatcher.served_nodes({ source_id = 2, dest_id = 1, return_manifest = {} }),
+    { 1 }, "empty return manifest -> still only the forward dest")
+
+  -- Two-way reciprocal trade: the return leg delivers to the SOURCE, so it ages too.
+  -- THE BUG (v1.8.0): stamping only dest_id left an ETA-flip-relabelled low-id demander
+  -- -- served via the return leg -- perpetually nil-aged, so it always won dest_order
+  -- and looped the only ship Nauvis<->Gleba, ignoring every other planet. Aging both
+  -- endpoints breaks the loop: once the pair is served it sorts young and a starved
+  -- planet wins the next ship.
+  assert_eq(dispatcher.served_nodes({ source_id = 2, dest_id = 1, return_manifest = { ["X"] = 100 } }),
+    { 1, 2 }, "two-way trade -> BOTH the forward dest AND the return-leg source age")
+end)
+
 describe("dispatcher.plan -- two-pass min-load gate (full load wins Pass 1, leftover ships Pass 2)", function()
   -- A full-load route (fill 1.0) and a sub-threshold route (fill 0.1) at
   -- min_load_fraction 0.5. The sub route is OLDER, so it is tried first in Pass 1
