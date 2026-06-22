@@ -82,7 +82,7 @@ globals) still loads them.
 | `registry.lua` | event-maintained index of trade nodes (pads) + fleet platforms |
 | `fleet.lua` | per-platform enroll toggle + per-ship limits, `idle_eligible`; ready-signal gate (`require_ready` toggle, pure `ready_from_signal`, and the mod's only circuit read `read_ready_value`) |
 | `schedule.lua` | pure route→records builder + `schedule.writer` wrapper |
-| `dispatcher.lua` | `on_nth_tick` match/assign/bookkeep, `exportable` thrash guard, return leg |
+| `dispatcher.lua` | `on_nth_tick` match/assign/bookkeep, `exportable` thrash guard, return leg; anti-starvation aging order (`dest_order` by `last_served_tick`, `nil`=oldest) + two-pass min-load gate (`min_load_fraction`) |
 | `watchdog.lua` | timeouts, destroyed/stranded, re-clamp, player-edit signature; continuous flight sampler (`sample_flight`/`flight_sample`/`ema_factor`) that EMA-calibrates each ship's `eta_factor` and records the progress-rate for the Monitor ETA |
 | `gui/monitor.lua` | fleet monitor render + event routing (dumb view) |
 | `gui/trade_tab.lua` | Trade tab on the landing pad GUI (dumb view) |

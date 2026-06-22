@@ -96,6 +96,7 @@ dispatcher timer, not every tick.
 | Max ships (global) | 0 (unlimited) | Cap on concurrent active assignments. |
 | Max ships (per route) | 5 | Cap on concurrent ships per source→dest pair. |
 | Two-way return trade | on | Add a reciprocal return leg when profitable. |
+| Minimum load | 80% | Hold a ship until its hold is at least this full before dispatch (0 = ship any load). Perishables and otherwise-idle ships are exempt. |
 | Debug log | off | Record every dispatch decision (diagnostics). |
 
 ## How it stays correct
@@ -123,7 +124,13 @@ and **ETA-aware dispatch** — the mod now sends the ship that *delivers soonest
 using real inter-planet distances plus a learned per-ship speed factor, and shows
 a live ETA in the Monitor. Source selection stays coverage-first; ETA only
 decides which ship is sent and breaks ties between equally-covering sources.
-Not yet implemented:
+v1.8 added **fair dispatch under scarcity** — when idle ships are scarcer than
+the planets needing them, the planet that has waited longest wins the next ship,
+so a distant high-backlog planet is never permanently shut out by a fast, busy
+short route — plus a **minimum-load gate** (the *Minimum load* setting) that
+holds a ship until its hold is worthwhile, batching small requests into fuller
+trips. Perishables and otherwise-idle ships are exempt, so nothing is permanently
+stranded. Not yet implemented:
 
 - **Multi-stop routes** (3–4 planets per run). Routes are already modeled
   internally as an ordered stop list, so this is a route-construction change, not

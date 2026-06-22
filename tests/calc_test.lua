@@ -650,6 +650,12 @@ describe("schedule.manifest_slots -- ceil(qty/stack_size) per item, agrees with 
   }
   assert_eq(schedule.manifest_slots(schedule.build_manifest(swamp, 6), swamp),
     6, "demand swamps the hold -> manifest packs exactly to capacity")
+
+  -- Empty/nil inputs return 0 without erroring. `plan` relies on the empty case:
+  -- a 0-capacity ship yields an empty manifest, and the `next(manifest) ~= nil`
+  -- guard short-circuits, but manifest_slots must still be well-defined at 0.
+  assert_eq(schedule.manifest_slots({}, items), 0, "empty manifest -> 0 slots")
+  assert_eq(schedule.manifest_slots(nil, nil), 0, "nil args -> 0 slots (no crash)")
 end)
 
 describe("schedule.build_records -- 2-stop route + wait-conditions", function()
@@ -4260,6 +4266,17 @@ describe("dispatcher.dest_order -- aging comparator (nil = oldest, id tie-break)
   -- (the all-nil startup state must not crash and must stay deterministic).
   local both_nil = { [7] = { id = 7, last_served = nil }, [4] = { id = 4, last_served = nil } }
   assert_eq(dispatcher.dest_order(both_nil), { 4, 7 }, "all-nil -> pure id order, no crash")
+
+  -- The -1-vs-0 sentinel boundary: a never-served node (nil) MUST sort ahead of
+  -- a node served at tick 0 (tick 0 is a real game tick). This pins the comment's
+  -- "use -1, NOT 0" rule -- with a `or 0` sentinel this case would tie on 0 and
+  -- the id tie-break would wrongly put node 3 first.
+  local at_zero = { [3] = { id = 3, last_served = 0 }, [5] = { id = 5, last_served = nil } }
+  assert_eq(dispatcher.dest_order(at_zero), { 5, 3 },
+    "never-served (nil) sorts ahead of a node served at tick 0")
+
+  -- empty node set -> empty order (no crash).
+  assert_eq(dispatcher.dest_order({}), {}, "no nodes -> empty order")
 end)
 
 describe("dispatcher.plan -- aging order under scarcity (oldest dest wins the one ship)", function()
@@ -4358,6 +4375,25 @@ describe("dispatcher.plan -- two-pass min-load gate (full load wins Pass 1, left
   for _, p in ipairs(two) do by_dest[p.dest_id] = p end
   assert_eq(by_dest[2].pass, 1, "full load still Pass 1")
   assert_eq(by_dest[1].pass, 2, "sub-threshold load deferred to Pass 2")
+end)
+
+describe("dispatcher.plan -- min-load gate is inclusive (fill == min_fill ships Pass 1)", function()
+  -- The gate is `fill >= min_fill`. A load that fills EXACTLY to the threshold must
+  -- commit in Pass 1; this pins the inclusive boundary so a `>` (strict) regression
+  -- can't silently defer exactly-threshold loads to Pass 2. stack_size 100, capacity
+  -- 10 slots, unmet 500 -> 5 slots -> fill 0.5 == min_load_fraction 0.5.
+  local snapshot = {
+    min_load_fraction = 0.5,
+    nodes = {
+      [1] = { id = 1, planet = "dest",
+        demand = { { item = "a", unmet = 500, stack_size = 100 } }, surplus = {}, unmet_by_item = {} },
+      [2] = { id = 2, planet = "src", surplus = { ["a"] = 500 }, unmet_by_item = {} },
+    },
+    ships = { { id = 1, capacity = 10, entry = { enrolled = true, state = fleet.IDLE } } },
+  }
+  local plans = dispatcher.plan(snapshot)
+  assert_eq(#plans, 1, "exactly-threshold load ships")
+  assert_eq(plans[1].pass, 1, "fill == min_fill commits in Pass 1 (gate is >=, not >)")
 end)
 
 describe("dispatcher.plan -- perishable trip is exempt from the min-load gate (ships Pass 1)", function()
