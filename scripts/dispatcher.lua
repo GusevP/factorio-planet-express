@@ -1074,7 +1074,7 @@ function dispatcher.build_snapshot(_tick)
     local entity_ok = not (node.entity and node.entity.valid == false)
     local surface_ok = not (node.surface and node.surface.valid == false)
     if entity_ok and surface_ok then
-      local open, import_by_item = demand.open_demand(node)
+      local open, import_by_item, held = demand.open_demand(node)
       local unmet_by_item = {}
       for _, d in ipairs(open) do
         unmet_by_item[d.item] = d.unmet
@@ -1102,6 +1102,9 @@ function dispatcher.build_snapshot(_tick)
         -- the pure best_source ranks by fastest-route vs most-surplus without storage.
         strategy = state.source_strategy(fkey),
         demand = open,
+        -- Sub-threshold requests held back from dispatch (display only) -- the Monitor
+        -- surfaces these as "below threshold" so a min-req item doesn't silently vanish.
+        held = held or {},
         unmet_by_item = unmet_by_item,
         -- Gross physical shortfall per item (pre-inbound) -- the export thrash
         -- guard's real input, so a planet short on an item it requested is never

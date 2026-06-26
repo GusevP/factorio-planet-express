@@ -298,29 +298,35 @@ describe("demand.threshold", function()
   assert_eq(demand.threshold({ thresholds = { ["iron-plate"] = -5 } }, "iron-plate"), 0, "negative -> no minimum")
 end)
 
-describe("demand.build_open -- per-item dispatch threshold", function()
-  -- iron has a 1000 min: at unmet 500 it is SUPPRESSED; at 1000 it ships the FULL
-  -- deficit. copper has no threshold, so any shortfall ships (default behaviour).
+describe("demand.build_open -- per-item dispatch threshold (+ held surfacing)", function()
+  -- iron has a 1000 min: at unmet 500 it is OUT of open demand but surfaced as HELD
+  -- (the Monitor's "below threshold"); at 1000 it ships the FULL deficit. copper has
+  -- no threshold, so any shortfall ships (default behaviour).
   local node = { thresholds = { ["iron-plate"] = 1000 } }
-  local below = demand.build_open(node, {
-    { item = "iron-plate", requested = 500, on_hand = 0, inbound = 0 },   -- unmet 500 < 1000 -> suppressed
+  local below, held = demand.build_open(node, {
+    { item = "iron-plate", requested = 500, on_hand = 0, inbound = 0 },   -- unmet 500 < 1000 -> held
     { item = "copper-plate", requested = 30, on_hand = 0, inbound = 0 },  -- unmet 30, no threshold -> ships
   })
-  assert_eq(#below, 1, "sub-threshold iron suppressed; copper (no threshold) still ships")
+  assert_eq(#below, 1, "sub-threshold iron out of open demand; copper (no threshold) ships")
   assert_eq(below[1].item, "copper-plate", "the un-thresholded item is the one that ships")
+  assert_eq(held, { { item = "iron-plate", unmet = 500 } },
+    "sub-threshold iron is surfaced as HELD (for the Monitor), not silently dropped")
 
-  local at = demand.build_open(node, {
+  local at, at_held = demand.build_open(node, {
     { item = "iron-plate", requested = 1000, on_hand = 0, inbound = 0 },  -- unmet 1000 >= 1000
   })
   assert_eq(at, { { item = "iron-plate", unmet = 1000, priority = 0 } },
     "threshold reached -> ships the FULL deficit, not a trimmed amount")
+  assert_eq(at_held, {}, "at/above threshold -> nothing held")
 
   -- the threshold is on the DEFICIT after inbound netting: a partial delivery drops
-  -- unmet back under the threshold and re-suppresses the request.
-  local netted = demand.build_open(node, {
+  -- unmet back under the threshold, re-suppressing dispatch but keeping it visible.
+  local netted, netted_held = demand.build_open(node, {
     { item = "iron-plate", requested = 1000, on_hand = 0, inbound = 200 }, -- unmet 800 < 1000
   })
-  assert_eq(#netted, 0, "inbound netting can drop unmet back under the threshold -> suppressed")
+  assert_eq(#netted, 0, "inbound netting drops unmet under the threshold -> not dispatchable")
+  assert_eq(netted_held, { { item = "iron-plate", unmet = 800 } },
+    "...but still surfaced as held with the netted shortfall")
 end)
 
 describe("demand.build_open -- filtering + deterministic sort", function()

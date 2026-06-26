@@ -106,16 +106,23 @@ end
 -- `qkey.qparse` is plain string math, no engine globals.
 function demand.build_open(node, rows)
   local out = {}
+  local held = {}
   for _, row in ipairs(rows) do
     local key = row.item
     local name = qkey.qparse(key)
     if demand.source_via_fleet(node, name) then
       local unmet = demand.compute_unmet(row.requested, row.on_hand, row.inbound)
-      -- Per-item dispatch threshold: suppress the request until the shortfall is
-      -- big enough to be worth a trip (default 0 = no minimum). Once met, the full
-      -- unmet ships as before.
-      if unmet > 0 and unmet >= demand.threshold(node, name) then
-        out[#out + 1] = { item = key, unmet = unmet, priority = demand.priority(node, name) }
+      if unmet > 0 then
+        -- Per-item dispatch threshold: suppress the request until the shortfall is
+        -- big enough to be worth a trip (default 0 = no minimum). A sub-threshold
+        -- item is NOT dispatchable, but it is surfaced separately (`held`, display
+        -- only) so the Monitor can show "below threshold" instead of the item
+        -- silently vanishing.
+        if unmet >= demand.threshold(node, name) then
+          out[#out + 1] = { item = key, unmet = unmet, priority = demand.priority(node, name) }
+        else
+          held[#held + 1] = { item = key, unmet = unmet }
+        end
       end
     end
   end
@@ -128,7 +135,10 @@ function demand.build_open(node, rows)
     end
     return a.item < b.item
   end)
-  return out
+  -- `held` in stable qkey order for a deterministic Monitor panel (no decision
+  -- reads it -- it is display-only, kept out of the dispatchable open list).
+  table.sort(held, function(a, b) return a.item < b.item end)
+  return out, held
 end
 
 -- ---------------------------------------------------------------------------
@@ -277,7 +287,10 @@ function demand.open_demand(node)
   for _, row in ipairs(rows) do
     row.inbound = (row.inbound or 0) + (inbound[row.item] or 0)
   end
-  return demand.build_open(node, rows), demand.import_map(rows)
+  local open, held = demand.build_open(node, rows)
+  -- THREE values: open-demand list, gross-import map (thrash guard), and the held
+  -- sub-threshold list (Monitor display only). Callers wanting fewer ignore the rest.
+  return open, demand.import_map(rows), held
 end
 
 return demand

@@ -39,6 +39,10 @@ viewmodel.REASON_SOURCE_BUSY = "source_busy_importing"
 viewmodel.REASON_NO_SHIP = "no_ship"
 viewmodel.REASON_IN_TRANSIT = "in_transit"
 viewmodel.REASON_BELOW_MIN_TRIP = "below_min_trip"
+-- Held back by the per-item "Min req" threshold (the dest's shortfall hasn't reached
+-- it). Not a classify_waiting outcome -- gather pre-sets it on held items that never
+-- enter dispatchable demand.
+viewmodel.REASON_BELOW_THRESHOLD = "below_threshold"
 
 -- How many of the most recent alerts the monitor shows.
 viewmodel.MAX_ALERTS = 20
@@ -958,6 +962,19 @@ function viewmodel.gather(tick)
         min_trip = mt,
         in_transit = (serving[dnode.planet] and serving[dnode.planet][d.item]) == true,
         force = dnode.force, -- force stamp (build_snapshot) for Monitor scoping
+      }
+    end
+    -- Sub-threshold requests held back by the per-item "Min req" threshold: surface
+    -- them with a PRE-SET reason so build() skips classify_waiting (no candidates
+    -- needed) and the Monitor shows "below threshold" rather than the item silently
+    -- vanishing. Display only -- these never entered dispatchable demand.
+    for _, h in ipairs(dnode.held or {}) do
+      waiting[#waiting + 1] = {
+        item = h.item,
+        dest_planet = dnode.planet,
+        unmet = h.unmet,
+        reason = viewmodel.REASON_BELOW_THRESHOLD,
+        force = dnode.force,
       }
     end
   end
