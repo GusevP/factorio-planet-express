@@ -2024,6 +2024,80 @@ describe("dispatcher.unserved_reason -- one branch per gate (diagnostic over the
     "AT CAP", "route-cap branch fires when the route is saturated")
 end)
 
+describe("dispatcher.eval_block -- block codes (the Monitor's source of truth)", function()
+  -- minimal dest(1)<-src(2) iron route; `over` patches snapshot-level fields.
+  local function snap(over)
+    local s = {
+      nodes = {
+        [1] = { id = 1, planet = "dest", force = "A",
+          demand = { { item = "iron-plate", unmet = 100, priority = 0, stack_size = 100 } },
+          surplus = {}, unmet_by_item = {} },
+        [2] = { id = 2, planet = "src", force = "A",
+          surplus = { ["iron-plate"] = 500 }, unmet_by_item = {} },
+      },
+      ships = { { id = 1, capacity = 5, force = "A", entry = { enrolled = true, state = fleet.IDLE } } },
+    }
+    for k, v in pairs(over or {}) do s[k] = v end
+    return s
+  end
+  local function code(s) return (dispatcher.eval_block(s, s.nodes[1])) end
+
+  local ns = snap(); ns.nodes[2].surplus = {}
+  assert_eq(code(ns), "no_source", "no exportable source -> no_source")
+
+  local nsh = snap()
+  nsh.ships = { { id = 1, capacity = 5, force = "B", entry = { enrolled = true, state = fleet.IDLE } } }
+  assert_eq(code(nsh), "no_ship", "source but no eligible ship -> no_ship")
+
+  local rh = snap()
+  rh.ships = { { id = 1, capacity = 5, force = "A", ready = false, entry = { enrolled = true, state = fleet.IDLE } } }
+  assert_eq(code(rh), "ready_held", "the eligible ship is HELD by its ready signal -> ready_held")
+
+  local nl = snap(); nl.ships[1].capacity = 0
+  assert_eq(code(nl), "nothing_loads", "ship has no slots -> nothing_loads")
+
+  assert_eq(code(snap()), "contended", "loadable + free ship + uncapped -> contended (a lower-id dest took it)")
+
+  assert_eq(code(snap({ max_ships_route = 1, active_by_route = { [dispatcher.route_key(2, 1)] = 1 } })),
+    "at_cap", "route saturated -> at_cap")
+
+  -- sub-threshold load under min_load_fraction: 1 iron (1 slot) into a 100-slot ship
+  -- at min-load 0.8 -> fill 1% < 80%. Checked BEFORE the cap.
+  local bml = snap({ min_load_fraction = 0.8 })
+  bml.nodes[1].demand = { { item = "iron-plate", unmet = 1, priority = 0, stack_size = 100 } }
+  bml.ships[1].capacity = 100
+  assert_eq(code(bml), "below_min_load", "sub-threshold load under min-load -> below_min_load")
+  bml.max_ships_route = 1
+  bml.active_by_route = { [dispatcher.route_key(2, 1)] = 1 }
+  assert_eq(code(bml), "below_min_load", "min-load gate is checked BEFORE the route cap")
+end)
+
+describe("viewmodel.build -- ship-side block_reason refines a no_ship waiting verdict", function()
+  local viewmodel = require("scripts.viewmodel") -- required later in the file; cached
+  -- a candidate with a real source (surplus >= min_trip, not importing) makes
+  -- classify_waiting say no_ship; the dispatcher's recorded block_reason refines it.
+  local function reason_of(block, surplus)
+    local w = viewmodel.build({
+      fleet = {}, assignments = {}, alerts = {}, tick = 0,
+      waiting = { {
+        item = "iron-plate", dest_planet = "dest", unmet = 100, in_transit = false,
+        candidates = { { surplus = surplus or 500, importing = false } }, min_trip = 1,
+        block_reason = block,
+      } },
+    })
+    return w.waiting[1].reason
+  end
+  assert_eq(reason_of(nil), viewmodel.REASON_NO_SHIP, "no block_reason -> stays source-side no_ship")
+  assert_eq(reason_of("below_min_load"), viewmodel.REASON_BELOW_MIN_LOAD, "below_min_load refines no_ship")
+  assert_eq(reason_of("at_cap"), viewmodel.REASON_AT_CAP, "at_cap refines no_ship")
+  assert_eq(reason_of("ready_held"), viewmodel.REASON_READY_HELD, "ready_held refines no_ship")
+  assert_eq(reason_of("no_source"), viewmodel.REASON_NO_SHIP, "a NON-ship-side code does not override no_ship")
+  -- the refine applies ONLY to no_ship: a genuine no_source (no candidate surplus) is
+  -- kept even with a stale ship-side block_reason present.
+  assert_eq(reason_of("below_min_load", 0), viewmodel.REASON_NO_SOURCE,
+    "a no_source verdict is not overridden by a ship-side block_reason")
+end)
+
 -- ---------------------------------------------------------------------------
 -- watchdog -- pure re-clamp amount, order-stable schedule signature,
 -- and deadline expiry. The watchdog loop itself (timeout / destroyed / player-

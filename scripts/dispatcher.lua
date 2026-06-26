@@ -1105,6 +1105,10 @@ function dispatcher.build_snapshot(_tick)
         -- Sub-threshold requests held back from dispatch (display only) -- the Monitor
         -- surfaces these as "below threshold" so a min-req item doesn't silently vanish.
         held = held or {},
+        -- Why this dest didn't dispatch last tick (eval_block code), recorded by
+        -- record_block_reasons -- the Monitor refines a "no ship" verdict into the
+        -- ship-side blocker (below_min_load / at_cap / ready_held). Display only.
+        block_reason = node.block_reason,
         unmet_by_item = unmet_by_item,
         -- Gross physical shortfall per item (pre-inbound) -- the export thrash
         -- guard's real input, so a planet short on an item it requested is never
@@ -1332,41 +1336,37 @@ end
 -- the planner's real gates. Shared by the per-tick debug log and the /pe-status
 -- command. `used` is empty here: this asks "could ANY ship serve it", not "given
 -- this tick's commitments".
-function dispatcher.unserved_reason(snapshot, dest)
+-- Pure: WHY `dest` didn't dispatch this tick, as a (code, detail) pair, mirroring
+-- the planner's gates IN THE SAME PRIORITY ORDER. Single source of truth shared by
+-- `unserved_reason` (the debug/pe-status sentence) and `unserved_code` (the code the
+-- dispatcher records per node for the Monitor). `used` is empty -- this asks "could
+-- ANY ship serve it", not "given this tick's commitments" -- so the SHIP-SIDE codes
+-- (ready_held / below_min_load / at_cap) are exact, while `contended` stands in for
+-- "a lower-id dest claimed the ship first". Codes: no_source, ready_held, no_ship,
+-- nothing_loads, below_min_load, at_cap, contended.
+function dispatcher.eval_block(snapshot, dest)
   local src = dispatcher.best_source(snapshot, dest)
   if not src then
-    return "no exportable source (every other planet is below reserve+min-trip, "
-      .. "has its surplus committed to a shipment, or is itself importing the item)"
+    return "no_source", {}
   end
   local route_ships = dispatcher.ships_for_force(snapshot.ships, dest.force)
   local ship = dispatcher.pick_ship(route_ships, {}, src.planet, dest.planet, dest.pin, snapshot.distances)
   if not ship then
-    -- Held-aware branch: pick_ship returns nil when every candidate is
-    -- held by its ready signal just as it does when there is no eligible ship at
-    -- all. Tell them apart so /pe-status + the debug log don't misreport a held
-    -- ship as missing. A ship that is idle_eligible (ignoring `ready`) but stamped
-    -- `ready == false` is held -- if any such ship exists, the block is the gate.
+    -- pick_ship returns nil both when every candidate is HELD by its ready signal
+    -- and when there is no eligible ship at all -- tell them apart.
     for _, s in ipairs(route_ships) do
       if s.ready == false and fleet.idle_eligible(s.entry, src.planet, dest.planet) then
-        return "source=" .. tostring(src.planet)
-          .. " has surplus + an eligible ship, but it is HELD by its ready signal "
-          .. "(planet-express-ready <= 0 at the hub) -- emit planet-express-ready > 0 to dispatch"
+        return "ready_held", { src = src.planet }
       end
     end
-    return "source=" .. tostring(src.planet)
-      .. " has surplus, but NO idle eligible ship for force=" .. tostring(dest.force)
-      .. " (enrolled? not reserved? allow-list covers both planets?)"
+    return "no_ship", { src = src.planet, force = dest.force }
   end
-  -- src + ship both exist, yet the planner didn't dispatch. Reproduce its two
-  -- remaining gates -- manifest non-empty, then route cap -- to name WHICH one.
+  -- src + ship exist; reproduce the planner's remaining gates to name WHICH blocked.
   local source = snapshot.nodes[src.id]
   local items = {}
   for _, d in ipairs(dest.demand) do
     local avail = dispatcher.exportable(source, d.item)
     if avail > 0 then
-      -- thread stack_size + perishable so this diagnostic packs by SLOTS and
-      -- isolates perishables EXACTLY as `plan` does; without it the "nothing loads"
-      -- reason could fire (or not) inconsistently with the planner.
       items[#items + 1] = { item = d.item, surplus = avail, unmet = d.unmet,
         stack_size = d.stack_size, perishable = d.perishable }
     end
@@ -1374,16 +1374,10 @@ function dispatcher.unserved_reason(snapshot, dest)
   items = dispatcher.perishable_filter(items)
   local manifest = schedule.build_manifest(items, ship.capacity)
   if next(manifest) == nil then
-    return "source=" .. tostring(src.planet) .. " ship#" .. tostring(ship.id)
-      .. " but nothing loads (ship capacity " .. tostring(ship.capacity) .. " or every clamp = 0)"
+    return "nothing_loads", { src = src.planet, ship = ship.id, capacity = ship.capacity }
   end
-  -- Min-load gate (v1.8.0): a non-empty but sub-threshold load is DEFERRED, not
-  -- dropped -- Pass 2 would ship it if a ship were free. Slotted BEFORE the route-cap
-  -- check so a deferred load isn't misreported as a cap problem. Mirror `plan`'s fill
-  -- math exactly (slots / capacity), and exempt perishable trips just as the planner
-  -- does. NOTE: this can't tell "deferred, would ship in Pass 2 once a ship frees" from
-  -- "no ship at all this tick" -- `used` is empty here, so it answers "could ANY ship
-  -- serve it" -- acceptable for a diagnostic.
+  -- min-load gate: slotted BEFORE the route cap so a deferred load isn't misread as a
+  -- cap problem; perishable trips are exempt, exactly like the planner.
   local min_fill = snapshot.min_load_fraction or 0
   local perishable_trip = false
   for _, it in ipairs(items) do
@@ -1391,22 +1385,56 @@ function dispatcher.unserved_reason(snapshot, dest)
   end
   local fill = schedule.manifest_slots(manifest, items) / ship.capacity
   if min_fill > 0 and fill < min_fill and not perishable_trip then
-    return string.format(
-      "source=%s ship#%s ready, but the load is SUB-THRESHOLD (fill %d%% < min-load %d%%) -- "
-        .. "deferred to Pass 2; it ships once a ship is free or the demand accumulates to a full load",
-      tostring(src.planet), tostring(ship.id), math.floor(fill * 100), math.floor(min_fill * 100))
+    return "below_min_load", { src = src.planet, ship = ship.id, fill = fill, min_fill = min_fill }
   end
   local rkey = dispatcher.route_key(src.id, dest.id)
   local max_route = snapshot.max_ships_route or 0
   local active = (snapshot.active_by_route or {})[rkey] or 0
   if max_route > 0 and active >= max_route then
+    return "at_cap", { src = src.planet, dest = dest.planet, active = active, max_route = max_route, ship = ship.id }
+  end
+  return "contended", { src = src.planet, ship = ship.id }
+end
+
+-- Pure: just the block CODE (eval_block's first value). Recorded per node by the
+-- dispatcher tick so the Monitor can surface the ship-side blockers (min-load /
+-- route cap / ready hold) that the source-side classify_waiting can't see.
+function dispatcher.unserved_code(snapshot, dest)
+  return (dispatcher.eval_block(snapshot, dest))
+end
+
+-- The reason a destination's open demand was NOT dispatched, as a human sentence for
+-- the debug log + /pe-status. The gate LOGIC lives in eval_block (one source of
+-- truth); this only renders its (code, detail).
+function dispatcher.unserved_reason(snapshot, dest)
+  local code, d = dispatcher.eval_block(snapshot, dest)
+  if code == "no_source" then
+    return "no exportable source (every other planet is below reserve+min-trip, "
+      .. "has its surplus committed to a shipment, or is itself importing the item)"
+  elseif code == "ready_held" then
+    return "source=" .. tostring(d.src)
+      .. " has surplus + an eligible ship, but it is HELD by its ready signal "
+      .. "(planet-express-ready <= 0 at the hub) -- emit planet-express-ready > 0 to dispatch"
+  elseif code == "no_ship" then
+    return "source=" .. tostring(d.src)
+      .. " has surplus, but NO idle eligible ship for force=" .. tostring(d.force)
+      .. " (enrolled? not reserved? allow-list covers both planets?)"
+  elseif code == "nothing_loads" then
+    return "source=" .. tostring(d.src) .. " ship#" .. tostring(d.ship)
+      .. " but nothing loads (ship capacity " .. tostring(d.capacity) .. " or every clamp = 0)"
+  elseif code == "below_min_load" then
+    return string.format(
+      "source=%s ship#%s ready, but the load is SUB-THRESHOLD (fill %d%% < min-load %d%%) -- "
+        .. "deferred to Pass 2; it ships once a ship is free or the demand accumulates to a full load",
+      tostring(d.src), tostring(d.ship), math.floor((d.fill or 0) * 100), math.floor((d.min_fill or 0) * 100))
+  elseif code == "at_cap" then
     return string.format(
       "source=%s ship#%s ready, but route %s->%s is AT CAP (%d/%d in flight) -- raise the max-ships-per-route setting",
-      tostring(src.planet), tostring(ship.id), tostring(src.planet), tostring(dest.planet), active, max_route)
+      tostring(d.src), tostring(d.ship), tostring(d.src), tostring(d.dest), d.active or 0, d.max_route or 0)
   end
   return string.format(
     "source=%s ship#%s ready -- would dispatch (if still unserved, a lower-id destination claimed the surplus first this tick)",
-    tostring(src.planet), tostring(ship.id))
+    tostring(d.src), tostring(d.ship))
 end
 
 -- Diagnostics (debug-log only): explain, per still-open demand, why this tick did
@@ -1574,6 +1602,40 @@ end
 -- The on_nth_tick entry: open the per-tick stock cache, snapshot the world, plan
 -- deterministically, then commit each plan. Safe to call before any pads/ships
 -- exist (it simply plans nothing).
+-- IO: record per node the block CODE (eval_block) for the Monitor, once per dispatch
+-- tick. A node that RECEIVED cargo this tick (served_nodes) or has no open demand is
+-- CLEARED (nil); an unserved demanding node gets its code. Reads the SAME post-commit
+-- snapshot log_unserved does (per-node reasons match; the served set here also spares
+-- two-way return-leg recipients, which the debug log's dest-only set doesn't). Deterministic
+-- (snapshot/plan are; sorted iteration), storage-persisted, nil-default (no migration).
+-- Display only -- nothing in the decision path reads block_reason.
+function dispatcher.record_block_reasons(snapshot, plans)
+  if not (storage and storage.nodes) then
+    return
+  end
+  local served = {}
+  for _, p in ipairs(plans) do
+    -- "served" = a node that RECEIVED cargo this tick -- the forward dest always, the
+    -- return dest only on a two-way trip. Reuse served_nodes (the aging clock's exact
+    -- notion) so a one-way SOURCE, whose own import demand was NOT served, keeps its
+    -- block_reason instead of being wrongly cleared.
+    for _, nid in ipairs(dispatcher.served_nodes(p)) do
+      served[nid] = true
+    end
+  end
+  for _, id in ipairs(state.sorted_keys(snapshot.nodes)) do
+    local snode = storage.nodes[id]
+    if snode then
+      local dnode = snapshot.nodes[id]
+      if not served[id] and dnode.demand and #dnode.demand > 0 then
+        snode.block_reason = dispatcher.unserved_code(snapshot, dnode)
+      else
+        snode.block_reason = nil
+      end
+    end
+  end
+end
+
 function dispatcher.run(tick)
   if not (storage and storage.assignments) then
     return
@@ -1584,6 +1646,7 @@ function dispatcher.run(tick)
   for _, p in ipairs(plans) do
     dispatcher.commit(p, tick)
   end
+  dispatcher.record_block_reasons(snapshot, plans)
   if state.debug_enabled() then
     dispatcher.log_unserved(snapshot, plans)
   end

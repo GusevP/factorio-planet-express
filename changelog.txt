@@ -1,3 +1,8 @@
+Version: 1.9.1
+Date: 2026-06-26
+  Changes:
+    - The Fleet Monitor's "waiting" reasons are now more specific. When the fleet is holding an item back because the load would be below your minimum cargo fraction, because the route is already at its max-ships-per-route limit, or because the ship is held by your "ready" circuit signal, the Monitor now names that exact reason instead of a generic "no ship".
+---------------------------------------------------------------------------------------------------
 Version: 1.9.0
 Date: 2026-06-26
   Features:

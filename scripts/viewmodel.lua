@@ -43,6 +43,18 @@ viewmodel.REASON_BELOW_MIN_TRIP = "below_min_trip"
 -- it). Not a classify_waiting outcome -- gather pre-sets it on held items that never
 -- enter dispatchable demand.
 viewmodel.REASON_BELOW_THRESHOLD = "below_threshold"
+-- Ship-side blockers the dispatcher records per node (dispatcher.eval_block) -- the
+-- source-side classify_waiting can't see these, so build() REFINES a `no_ship` verdict
+-- into one when present. String values MATCH dispatcher.eval_block's codes.
+viewmodel.REASON_BELOW_MIN_LOAD = "below_min_load"
+viewmodel.REASON_AT_CAP = "at_cap"
+viewmodel.REASON_READY_HELD = "ready_held"
+-- Set form, for an O(1) "is this a ship-side blocker that refines no_ship?" test.
+local SHIP_SIDE_BLOCK = {
+  [viewmodel.REASON_BELOW_MIN_LOAD] = true,
+  [viewmodel.REASON_AT_CAP] = true,
+  [viewmodel.REASON_READY_HELD] = true,
+}
 
 -- How many of the most recent alerts the monitor shows.
 viewmodel.MAX_ALERTS = 20
@@ -282,11 +294,18 @@ function viewmodel.build(world)
   -- already supplied one), then sort by planet then item for a stable panel.
   local waiting = {}
   for _, w in ipairs(waiting_in) do
+    local reason = w.reason or viewmodel.classify_waiting(w.candidates, w.min_trip, w.in_transit)
+    -- Refine a source-side `no_ship` with the dispatcher's recorded SHIP-SIDE blocker
+    -- (min-load deferral / route cap / ready hold) -- classify_waiting reasons only over
+    -- supply and would otherwise mislabel all three as "no ship".
+    if reason == viewmodel.REASON_NO_SHIP and SHIP_SIDE_BLOCK[w.block_reason or false] then
+      reason = w.block_reason
+    end
     waiting[#waiting + 1] = {
       item = w.item,
       dest_planet = w.dest_planet,
       unmet = w.unmet,
-      reason = w.reason or viewmodel.classify_waiting(w.candidates, w.min_trip, w.in_transit),
+      reason = reason,
     }
   end
   table.sort(waiting, function(a, b)
@@ -961,6 +980,10 @@ function viewmodel.gather(tick)
         candidates = candidates,
         min_trip = mt,
         in_transit = (serving[dnode.planet] and serving[dnode.planet][d.item]) == true,
+        -- The dispatcher's recorded ship-side block code for this dest (build() uses it
+        -- to refine a `no_ship` into below_min_load / at_cap / ready_held). Per-dest:
+        -- every item of an unserved dest shares it; nil once the dest dispatches.
+        block_reason = dnode.block_reason,
         force = dnode.force, -- force stamp (build_snapshot) for Monitor scoping
       }
     end
