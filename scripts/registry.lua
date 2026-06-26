@@ -69,6 +69,7 @@ function registry.add_node(entity)
     reserves = { default = default_reserve(), items = {} },
     import_flags = {}, -- per-item `source via fleet` overlay
     priorities = {},   -- per-item request priority overlay
+    thresholds = {},   -- per-item dispatch threshold (min shortfall before requesting)
   }
   storage.nodes[id] = node
   state.debug_log("registry: node added pad#" .. id)

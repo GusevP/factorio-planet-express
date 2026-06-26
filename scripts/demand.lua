@@ -52,6 +52,22 @@ function demand.priority(node, item)
   return 0
 end
 
+-- Minimum shortfall before `item`'s request is dispatched (per item NAME). The
+-- fleet ignores the request until the deficit (requested - on_hand - inbound)
+-- reaches this many items, so a small shortfall never triggers a near-empty trip;
+-- once it does, the FULL deficit ships as usual. Absent / <= 0 -> 0 (no minimum,
+-- the default: ship as soon as anything is short).
+function demand.threshold(node, item)
+  local th = node and node.thresholds
+  if th then
+    local t = th[item]
+    if type(t) == "number" and t > 0 then
+      return t
+    end
+  end
+  return 0
+end
+
 -- ---------------------------------------------------------------------------
 -- pure unmet math
 -- ---------------------------------------------------------------------------
@@ -95,7 +111,10 @@ function demand.build_open(node, rows)
     local name = qkey.qparse(key)
     if demand.source_via_fleet(node, name) then
       local unmet = demand.compute_unmet(row.requested, row.on_hand, row.inbound)
-      if unmet > 0 then
+      -- Per-item dispatch threshold: suppress the request until the shortfall is
+      -- big enough to be worth a trip (default 0 = no minimum). Once met, the full
+      -- unmet ships as before.
+      if unmet > 0 and unmet >= demand.threshold(node, name) then
         out[#out + 1] = { item = key, unmet = unmet, priority = demand.priority(node, name) }
       end
     end

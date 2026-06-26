@@ -289,6 +289,40 @@ describe("demand.priority", function()
   assert_eq(demand.priority({ priorities = { ["iron-plate"] = 5 } }, "coal"), 0, "unlisted -> 0")
 end)
 
+describe("demand.threshold", function()
+  assert_eq(demand.threshold({}, "iron-plate"), 0, "no overlay -> 0 (no minimum)")
+  assert_eq(demand.threshold(nil, "iron-plate"), 0, "nil node -> 0")
+  assert_eq(demand.threshold({ thresholds = { ["iron-plate"] = 1000 } }, "iron-plate"), 1000, "override read")
+  assert_eq(demand.threshold({ thresholds = { ["iron-plate"] = 1000 } }, "coal"), 0, "unlisted -> 0")
+  assert_eq(demand.threshold({ thresholds = { ["iron-plate"] = 0 } }, "iron-plate"), 0, "0 -> no minimum")
+  assert_eq(demand.threshold({ thresholds = { ["iron-plate"] = -5 } }, "iron-plate"), 0, "negative -> no minimum")
+end)
+
+describe("demand.build_open -- per-item dispatch threshold", function()
+  -- iron has a 1000 min: at unmet 500 it is SUPPRESSED; at 1000 it ships the FULL
+  -- deficit. copper has no threshold, so any shortfall ships (default behaviour).
+  local node = { thresholds = { ["iron-plate"] = 1000 } }
+  local below = demand.build_open(node, {
+    { item = "iron-plate", requested = 500, on_hand = 0, inbound = 0 },   -- unmet 500 < 1000 -> suppressed
+    { item = "copper-plate", requested = 30, on_hand = 0, inbound = 0 },  -- unmet 30, no threshold -> ships
+  })
+  assert_eq(#below, 1, "sub-threshold iron suppressed; copper (no threshold) still ships")
+  assert_eq(below[1].item, "copper-plate", "the un-thresholded item is the one that ships")
+
+  local at = demand.build_open(node, {
+    { item = "iron-plate", requested = 1000, on_hand = 0, inbound = 0 },  -- unmet 1000 >= 1000
+  })
+  assert_eq(at, { { item = "iron-plate", unmet = 1000, priority = 0 } },
+    "threshold reached -> ships the FULL deficit, not a trimmed amount")
+
+  -- the threshold is on the DEFICIT after inbound netting: a partial delivery drops
+  -- unmet back under the threshold and re-suppresses the request.
+  local netted = demand.build_open(node, {
+    { item = "iron-plate", requested = 1000, on_hand = 0, inbound = 200 }, -- unmet 800 < 1000
+  })
+  assert_eq(#netted, 0, "inbound netting can drop unmet back under the threshold -> suppressed")
+end)
+
 describe("demand.build_open -- filtering + deterministic sort", function()
   -- fleet-flag filtering: coal opted out, so it never appears even though unmet
   local node = {

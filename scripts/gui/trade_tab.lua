@@ -44,6 +44,7 @@ local SCROLL = "planet-express-trade-scroll"
 local BODY = "planet-express-trade-body"
 local FLEET_TOGGLE_PREFIX = "planet-express-trade-fleet-"
 local PRIORITY_PREFIX = "planet-express-trade-priority-"
+local THRESHOLD_PREFIX = "planet-express-trade-threshold-"
 local RESERVE_DEFAULT = "planet-express-trade-reserve-default"
 local RESERVE_ITEM_PREFIX = "planet-express-trade-reserve-item-"
 local RESERVE_CLEAR_PREFIX = "planet-express-trade-reserve-clear-"
@@ -196,10 +197,15 @@ local function render_imports(body, node)
     body.add({ type = "label", caption = { "planet-express.trade-no-requests" } })
     return
   end
-  local t = body.add({ type = "table", column_count = 3 })
+  local t = body.add({ type = "table", column_count = 4 })
   t.add({ type = "label", caption = { "planet-express.trade-col-item" } })
   t.add({ type = "label", caption = { "planet-express.trade-col-fleet" } })
   t.add({ type = "label", caption = { "planet-express.trade-col-priority" } })
+  t.add({
+    type = "label",
+    caption = { "planet-express.trade-col-threshold" },
+    tooltip = { "planet-express.trade-threshold-tip" },
+  })
   for _, name in ipairs(names) do
     common.item_box(t, name)  -- icon + localised name (import flags are per bare name)
     t.add({
@@ -208,6 +214,7 @@ local function render_imports(body, node)
       state = demand.source_via_fleet(node, name),
     })
     numeric_field(t, PRIORITY_PREFIX .. name, demand.priority(node, name), 50)
+    numeric_field(t, THRESHOLD_PREFIX .. name, demand.threshold(node, name), 70)
   end
 end
 
@@ -497,6 +504,10 @@ function trade_tab.on_gui_text_changed(event)
     local item = name:sub(#PRIORITY_PREFIX + 1)
     node.priorities = node.priorities or {}
     node.priorities[item] = parse_amount(el.text) or 0
+  elseif has_prefix(name, THRESHOLD_PREFIX) then
+    local item = name:sub(#THRESHOLD_PREFIX + 1)
+    node.thresholds = node.thresholds or {}
+    node.thresholds[item] = parse_amount(el.text) or 0
   elseif name == RESERVE_DEFAULT then
     reserves.set_default(node, parse_reserve(el.text) or 0)
   elseif has_prefix(name, RESERVE_ITEM_PREFIX) then
