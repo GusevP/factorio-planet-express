@@ -277,6 +277,12 @@ script.on_event(defines.events.on_gui_selection_state_changed, function(event)
   trade_tab.on_gui_selection_state_changed(event)
 end)
 
+-- The player edited a cargo landing pad's own request slots -> live-refresh the open
+-- Trade overlay so its Imports list + readout reflect the change immediately.
+script.on_event(defines.events.on_entity_logistic_slot_changed, function(event)
+  trade_tab.on_logistic_slot_changed(event)
+end)
+
 -- On-demand diagnostics: `/pe-status` prints the dispatcher's view of the world
 -- (settings, trade nodes + open demand, the fleet, in-flight assignments, and why
 -- each waiting demand didn't dispatch) straight to the player's console. Works

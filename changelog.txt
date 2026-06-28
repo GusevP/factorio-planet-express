@@ -1,3 +1,10 @@
+Version: 1.10.0
+Date: 2026-06-28
+  Features:
+    - The Cargo Landing Pad's Planet Express panel now has a master "Planet Express manages this pad" switch at the top. Turn it off and the fleet ignores that pad completely — no automatic deliveries to it and no exports from it — instead of having to untick every item one by one. Handy for a freshly-landed planet you're stocking by hand from a parked ship; in-flight shipments still finish, and turning it back on resumes everything.
+  Bugfixes:
+    - Editing a Cargo Landing Pad's own requests now updates the Planet Express panel right away (its Imports list and "this planet now" readout), instead of only after you close and reopen the panel.
+---------------------------------------------------------------------------------------------------
 Version: 1.9.1
 Date: 2026-06-26
   Changes:

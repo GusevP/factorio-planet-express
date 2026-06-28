@@ -513,6 +513,17 @@ ships), but correctness rests on the signature compare, not the event.
   event fires once the platform exists with its hub set, and `add_platform` is
   idempotent. (Still verify in a live game that the event fires on first creation,
   not only on later state transitions.)
+- **Trade-tab live refresh — `on_entity_logistic_slot_changed`. [provisional — 2.0
+  signature confirmed against the runtime-API JSON; confirm in-engine that it FIRES for
+  cargo landing pad native request-slot edits].** Payload: `entity` (LuaEntity), optional
+  `player_index` (nil on a script-driven change), `section` (LuaLogisticSection),
+  `slot_index`. Hooked in `control.lua` → `trade_tab.on_logistic_slot_changed`: when the
+  player edits a pad's own request "goods", re-render the open Trade overlay so its
+  Imports list + readout update immediately (previously only on reopen). Refreshes ONLY
+  the editing player's relative frame and ONLY when
+  `event.entity.unit_number == frame.tags.pad`. No feedback loop: the mod never writes the
+  cargo-landing-PAD's logistic slots (its own requests live on the platform HUB, a
+  different entity), and script-driven writes carry nil `player_index`.
 - Surface deletion for the registry (Task 6): `on_pre_surface_deleted` →
   `registry.on_pre_surface_deleted(event.surface_index)`. **[provisional —
   confirm `on_pre_surface_deleted` and its `event.surface_index` field in-engine.]**

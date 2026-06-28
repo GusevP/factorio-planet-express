@@ -1073,7 +1073,11 @@ function dispatcher.build_snapshot(_tick)
     -- engine handle and the pure-Lua test runner is unaffected.
     local entity_ok = not (node.entity and node.entity.valid == false)
     local surface_ok = not (node.surface and node.surface.valid == false)
-    if entity_ok and surface_ok then
+    -- Master switch (Trade tab): a pad with Planet Express turned OFF is skipped
+    -- entirely -- never a destination (no demand) and never a source (no surplus), so
+    -- the fleet leaves it alone. In-flight shipments still complete (the watchdog owns
+    -- those); only NEW dispatch stops. Default-on (nil), so existing saves are unaffected.
+    if entity_ok and surface_ok and node.disabled ~= true then
       local open, import_by_item, held = demand.open_demand(node)
       local unmet_by_item = {}
       for _, d in ipairs(open) do

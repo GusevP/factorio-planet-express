@@ -45,6 +45,7 @@ local BODY = "planet-express-trade-body"
 local FLEET_TOGGLE_PREFIX = "planet-express-trade-fleet-"
 local PRIORITY_PREFIX = "planet-express-trade-priority-"
 local THRESHOLD_PREFIX = "planet-express-trade-threshold-"
+local ENABLE_TOGGLE = "planet-express-trade-enabled"
 local RESERVE_DEFAULT = "planet-express-trade-reserve-default"
 local RESERVE_ITEM_PREFIX = "planet-express-trade-reserve-item-"
 local RESERVE_CLEAR_PREFIX = "planet-express-trade-reserve-clear-"
@@ -330,8 +331,27 @@ local function render_readout(body, node)
   end
 end
 
+-- Master switch for the pad: when OFF, the dispatcher skips this pad ENTIRELY -- no
+-- fleet deliveries TO it and no exports FROM it. Lets a player turn the whole fleet
+-- off for one pad without unticking every item (e.g. a freshly-landed planet they're
+-- stocking by hand from a parked ship). Default ON; stored as `node.disabled = true`
+-- only when off.
+local function render_master(body, node)
+  body.add({
+    type = "checkbox",
+    name = ENABLE_TOGGLE,
+    state = node.disabled ~= true,
+    caption = { "planet-express.trade-enabled" },
+    tooltip = { "planet-express.trade-enabled-tip" },
+  })
+  if node.disabled == true then
+    body.add({ type = "label", caption = { "planet-express.trade-disabled-note" } })
+  end
+end
+
 local function render_body(body, node)
   body.clear()
+  render_master(body, node)
   render_imports(body, node)
   render_pin(body, node)
   render_reserves(body, node)
@@ -467,25 +487,53 @@ end
 -- override back to nil when re-enabled) to keep the overlay minimal.
 function trade_tab.on_gui_checked_state_changed(event)
   local el = event.element
-  if not (el and el.valid and has_prefix(el.name, FLEET_TOGGLE_PREFIX)) then
+  if not (el and el.valid) then
     return
   end
+  -- context() returns nil unless `el` descends from OUR trade frame, so it doubles as
+  -- the trust guard (a foreign mod's checkbox never resolves a node here).
   local node, frame = context(el)
   if not node then
     return
   end
-  local item = el.name:sub(#FLEET_TOGGLE_PREFIX + 1)
-  node.import_flags = node.import_flags or {}
-  if el.state then
-    node.import_flags[item] = nil
-  else
-    node.import_flags[item] = false
+  if el.name == ENABLE_TOGGLE then
+    -- Master switch: OFF makes build_snapshot skip the pad entirely (no deliveries,
+    -- no exports). Store `true` only when off; clear to nil when on (minimal overlay).
+    node.disabled = (not el.state) and true or nil
+    refresh_frame(frame)
+    return
   end
-  -- Re-render so the change shows immediately (e.g. the "this planet now" readout
-  -- drops/re-adds the item) instead of only on the next open. Safe for a checkbox:
-  -- the click already registered before the body rebuild. Mirrors the reserve
-  -- add/clear buttons (on_gui_click) and the Fleet tab's enroll toggle.
-  refresh_frame(frame)
+  if has_prefix(el.name, FLEET_TOGGLE_PREFIX) then
+    local item = el.name:sub(#FLEET_TOGGLE_PREFIX + 1)
+    node.import_flags = node.import_flags or {}
+    if el.state then
+      node.import_flags[item] = nil
+    else
+      node.import_flags[item] = false
+    end
+    -- Re-render so the change shows immediately (e.g. the "this planet now" readout
+    -- drops/re-adds the item) instead of only on the next open. Safe for a checkbox:
+    -- the click already registered before the body rebuild.
+    refresh_frame(frame)
+  end
+end
+
+-- The pad's NATIVE request slots changed (the player edited "goods" on the cargo
+-- landing pad itself, not one of our widgets). Re-render the open Trade overlay so the
+-- Imports list + readout reflect it immediately instead of only on reopen. Only the
+-- editing player's relative frame, and only when the changed entity is the pad it is
+-- anchored to. The mod never writes the PAD's logistic slots (its requests live on the
+-- platform hub), so this can't feed back on itself.
+function trade_tab.on_logistic_slot_changed(event)
+  local player = event.player_index and game.get_player(event.player_index)
+  if not player then
+    return
+  end
+  local frame = player.gui.relative[FRAME]
+  local ent = event.entity
+  if frame and ent and ent.valid and frame.tags and ent.unit_number == frame.tags.pad then
+    refresh_frame(frame)
+  end
 end
 
 -- Textfields: priority, default reserve, and per-item reserve overrides all
