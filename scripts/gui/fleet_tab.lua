@@ -45,6 +45,7 @@ local REQUIRE_READY = "planet-express-fleet-require-ready"
 -- Container for the per-planet allow-list checkboxes, plus the name prefix each
 -- planet checkbox carries (the planet name is the suffix, recovered on toggle).
 local PLANETS = "planet-express-fleet-planets"
+local PLANETS_SCROLL = "planet-express-fleet-planets-scroll"
 local PLANET_PREFIX = "planet-express-fleet-planet/"
 
 -- [confirmed] The universe of planets the per-ship allow-list can restrict.
@@ -157,7 +158,13 @@ local function render_body(body, entry)
   -- rebuilds the list from these checkboxes via the pure fleet.allowed_from_selection.
   body.add({ type = "line" })
   body.add({ type = "label", caption = { "planet-express.fleet-allowed-planets" } })
-  local planets = body.add({ type = "flow", name = PLANETS, direction = "vertical" })
+  -- Bound the per-planet list in a scroll-pane: with many mod planets the flat flow
+  -- grew taller than the hub window and pushed the whole panel off-screen (the
+  -- checkboxes stayed clickable but invisible). A fixed-height scroll keeps it on screen.
+  local scroll = body.add({ type = "scroll-pane", name = PLANETS_SCROLL, direction = "vertical" })
+  scroll.style.maximal_height = 400
+  scroll.style.minimal_width = 180
+  local planets = scroll.add({ type = "flow", name = PLANETS, direction = "vertical" })
   for _, p in ipairs(known_planets()) do
     planets.add({
       type = "checkbox",
@@ -310,7 +317,8 @@ function fleet_tab.on_gui_checked_state_changed(event)
   elseif el.name:sub(1, #PLANET_PREFIX) == PLANET_PREFIX then
     -- Rebuild the whole allow-list from the live checkboxes (not just this one),
     -- so the pure helper can collapse "all ticked" back to the unrestricted nil.
-    local container = frame[BODY] and frame[BODY][PLANETS]
+    local sc = frame[BODY] and frame[BODY][PLANETS_SCROLL]
+    local container = sc and sc[PLANETS]
     if container then
       local universe, allowed = {}, {}
       for _, child in ipairs(container.children) do

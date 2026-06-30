@@ -1,3 +1,8 @@
+Version: 1.10.1
+Date: 2026-06-30
+  Bugfixes:
+    - The Fleet tab's list of allowed destinations no longer runs off the screen when you have many planets installed. It now sits in a scrollable area, so every destination stays visible and its checkbox usable without having to lower the UI scale.
+---------------------------------------------------------------------------------------------------
 Version: 1.10.0
 Date: 2026-06-28
   Features:
