@@ -1,3 +1,8 @@
+Version: 2.1.0
+Date: 2026-06-30
+  Changes:
+    - Updated for Factorio 2.1 — the mod now declares compatibility with the 2.1 release series. An audit of the 2.0-to-2.1 modding API found that nothing the mod relies on (platform schedules, hub/landing-pad logistic requests, item and spoilage reads, planets) changed or was removed, so there are no behaviour changes: it works exactly as before, now on 2.1.
+---------------------------------------------------------------------------------------------------
 Version: 1.10.1
 Date: 2026-06-30
   Bugfixes:

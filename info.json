@@ -1,9 +1,9 @@
 {
   "name": "planet-express",
-  "version": "1.10.1",
+  "version": "2.1.0",
   "title": "Planet Express",
   "author": "CrazyFeSS",
-  "factorio_version": "2.0",
+  "factorio_version": "2.1",
   "description": "Cross-planet delivery that just works.\n\nHauling goods between planets in Space Age means babysitting platform schedules and cargo requests by hand. Planet Express does it for you. Enrol a few cargo ships into a fleet, tell each planet what it needs on its landing pad, and the mod finds a planet with the surplus, picks the ship that arrives soonest, and flies it over, then brings spare cargo back on the return trip.\n\nIt stays out of your way: no spawning, teleporting or hand-inserting anything, ever. It only sets a platform's schedule. Edit a ship's schedule yourself and the mod backs off and leaves it to you.\n\nYou get a fleet monitor showing which ships are working, idle or stuck, with live ETAs. Set a reserve so a planet keeps stock before it exports, raise an item's priority so it ships first, pin a preferred ship to a route, and if you run circuits, hold a ship at its hub until your own 'ready' signal says go.\n\nAvailable in 15 languages.",
   "dependencies": ["base >= 2.0", "space-age >= 2.0"]
 }
