@@ -157,7 +157,11 @@ local function render_body(body, entry)
   -- planet a ship can't reach (e.g. no Aquilo-grade thrusters). The toggle handler
   -- rebuilds the list from these checkboxes via the pure fleet.allowed_from_selection.
   body.add({ type = "line" })
-  body.add({ type = "label", caption = { "planet-express.fleet-allowed-planets" } })
+  body.add({
+    type = "label",
+    caption = { "planet-express.fleet-allowed-planets" },
+    tooltip = { "planet-express.fleet-allowed-planets-tip" },
+  })
   -- Bound the per-planet list in a scroll-pane: with many mod planets the flat flow
   -- grew taller than the hub window and pushed the whole panel off-screen (the
   -- checkboxes stayed clickable but invisible). A fixed-height scroll keeps it on screen.
