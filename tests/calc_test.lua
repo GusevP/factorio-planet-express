@@ -298,6 +298,36 @@ describe("demand.threshold", function()
   assert_eq(demand.threshold({ thresholds = { ["iron-plate"] = -5 } }, "iron-plate"), 0, "negative -> no minimum")
 end)
 
+describe("demand.section_requests -- multiplier-scaled, disabled skipped, quality-keyed", function()
+  local qk = require("scripts.qkey").qkey -- cached; keeps the key format authoritative
+  -- THE REPORTED BUG: a request group multiplied x100 (the pad's small "edit" button)
+  -- must count 50 * 100 = 5000, not the bare 50.
+  assert_eq(demand.section_requests({ multiplier = 100,
+    filters = { { value = { name = "calcite" }, min = 50 } } }),
+    { [qk("calcite", nil)] = 5000 }, "multiplier scales the request (50 x100 -> 5000)")
+
+  -- absent multiplier = 1x; qualities keyed separately.
+  assert_eq(demand.section_requests({ filters = {
+    { value = { name = "iron-plate" }, min = 100 },
+    { value = { name = "iron-plate", quality = "uncommon" }, min = 40 },
+  } }), { [qk("iron-plate", nil)] = 100, [qk("iron-plate", "uncommon")] = 40 },
+    "no multiplier -> 1x; each quality is its own key")
+
+  -- a DISABLED section contributes nothing even with a multiplier set.
+  assert_eq(demand.section_requests({ active = false, multiplier = 100,
+    filters = { { value = { name = "coal" }, min = 10 } } }), {},
+    "active == false -> ignored")
+
+  -- fractional multiplier floors (item counts are integers).
+  assert_eq(demand.section_requests({ multiplier = 1.5,
+    filters = { { value = { name = "stone" }, min = 51 } } }),
+    { [qk("stone", nil)] = 76 }, "floor(51 * 1.5) = 76")
+
+  -- guards
+  assert_eq(demand.section_requests(nil), {}, "nil section -> empty")
+  assert_eq(demand.section_requests({ filters = {} }), {}, "no filters -> empty")
+end)
+
 describe("demand.build_open -- per-item dispatch threshold (+ held surfacing)", function()
   -- iron has a 1000 min: at unmet 500 it is OUT of open demand but surfaced as HELD
   -- (the Monitor's "below threshold"); at 1000 it ships the FULL deficit. copper has

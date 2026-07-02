@@ -159,6 +159,31 @@ end
 -- quality on-hand never masks an uncommon-quality shortfall (and vice versa). The
 -- old two-arg `(name, quality)` form crashed in-engine (2.0 `get_item_count` takes
 -- 0 or 1 args).
+-- Pure: the effective per-(item, quality) request ONE logistic section contributes,
+-- as a { [qkey] = amount } map. The section's `multiplier` (the request group's small
+-- "x N" edit button) scales EVERY filter before the game uses it, so the effective
+-- amount is `floor(filter.min * multiplier)` -- reading `filter.min` alone
+-- under-requested a multiplied group (a 50 x100 group read as 50, and only 50 shipped).
+-- A DISABLED section (`active == false`) contributes nothing. Floor because item counts
+-- are integers and `multiplier` is a float. Default multiplier 1. PURE (qkey is plain
+-- string math, no engine globals) -> unit-tested; `read_native_demand` just sums these.
+function demand.section_requests(section)
+  local out = {}
+  if not section or section.active == false then
+    return out
+  end
+  local mult = section.multiplier or 1
+  for _, filter in pairs(section.filters or {}) do
+    local value = filter.value
+    local name = value and value.name
+    if name and filter.min and filter.min > 0 then
+      local key = qkey.qkey(name, value.quality)
+      out[key] = (out[key] or 0) + math.floor(filter.min * mult)
+    end
+  end
+  return out
+end
+
 local function read_native_demand(node)
   local pad = node and node.entity
   if not (pad and pad.valid) then
@@ -173,20 +198,12 @@ local function read_native_demand(node)
   local requested = {}
   local point = pad.get_logistic_point(defines.logistic_member_index.cargo_landing_pad_requester)
   if point and point.sections then
+    -- Sum each section's EFFECTIVE (multiplier-scaled, disabled-skipped) requests per
+    -- qkey. The per-section math lives in the pure demand.section_requests (tested);
+    -- summing across sections is an order-independent keyed reduction (plain pairs ok).
     for _, section in pairs(point.sections) do
-      -- Skip sections the player has DISABLED (`active == false`). A disabled
-      -- request slot is not live demand, so counting it would dispatch shipments
-      -- for requests the player deliberately turned off. A nil/absent `active`
-      -- (defensive -- a partial mock) is treated as enabled.
-      if section.active ~= false then
-        for _, filter in pairs(section.filters or {}) do
-          local value = filter.value
-          local name = value and value.name
-          if name and filter.min and filter.min > 0 then
-            local key = qkey.qkey(name, value.quality)
-            requested[key] = (requested[key] or 0) + filter.min
-          end
-        end
+      for key, amt in pairs(demand.section_requests(section)) do
+        requested[key] = (requested[key] or 0) + amt
       end
     end
   end
