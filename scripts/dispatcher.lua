@@ -36,6 +36,7 @@ local schedule = require("scripts.schedule")
 local registry = require("scripts.registry")
 local watchdog = require("scripts.watchdog")
 local qkey = require("scripts.qkey")
+local reserves = require("scripts.reserves")
 
 local dispatcher = {}
 
@@ -142,6 +143,29 @@ function dispatcher.net_surplus(raw, committed, min_trip)
     return 0
   end
   return net
+end
+
+-- Pure: how much of an item a node can PROVIDE (export) after RESERVING its own request.
+-- A node that requests an item keeps that request as a standing buffer, so it may ship
+-- only `total - requested`, never the stock it asked to keep -- otherwise two planets that
+-- both request AND produce it shuttle their buffers back and forth (each re-exports what
+-- it just received, then re-requests it). `raw` is the ABOVE-RESERVE surplus (from
+-- stock.surplus), so the reserve is already excluded; drop only the request portion NOT
+-- already covered by the reserve (`max(0, requested - reserve)`). A NEGATIVE reserve is
+-- the never-export sentinel -- `raw` is already 0 there, so nothing to do. `requested`
+-- nil/0 is a pure producer, left untouched (it exports its full above-reserve surplus).
+-- Clamped at 0. Unit-tested.
+function dispatcher.provide_after_request(raw, requested, reserve)
+  local r = raw or 0
+  local req = requested or 0
+  local res = reserve or 0
+  if req > 0 and res >= 0 and req > res then
+    r = r - (req - res)
+  end
+  if r < 0 then
+    return 0
+  end
+  return r
 end
 
 -- ---------------------------------------------------------------------------
@@ -1078,7 +1102,7 @@ function dispatcher.build_snapshot(_tick)
     -- the fleet leaves it alone. In-flight shipments still complete (the watchdog owns
     -- those); only NEW dispatch stops. Default-on (nil), so existing saves are unaffected.
     if entity_ok and surface_ok and node.disabled ~= true then
-      local open, import_by_item, held = demand.open_demand(node)
+      local open, import_by_item, held, requested_amounts = demand.open_demand(node)
       local unmet_by_item = {}
       for _, d in ipairs(open) do
         unmet_by_item[d.item] = d.unmet
@@ -1119,6 +1143,12 @@ function dispatcher.build_snapshot(_tick)
         -- chosen as the source for it even once an in-flight delivery nets its
         -- `unmet` to 0. See demand.import_map / dispatcher.exportable.
         import_by_item = import_by_item or {},
+        -- Per-item REQUESTED amount (qkey -> count). The node RESERVES its own request:
+        -- the surplus pass below drops this from what the node can provide, so it ships
+        -- only `total - requested` and never exports the buffer it asked to keep -- the
+        -- cross-planet churn fix. Empty for a pure producer, which still exports
+        -- everything above its RESERVE as before. See demand.requested_amounts.
+        requested_by_item = requested_amounts or {},
         surplus = {},
         -- The "Preferred ship" pin set on the Trade tab: a fleet key
         -- string | nil. This is the PRODUCER for the `dest.pin` consumers in
@@ -1146,6 +1176,14 @@ function dispatcher.build_snapshot(_tick)
       -- below min-trip is dropped rather than dispatched as a dribble (see
       -- dispatcher.net_surplus).
       local raw = stock.surplus(ns.node, item)
+      -- Request keep-floor (churn fix): a node RESERVES its own request, providing only
+      -- `total - requested` so it never exports the buffer it asked to keep (which would
+      -- just bounce back to a planet that then re-requests it). Pure math in
+      -- provide_after_request; the reserve is read per bare item NAME.
+      local req = ns.requested_by_item and ns.requested_by_item[item]
+      if req then
+        raw = dispatcher.provide_after_request(raw, req, reserves.reserve(ns.node, qkey.qparse(item)))
+      end
       local s = dispatcher.net_surplus(raw, com and com[item] or 0, min_trip)
       if s > 0 then
         ns.surplus[item] = s

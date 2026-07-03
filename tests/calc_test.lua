@@ -961,6 +961,38 @@ describe("dispatcher.net_surplus -- min-trip re-clamp on the post-committed valu
   assert_eq(dispatcher.net_surplus(80, nil, 50), 80, "nil committed, above min-trip -> full raw")
 end)
 
+describe("dispatcher.provide_after_request -- reserve the node's own request (churn fix)", function()
+  -- "provide = total - requested": raw is above-reserve surplus. With reserve 0 the node
+  -- keeps its whole request. total 120, reserve 0 -> raw 120, request 100 -> provides 20.
+  assert_eq(dispatcher.provide_after_request(120, 100, 0), 20, "raw 120, request 100, reserve 0 -> 20")
+  -- exactly at the request -> nothing spare (this is what stops the buffer bounce).
+  assert_eq(dispatcher.provide_after_request(100, 100, 0), 0, "at request -> provides 0")
+  -- reserve already keeps MORE than the request -> the request floor is a no-op.
+  assert_eq(dispatcher.provide_after_request(50, 100, 150), 50, "reserve > request -> unchanged (50)")
+  -- reserve partially covers the request: raw already excludes the reserve, so keep only
+  -- the rest. total 200, reserve 50 -> raw 150; request 100 -> keep 50 more -> 100.
+  assert_eq(dispatcher.provide_after_request(150, 100, 50), 100, "reserve 50 + request 100 -> 100")
+  -- NEGATIVE reserve is the never-export sentinel: raw is already 0, stays 0.
+  assert_eq(dispatcher.provide_after_request(0, 100, -1), 0, "never-export sentinel -> 0")
+  -- a pure producer (no request / request 0) is untouched.
+  assert_eq(dispatcher.provide_after_request(80, nil, 0), 80, "no request -> full above-reserve surplus")
+  assert_eq(dispatcher.provide_after_request(80, 0, 0), 80, "request 0 -> unaffected")
+  -- clamp: request exceeds what is on hand -> 0, never negative.
+  assert_eq(dispatcher.provide_after_request(30, 100, 0), 0, "request > raw -> clamped to 0")
+end)
+
+describe("demand.requested_amounts -- per-qkey request as export keep-floor", function()
+  local qk = require("scripts.qkey").qkey
+  assert_eq(demand.requested_amounts({
+    { item = qk("calcite", nil), requested = 100, on_hand = 100 },
+    { item = qk("iron-plate", "uncommon"), requested = 40, on_hand = 0 },
+    { item = qk("coal", nil), requested = 0, on_hand = 500 }, -- not requested -> excluded
+  }), { [qk("calcite", nil)] = 100, [qk("iron-plate", "uncommon")] = 40 },
+    "keeps requested>0 amounts per qkey; a requested-0 row is excluded")
+  assert_eq(demand.requested_amounts({}), {}, "no rows -> empty")
+  assert_eq(demand.requested_amounts(nil), {}, "nil -> empty")
+end)
+
 describe("dispatcher.best_source -- source strategy: fastest vs most-surplus", function()
   -- dest "d" wants X (unmet 100). "near" holds exactly 100 (covers it, small pile);
   -- "far" holds 500 (covers the same 100, but a far bigger pile). "near" is closer.

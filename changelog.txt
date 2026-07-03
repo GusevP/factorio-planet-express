@@ -1,3 +1,8 @@
+Version: 2.1.2
+Date: 2026-07-03
+  Bugfixes:
+    - Planets no longer shuttle the same goods back and forth across space. A planet now keeps the amount it requests on its Cargo Landing Pad as a buffer and exports only what it holds above that request, instead of exporting stock it was just delivered and then immediately re-requesting it. A planet that produces an item still exports everything above its own request; raise its Reserve if you want it to keep even more before exporting.
+---------------------------------------------------------------------------------------------------
 Version: 2.1.1
 Date: 2026-07-02
   Bugfixes:
@@ -7,6 +12,11 @@ Version: 2.1.0
 Date: 2026-06-30
   Changes:
     - Updated for Factorio 2.1 — the mod now declares compatibility with the 2.1 release series. An audit of the 2.0-to-2.1 modding API found that nothing the mod relies on (platform schedules, hub/landing-pad logistic requests, item and spoilage reads, planets) changed or was removed, so there are no behaviour changes: it works exactly as before, now on 2.1.
+---------------------------------------------------------------------------------------------------
+Version: 1.10.3
+Date: 2026-07-03
+  Bugfixes:
+    - Planets no longer shuttle the same goods back and forth across space. A planet now keeps the amount it requests on its Cargo Landing Pad as a buffer and exports only what it holds above that request, instead of exporting stock it was just delivered and then immediately re-requesting it. A planet that produces an item still exports everything above its own request; raise its Reserve if you want it to keep even more before exporting.
 ---------------------------------------------------------------------------------------------------
 Version: 1.10.2
 Date: 2026-07-02

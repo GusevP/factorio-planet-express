@@ -287,6 +287,25 @@ function demand.import_map(rows)
   return out
 end
 
+-- Pure: the per-(item, quality) amount this node natively REQUESTS (requested > 0),
+-- keyed by qkey. A node RESERVES its own request: the dispatcher treats the requested
+-- amount as an export keep-floor, so the node can provide only `total - requested` of
+-- that item -- a resolved request is a standing buffer it keeps, not spare stock to
+-- ship. Without this, two planets that both request AND produce an item shuttle it back
+-- and forth (each re-exporting its just-filled buffer). A pure producer that does NOT
+-- request the item is unaffected (it still exports everything above its RESERVE). PURE
+-- over the rows.
+function demand.requested_amounts(rows)
+  local out = {}
+  for _, row in ipairs(rows or {}) do
+    local req = row.requested or 0
+    if req > 0 then
+      out[row.item] = req
+    end
+  end
+  return out
+end
+
 -- ---------------------------------------------------------------------------
 -- open_demand (IO read + overlay + inbound + pure build)
 -- ---------------------------------------------------------------------------
@@ -305,9 +324,12 @@ function demand.open_demand(node)
     row.inbound = (row.inbound or 0) + (inbound[row.item] or 0)
   end
   local open, held = demand.build_open(node, rows)
-  -- THREE values: open-demand list, gross-import map (thrash guard), and the held
-  -- sub-threshold list (Monitor display only). Callers wanting fewer ignore the rest.
-  return open, demand.import_map(rows), held
+  -- FOUR values, all from the one read: the netted open-demand list, the gross-import
+  -- map (export thrash guard), the held sub-threshold list (Monitor display only), and
+  -- the per-item REQUESTED amounts -- the export keep-floor the dispatcher reserves so a
+  -- node provides only `total - requested` (see dispatcher.build_snapshot). Callers
+  -- wanting fewer values ignore the trailing ones.
+  return open, demand.import_map(rows), held, demand.requested_amounts(rows)
 end
 
 return demand
