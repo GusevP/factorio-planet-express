@@ -82,10 +82,12 @@ dispatcher.TWO_WAY_DEFAULT = true
 dispatcher.MIN_LOAD_SETTING = "planet-express-min-load"
 dispatcher.MIN_LOAD_DEFAULT = 80
 
--- [provisional] Per-platform cargo capacity is now a SLOT BUDGET (the hub's
--- main-inventory slot count), NOT an item count -- the slot-aware manifest packer
--- fills this many slots. DEFAULT_CAPACITY is the fallback slot count used
--- when the hub inventory can't be read (degrade safely). DEFAULT_STACK_SIZE is the
+-- [provisional] Per-platform cargo capacity is a SLOT BUDGET (the hub's FREE
+-- main-inventory slots -- see capacity_of), NOT an item count and NOT the hub's total
+-- slot count -- the slot-aware manifest packer fills this many slots.
+-- DEFAULT_CAPACITY is the fallback slot count used ONLY when the hub inventory can't
+-- be read at all (degrade safely; a readable-but-full hold reports 0, not this).
+-- DEFAULT_STACK_SIZE is the
 -- fallback per-item stack size used when a prototype is unavailable (e.g. the
 -- pure-Lua test runner, which has no `prototypes` global). Confirm both in-engine
 -- accessors before flipping the api-notes seams to [confirmed].
@@ -479,6 +481,7 @@ function dispatcher.pick_ship(ships, used, source_planet, dest_planet, pin, dist
     -- `false` only when a gated ship's hub reads `planet-express-ready <= 0`.
     -- Absent / `true` (un-gated or satisfied) stays eligible, so pure tests with
     -- no `ready` field are unaffected.
+    --
     return not used[s.id] and s.ready ~= false
       and fleet.idle_eligible(s.entry, source_planet, dest_planet)
   end
@@ -983,23 +986,32 @@ function dispatcher.ship_planet(platform)
   return loc and loc.name or nil
 end
 
--- [provisional] A platform's cargo capacity as a SLOT BUDGET: the number of slots
--- in the hub's main inventory (`hub.get_inventory(defines.inventory.hub_main)`,
--- then `#inv`). This is what the slot-aware packer fills. Cargo bays
--- enlarge the hub inventory, so a freighter reports more slots than a bare hub.
--- Falls back to DEFAULT_CAPACITY slots when the hub/inventory can't be read
--- (degrade safely, never error). Confirm the in-engine accessor before flipping
--- the api-notes seam.
+-- [provisional] A platform's cargo capacity as a SLOT BUDGET: the number of FREE
+-- slots in the hub's main inventory -- `count_empty_stacks`, NOT the total `#inv`.
+-- The hold is rarely empty: it already carries the player's OWN requested items,
+-- thruster fuel, ammo, repair packs, and any over-delivery residue (rockets are
+-- atomic, so a request that isn't a rocket multiple overshoots and the leftover rides
+-- along). Sizing a manifest against TOTAL slots asks for more cargo than physically
+-- fits: the hub request is never satisfied, the load wait-condition never clears, and
+-- the ship sits at the source until the timeout frees it.
+--
+-- `include_bar = false` is passed EXPLICITLY -- that arg DEFAULTS TO TRUE, which would
+-- count bar-blocked slots as free and re-introduce the over-request. `include_filtered`
+-- is left false (its default): a filtered slot only accepts its own item, so it is not
+-- generic free space. Both make the budget conservative, which is the safe direction.
+--
+-- A genuinely FULL hold returns 0 -- the packer then loads nothing and `pick_ship`
+-- skips the ship -- rather than falling through to DEFAULT_CAPACITY and over-requesting
+-- all over again. The fallback below fires ONLY when the inventory can't be read.
+-- [count_empty_stacks(include_bar?, include_filtered?) -> uint32 confirmed against the
+-- 2.0 API; confirm the free-slot budget behaves in-engine before flipping the seam.]
 function dispatcher.capacity_of(entry)
   local platform = entry and entry.platform
   local hub = platform and platform.valid and platform.hub
   if hub and hub.valid and defines and defines.inventory and defines.inventory.hub_main then
     local inv = hub.get_inventory(defines.inventory.hub_main)
-    if inv then
-      local slots = #inv
-      if slots > 0 then
-        return slots
-      end
+    if inv and inv.count_empty_stacks then
+      return inv.count_empty_stacks(false, false)
     end
   end
   return dispatcher.DEFAULT_CAPACITY

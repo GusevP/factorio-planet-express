@@ -1,3 +1,8 @@
+Version: 2.1.3
+Date: 2026-07-10
+  Bugfixes:
+    - Ships are no longer scheduled to carry more cargo than they can physically hold. The fleet now measures a ship's free hold space instead of its total slot count, so anything already aboard — your own requested items, thruster fuel, ammo, repair packs, or leftovers from an earlier delivery — is properly accounted for. Previously a partly-full ship was sent to collect a load that could not fit, its loading condition was never met, and it sat at the source until it timed out.
+---------------------------------------------------------------------------------------------------
 Version: 2.1.2
 Date: 2026-07-03
   Bugfixes:
@@ -12,6 +17,11 @@ Version: 2.1.0
 Date: 2026-06-30
   Changes:
     - Updated for Factorio 2.1 — the mod now declares compatibility with the 2.1 release series. An audit of the 2.0-to-2.1 modding API found that nothing the mod relies on (platform schedules, hub/landing-pad logistic requests, item and spoilage reads, planets) changed or was removed, so there are no behaviour changes: it works exactly as before, now on 2.1.
+---------------------------------------------------------------------------------------------------
+Version: 1.10.4
+Date: 2026-07-10
+  Bugfixes:
+    - Ships are no longer scheduled to carry more cargo than they can physically hold. The fleet now measures a ship's free hold space instead of its total slot count, so anything already aboard — your own requested items, thruster fuel, ammo, repair packs, or leftovers from an earlier delivery — is properly accounted for. Previously a partly-full ship was sent to collect a load that could not fit, its loading condition was never met, and it sat at the source until it timed out.
 ---------------------------------------------------------------------------------------------------
 Version: 1.10.3
 Date: 2026-07-03

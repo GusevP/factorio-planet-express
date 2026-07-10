@@ -258,17 +258,27 @@ know which stop the ship is at and whether its hold has drained:
   `get_inventory(hub_main).is_empty()` read —
   `watchdog.hold_empty` — was retired 2026-06 for this reason.)
 - **Platform hub slot budget — per-platform capacity (#3, Task 6):**
-  `hub.get_inventory(defines.inventory.hub_main)` → `LuaInventory`, then `#inv`
-  is the number of cargo slots. This is the per-platform **SLOT BUDGET** the
-  slot-aware manifest packer (Task 7) fills (`ceil(load / stack_size)` slots per
-  item). `dispatcher.capacity_of(entry)` reads it and falls back to
-  `dispatcher.DEFAULT_CAPACITY` slots when the hub/inventory can't be read
-  (degrade safely, never error). **NOTE — this changes the units of
-  `ship.capacity` from item-count to SLOT-count**: cargo bays enlarge the hub
-  inventory, so a freighter reports more slots than a bare hub (replacing the old
-  flat-1000 item stub). **[provisional — confirm
-  `get_inventory(defines.inventory.hub_main)` is the cargo hold and `#inv` is its
-  slot count in-engine.]**
+  `hub.get_inventory(defines.inventory.hub_main)` → `LuaInventory`, then
+  **`inv.count_empty_stacks(include_bar, include_filtered)`** → the number of FREE
+  cargo slots. This is the per-platform **SLOT BUDGET** the slot-aware manifest packer
+  (Task 7) fills (`ceil(load / stack_size)` slots per item). `dispatcher.capacity_of(entry)`
+  reads it and falls back to `dispatcher.DEFAULT_CAPACITY` slots ONLY when the
+  hub/inventory can't be read (degrade safely, never error).
+  **NOTE — FREE slots, not the total `#inv`.** The hold already carries the player's own
+  requested items, thruster fuel, ammo, repair packs, and over-delivery residue (rockets
+  are atomic, so a non-rocket-multiple request overshoots and the leftover rides along
+  until some planet requests it). Budgeting against `#inv` over-requests: the load
+  wait-condition never clears and the ship times out at the source. A readable-but-FULL
+  hold therefore reports **0** (and `pick_ship` skips it), never DEFAULT_CAPACITY.
+  Signature confirmed against the 2.0 API:
+  `count_empty_stacks(include_bar?: boolean, include_filtered?: boolean) → uint32` —
+  **`include_bar` DEFAULTS TO TRUE**, so it is passed `false` explicitly (bar-blocked
+  slots are not free); `include_filtered` stays `false` (a filtered slot only takes its
+  own item). Both keep the budget conservative, the safe direction.
+  **NOTE — this changes the units of `ship.capacity` from item-count to SLOT-count**:
+  cargo bays enlarge the hub inventory, so a freighter reports more slots than a bare hub
+  (replacing the old flat-1000 item stub). **[provisional — confirm in-engine that
+  `hub_main` is the cargo hold and that the free-slot budget loads correctly.]**
 
 - **Platform current planet — no-deadhead ship pick:**
   `platform.space_location` is the `LuaSpaceLocationPrototype` the platform is
