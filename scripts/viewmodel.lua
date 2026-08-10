@@ -59,6 +59,11 @@ local SHIP_SIDE_BLOCK = {
 -- How many of the most recent alerts the monitor shows.
 viewmodel.MAX_ALERTS = 20
 
+-- How many cargo icons a roster row draws before collapsing the rest into a
+-- "+N" tail. A landing pad can request dozens of distinct items, and the roster is
+-- a fixed-column table -- one wide row would stretch every other row with it.
+viewmodel.MAX_CARGO = 6
+
 -- Ship states that count as "actively running a job" for the summary roll-up.
 local ACTIVE_STATES = {
   [fleet.ENROUTE] = true,
@@ -198,6 +203,40 @@ function viewmodel.format_eta(ticks)
   return string.format("%d:%02d", m, s)
 end
 
+-- PURE: what a ship is carrying on the leg it is CURRENTLY flying, as an ordered
+-- `{ { key = <qkey>, qty = n }, ... }` list plus a `more` count for whatever the
+-- MAX_CARGO display cap dropped. The route is 1 source(load forward) -> 2
+-- dest(deliver forward, load return) -> 3 source(drop return), so stops 1-2 carry
+-- the forward manifest and stop 3 the return one; a nil `progress_index` (an
+-- assignment written before the ship reached a stop) reads as the forward leg.
+-- Sorted by qkey via the deterministic helper -- two clients must draw the same
+-- row in the same order. Returns nil when there is no cargo, so the row simply
+-- omits the section rather than rendering an empty one.
+function viewmodel.cargo_for_leg(manifest, return_manifest, progress_index)
+  -- An explicit branch, NOT `cond and ret or fwd`: that idiom falls through to the
+  -- forward manifest whenever `return_manifest` is nil, so a one-way ship on its drop
+  -- stop would draw cargo it had already delivered.
+  local m = manifest
+  if (progress_index or 1) >= 3 then
+    m = return_manifest
+  end
+  if not m or next(m) == nil then
+    return nil, 0
+  end
+  local out, more = {}, 0
+  for key, qty in state.sorted_pairs(m) do
+    if #out < viewmodel.MAX_CARGO then
+      out[#out + 1] = { key = key, qty = qty }
+    else
+      more = more + 1
+    end
+  end
+  if #out == 0 then
+    return nil, 0
+  end
+  return out, more
+end
+
 -- ---------------------------------------------------------------------------
 -- pure view-model builder
 -- ---------------------------------------------------------------------------
@@ -233,16 +272,25 @@ function viewmodel.build(world)
     local e = fleet_in[sid]
     if e.enrolled == true or e.assignment ~= nil then
       local a = e.assignment and assignments[e.assignment] or nil
+      -- Cargo for the leg the ship is on, so the roster answers "what is this ship
+      -- carrying?" without opening the platform itself.
+      local cargo, cargo_more = nil, 0
+      if a then
+        cargo, cargo_more = viewmodel.cargo_for_leg(a.manifest, a.return_manifest, a.progress_index)
+      end
       roster[#roster + 1] = {
         ship_id = sid,
         name = e.name, -- platform name for display (nil under the pure test runner)
         state = e.state,
         stranded = e.stranded == true,
+        stranded_reason = e.stranded_reason, -- why it is stuck; ROW-only tooltip
         held = e.held == true, -- ready-signal "held"; ROW-only display label
         location = e.location, -- planet the ship is currently AT (nil in transit)
         from = a and a.source_planet or nil,
         to = a and a.dest_planet or nil,
         manifest = a and a.manifest or nil,
+        cargo = cargo,           -- ordered {key, qty} for the CURRENT leg (nil = none)
+        cargo_more = cargo_more, -- items the MAX_CARGO display cap dropped
         assignment_id = e.assignment,
         -- Live in-flight ETA (ticks) from the measured progress-rate, if gather
         -- stamped the live fields (`eta_live`); nil for parked / un-sampled ships.
@@ -341,8 +389,86 @@ function viewmodel.build(world)
     shipments = shipments,
     waiting = waiting,
     alerts = alerts,
+    -- Passed straight through (already planet/item sorted by gather) for the
+    -- network view's "spare here" side; no per-item shaping is needed.
+    surplus = world.surplus or {},
     summary = summary,
   }
+end
+
+-- PURE: split ONE shipment into the live cargo movements it represents right now.
+-- A shipment can touch TWO planets across a two-way (3-stop) trip: the FORWARD cargo
+-- goes to the destination, then the RETURN cargo comes back to the source. Which
+-- cargo is live -- which manifest, which planet, loading vs delivering -- is decided
+-- by the ship's current stop (`progress_index`: 1 = source load, 2 = dest turnaround,
+-- 3 = source drop) together with `phase`.
+--
+-- The lifecycle of any cargo is loading -> delivering -> (delivered, gone):
+--   * loading    -- parked at / heading to the pickup stop.
+--   * delivering -- ENROUTE carrying it toward the receiving planet.
+--   * delivered  -- once PARKED at the receiving planet the pad pulls it (sub-second),
+--                   so it is dropped from the view rather than lingering as "delivering"
+--                   until the assignment is freed. (Previously the forward cargo stayed
+--                   shown -- "loading"/"delivering" -- at the destination right through
+--                   the turnaround and return legs; that was the bug.)
+--
+-- Each contribution is `{ planet, items, status, from, avail?, eta_ticks?, ship_id? }`
+-- where `planet` is the RECEIVING planet and `from` the planet the cargo is leaving.
+-- Both directions are recorded on every contribution so one traversal feeds both the
+-- import view (`group_demand`, keyed by `planet`) and the export view
+-- (`group_network`, keyed by `from`) -- the leg rules are subtle enough that a second
+-- copy of them would be a second place to get them wrong.
+function viewmodel.contributions_of(sh)
+  if not (sh.to and sh.manifest) then
+    return {}
+  end
+  local ret = sh.return_manifest
+  local has_ret = ret ~= nil and next(ret) ~= nil
+  local pi = sh.progress_index or 1
+  local enroute = (sh.phase == fleet.ENROUTE)
+
+  if pi <= 1 then
+    -- Forward leg, at/heading to the SOURCE: loading the forward cargo there for the
+    -- destination (parked loading), or in transit toward it (delivering). Bucketed
+    -- under the destination either way.
+    return { {
+      planet = sh.to, items = sh.manifest,
+      status = enroute and "delivering" or "loading",
+      from = sh.from, avail = sh.source_avail,
+      eta_ticks = sh.eta_ticks, ship_id = sh.ship_id,
+    } }
+  elseif pi == 2 then
+    if enroute then
+      -- forward cargo in transit to the destination
+      return { {
+        planet = sh.to, items = sh.manifest, status = "delivering",
+        from = sh.from,
+        eta_ticks = sh.eta_ticks, ship_id = sh.ship_id,
+      } }
+    end
+    -- PARKED at the destination: the forward cargo has been delivered (the pad pulled
+    -- it), so it is dropped. On a two-way trip the return cargo is now LOADING here (the
+    -- turnaround) for the source; on a one-way trip nothing remains (the ship just
+    -- holds until the watchdog frees it).
+    if has_ret then
+      return { {
+        planet = sh.from, items = ret, status = "loading",
+        from = sh.to, avail = sh.dest_avail,
+      } }
+    end
+    return {}
+  else
+    -- pi >= 3 (two-way return leg): delivering while in transit; once PARKED at the
+    -- source the return cargo has been dropped (delivered) -> nothing shown.
+    if has_ret and enroute then
+      return { {
+        planet = sh.from, items = ret, status = "delivering",
+        from = sh.to,
+        eta_ticks = sh.eta_ticks, ship_id = sh.ship_id,
+      } }
+    end
+    return {}
+  end
 end
 
 -- Roll the flat `shipments` (in-flight assignments) + `waiting` (blocked open
@@ -384,73 +510,8 @@ function viewmodel.group_demand(shipments, waiting)
     return g
   end
 
-  -- One shipment can touch TWO planets across a two-way (3-stop) trip: the FORWARD
-  -- cargo goes to the destination, then the RETURN cargo comes back to the source.
-  -- Which cargo is live -- which manifest, which planet, loading vs delivering -- is
-  -- decided by the ship's current stop (`progress_index`: 1 = source load, 2 = dest
-  -- turnaround, 3 = source drop) together with `phase`.
-  --
-  -- The lifecycle of any cargo is loading -> delivering -> (delivered, gone):
-  --   * loading    -- parked at / heading to the pickup stop.
-  --   * delivering -- ENROUTE carrying it toward the receiving planet.
-  --   * delivered  -- once PARKED at the receiving planet the pad pulls it (sub-second),
-  --                   so it is dropped from the view rather than lingering as "delivering"
-  --                   until the assignment is freed. (Previously the forward cargo stayed
-  --                   shown -- "loading"/"delivering" -- at the destination right through
-  --                   the turnaround and return legs; that was the bug.)
-  local function contributions_of(sh)
-    if not (sh.to and sh.manifest) then
-      return {}
-    end
-    local ret = sh.return_manifest
-    local has_ret = ret ~= nil and next(ret) ~= nil
-    local pi = sh.progress_index or 1
-    local enroute = (sh.phase == fleet.ENROUTE)
-
-    if pi <= 1 then
-      -- Forward leg, at/heading to the SOURCE: loading the forward cargo there for the
-      -- destination (parked loading), or in transit toward it (delivering). Bucketed
-      -- under the destination either way.
-      return { {
-        planet = sh.to, items = sh.manifest,
-        status = enroute and "delivering" or "loading",
-        from = sh.from, avail = sh.source_avail,
-        eta_ticks = sh.eta_ticks, ship_id = sh.ship_id,
-      } }
-    elseif pi == 2 then
-      if enroute then
-        -- forward cargo in transit to the destination
-        return { {
-          planet = sh.to, items = sh.manifest, status = "delivering",
-          eta_ticks = sh.eta_ticks, ship_id = sh.ship_id,
-        } }
-      end
-      -- PARKED at the destination: the forward cargo has been delivered (the pad pulled
-      -- it), so it is dropped. On a two-way trip the return cargo is now LOADING here (the
-      -- turnaround) for the source; on a one-way trip nothing remains (the ship just
-      -- holds until the watchdog frees it).
-      if has_ret then
-        return { {
-          planet = sh.from, items = ret, status = "loading",
-          from = sh.to, avail = sh.dest_avail,
-        } }
-      end
-      return {}
-    else
-      -- pi >= 3 (two-way return leg): delivering while in transit; once PARKED at the
-      -- source the return cargo has been dropped (delivered) -> nothing shown.
-      if has_ret and enroute then
-        return { {
-          planet = sh.from, items = ret, status = "delivering",
-          eta_ticks = sh.eta_ticks, ship_id = sh.ship_id,
-        } }
-      end
-      return {}
-    end
-  end
-
   for _, sh in ipairs(shipments or {}) do
-    for _, c in ipairs(contributions_of(sh)) do
+    for _, c in ipairs(viewmodel.contributions_of(sh)) do
       local g = planet(c.planet)
       if c.status == "loading" then
         for k, qty in pairs(c.items or {}) do
@@ -536,6 +597,96 @@ function viewmodel.group_demand(shipments, waiting)
     if #items > 0 then
       out[#out + 1] = { planet = p, items = items, counts = counts }
     end
+  end
+  return out
+end
+
+-- PURE: fold the OUTBOUND side onto `group_demand`'s per-planet import groups, so
+-- one collapsible planet row answers all three of "what is coming here", "what is
+-- leaving here" and "what could leave here":
+--   * exports -- cargo currently in the fleet's hands that was picked up on this
+--     planet, keyed off each contribution's `from` (the exact inverse of the import
+--     view, read from the SAME `contributions_of` traversal),
+--   * surplus -- stock this planet can spare right now but nothing has claimed.
+-- Emits the UNION of planets: a pure exporter with no demand of its own has no
+-- `group_demand` row at all, and leaving it out would hide half the network.
+-- Returns `{ { planet, items, counts, exports, surplus }, ... }` planet-sorted, with
+-- `counts.exporting` / `counts.surplus` added for the collapsed header. `exports` is
+-- `{ { item, qty, to }, ... }` and `surplus` is `{ { item, qty }, ... }`, both
+-- item-sorted -- every list order is total, so two clients render the same panel.
+function viewmodel.group_network(groups, shipments, surplus)
+  local by_planet, order = {}, {}
+  local function planet(p)
+    local g = by_planet[p]
+    if not g then
+      g = {
+        planet = p, items = {},
+        counts = { delivering = 0, loading = 0, waiting = 0, exporting = 0, surplus = 0 },
+        export_qty = {}, export_to = {}, surplus_qty = {},
+      }
+      by_planet[p] = g
+      order[#order + 1] = p
+    end
+    return g
+  end
+
+  for _, gd in ipairs(groups or {}) do
+    local g = planet(gd.planet)
+    g.items = gd.items or {}
+    for _, k in ipairs({ "delivering", "loading", "waiting" }) do
+      g.counts[k] = (gd.counts and gd.counts[k]) or 0
+    end
+  end
+
+  for _, sh in ipairs(shipments or {}) do
+    for _, c in ipairs(viewmodel.contributions_of(sh)) do
+      -- `from` is the planet the cargo LEFT; `planet` is where it is headed. Summation
+      -- is order-independent, so plain pairs over the manifest is fine.
+      if c.from then
+        local g = planet(c.from)
+        for k, qty in pairs(c.items or {}) do
+          g.export_qty[k] = (g.export_qty[k] or 0) + qty
+          g.export_to[k] = c.planet -- a given (planet,item) almost always has one buyer
+        end
+      end
+    end
+  end
+
+  for _, s in ipairs(surplus or {}) do
+    if s.planet and s.item then
+      -- Two pads of one force can share a planet, so sum rather than overwrite.
+      local g = planet(s.planet)
+      g.surplus_qty[s.item] = (g.surplus_qty[s.item] or 0) + (s.qty or 0)
+    end
+  end
+
+  local function sorted_keys_of(map)
+    local keys = {}
+    for k in pairs(map) do
+      keys[#keys + 1] = k
+    end
+    table.sort(keys)
+    return keys
+  end
+
+  table.sort(order)
+  local out = {}
+  for _, p in ipairs(order) do
+    local g = by_planet[p]
+    local exports = {}
+    for _, k in ipairs(sorted_keys_of(g.export_qty)) do
+      exports[#exports + 1] = { item = k, qty = g.export_qty[k], to = g.export_to[k] }
+    end
+    local spare = {}
+    for _, k in ipairs(sorted_keys_of(g.surplus_qty)) do
+      spare[#spare + 1] = { item = k, qty = g.surplus_qty[k] }
+    end
+    g.counts.exporting = #exports
+    g.counts.surplus = #spare
+    out[#out + 1] = {
+      planet = p, items = g.items, counts = g.counts,
+      exports = exports, surplus = spare,
+    }
   end
   return out
 end
@@ -697,11 +848,28 @@ function viewmodel.apply_filters(view, filters)
     end
   end
 
+  local surplus = {}
+  for _, s in ipairs(view.surplus or {}) do
+    local ok = true
+    if planet and s.planet ~= planet then
+      ok = false
+    end
+    -- `s.item` is a cargo qkey; decode so a free-text `iron-plate` filter matches
+    -- `iron-plate@normal` (a bare name decodes to itself) -- same rule as waiting.
+    if ok and item and qkey.qparse(s.item) ~= item then
+      ok = false
+    end
+    if ok then
+      surplus[#surplus + 1] = s
+    end
+  end
+
   return {
     roster = roster,
     shipments = shipments,
     waiting = waiting,
     alerts = view.alerts,
+    surplus = surplus,
     summary = view.summary,
   }
 end
@@ -762,11 +930,19 @@ function viewmodel.apply_force_scope(world, force_key)
     end
   end
 
+  local surplus_out = {}
+  for _, s in ipairs(world.surplus or {}) do
+    if in_force_scope(s.force, force_key) then
+      surplus_out[#surplus_out + 1] = s
+    end
+  end
+
   return {
     fleet = fleet_out,
     assignments = assignments_out,
     waiting = waiting_out,
     alerts = alerts_out,
+    surplus = surplus_out,
     tick = world.tick,
   }
 end
@@ -886,6 +1062,7 @@ function viewmodel.gather(tick)
       assignment = entry.assignment,
       enrolled = entry.enrolled,
       stranded = entry.stranded, -- watchdog's stuck flag -> summary.ships_stuck
+      stranded_reason = entry.stranded_reason, -- why (engine platform state) -> row tooltip
       -- Ready-signal "held": an idle, gated ship whose hub reads
       -- `planet-express-ready <= 0` is held back from dispatch -- a distinct roster
       -- label so it isn't mistaken for a missing ship. Reuses the snapshot's
@@ -1002,6 +1179,24 @@ function viewmodel.gather(tick)
     end
   end
 
+  -- Exportable surplus per node (Monitor network view): what each planet can spare
+  -- right now. Same basis as the Trade tab's readout -- `dispatcher.exportable`, the
+  -- thrash-guarded figure, so the panel shows what could ACTUALLY ship rather than raw
+  -- above-reserve stock a re-export guard would block. Force-stamped for scoping;
+  -- emitted planet-then-item sorted (sorted_keys) so the list order is total.
+  local surplus = {}
+  for _, sid in ipairs(state.sorted_keys(snapshot.nodes)) do
+    local snode = snapshot.nodes[sid]
+    for _, item in ipairs(state.sorted_keys(snode.surplus or {})) do
+      local exportable = dispatcher.exportable(snode, item)
+      if exportable > 0 then
+        surplus[#surplus + 1] = {
+          planet = snode.planet, item = item, qty = exportable, force = snode.force,
+        }
+      end
+    end
+  end
+
   -- alerts, projected so each carries a top-level `force` stamp (lifted from the
   -- alert detail the watchdog records). build keeps the original shape (kind /
   -- assignment / tick / detail); the extra `force` is read only by the scope step.
@@ -1021,6 +1216,7 @@ function viewmodel.gather(tick)
     assignments = assignments_world,
     waiting = waiting,
     alerts = alerts,
+    surplus = surplus,
     tick = tick,
   }
 end

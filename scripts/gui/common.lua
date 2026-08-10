@@ -86,6 +86,21 @@ function common.item_box(parent, key)
   return parent.add({ type = "label", caption = common.item_caption(qkey.qparse(key)) })
 end
 
+-- A compact cargo "chip": the item's icon plus a `×qty` count, with the full
+-- localised item name (quality included) on hover. `item_box` spells the name out
+-- inline, which is far too wide for a row carrying several items at once -- so the
+-- icon carries the row and the name moves to the tooltip. `key` is the compound
+-- qkey. Adds the chip to `parent` and returns it.
+function common.item_chip(parent, key, qty)
+  local name, quality = qkey.qparse(key)
+  local el = parent.add({
+    type = "label",
+    caption = item_tag(name, quality) .. "×" .. tostring(qty),
+  })
+  el.tooltip = common.item_caption(name, quality)
+  return el
+end
+
 -- Walk `el`'s ancestry upward and return the first ancestor (or `el` itself)
 -- whose `.name` equals `frame_name`, else nil. Defeats a foreign element that
 -- merely copies one of our element names: the engine ties an element's parent

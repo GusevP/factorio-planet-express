@@ -199,14 +199,29 @@ know which stop the ship is at and whether its hold has drained:
     travelling to the last stop), so it also requires `platform.speed == 0`
     (parked) AND that the hub holds **none of OUR cargo** (the manifest + return
     manifest), checked per-item rather than whole-hub-empty (see the per-item
-    hub-count seam below).
+    hub-count seam below). `speed == 0` is likewise **not sufficient**: `current`
+    flips to the final record the instant the PREVIOUS stop's wait clears, while
+    the platform is still at rest accelerating away, so `watchdog.parked_at_last_stop`
+    also requires `platform.space_location.name == records[#records].station` —
+    at the final station, not merely released toward it.
   - **No-progress deadline** uses a window WIDER than the per-stop wait timeout
     (`dispatcher.NO_PROGRESS_WINDOW`), because `current` shows no progress during
-    a long inter-planet leg — a legitimately long leg must not be timed out.
+    a long inter-planet leg. That window alone is **not enough** — any leg longer
+    than it freed a healthy ship mid-flight — so `watchdog.note_progress` also
+    resets the deadline whenever `platform.speed ~= 0`: physical movement is
+    progress, and a genuinely stuck ship sits at speed 0 and still times out.
 - **Platform motion:** `platform.speed` (double) — `0` when parked at a stop,
   non-zero in transit; the completion check uses it to reject "empty hold while
   still travelling to the final stop". A nil read degrades to the empty-hold guard
   alone. **[provisional — confirm `speed` in-engine.]**
+- **Platform state (stuck diagnosis):** `platform.state` is a
+  `defines.space_platform_state` — `no_path` / `no_schedule` / `on_the_path` /
+  `paused` / `waiting_at_station` / `waiting_for_departure` / the three
+  `starter_pack_*` values. `watchdog.strand_reason` maps it to a locale key so the
+  Monitor names WHY a ship is stuck (`on_the_path` with no progress = out of
+  thruster fuel) instead of showing a bare "stuck". Read-only, single read at the
+  timeout site. **[confirmed against the 2.0 runtime API: `LuaSpacePlatform.state`
+  and `defines.space_platform_state`.]**
 - **Refuel/rearm INTERRUPTS vs. `current` (#5):** the mod writes a SIMPLIFIED
   schedule (source → dest [→ source]) that **excludes** the player's interrupts.
   **[STILL-TO-CONFIRM in-engine — gates the GUI/schedule seam flip]** what

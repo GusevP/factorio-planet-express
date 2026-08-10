@@ -398,6 +398,35 @@ function watchdog.signable_records(records)
   return out
 end
 
+-- Why did this ship stop making progress? Read straight off the engine's own
+-- `platform.state` at the moment the no-progress window ran out, so the Monitor can
+-- say something actionable instead of a bare "stuck" the player has to guess at.
+-- Returns a short key the GUI resolves to `planet-express.strand-<key>`; the
+-- `ready_held` caller already knows the ready-signal gate held it. `defines` is
+-- absent under the pure test runner -> "unknown" rather than an error.
+function watchdog.strand_reason(platform, ready_held)
+  if ready_held then
+    return "ready"
+  end
+  local d = defines and defines.space_platform_state
+  local s = platform and platform.valid and platform.state
+  if not (d and s) then
+    return "unknown"
+  end
+  if s == d.no_path then
+    return "no_path"
+  elseif s == d.no_schedule then
+    return "no_schedule"
+  elseif s == d.paused then
+    return "paused"
+  elseif s == d.on_the_path then
+    return "no_thrust" -- following the path but got nowhere: out of thruster fuel
+  elseif s == d.waiting_at_station then
+    return "waiting" -- parked with a wait condition that never cleared
+  end
+  return "unknown"
+end
+
 -- ---------------------------------------------------------------------------
 -- alerts + freeing (IO over storage; verified by playtest)
 -- ---------------------------------------------------------------------------
@@ -538,7 +567,19 @@ function watchdog.parked_at_last_stop(platform)
   if (sched.current or 0) < #records then
     return false -- the final stop is not yet the active destination
   end
-  return (platform.speed or 0) == 0 -- parked at the final stop, not still moving
+  if (platform.speed or 0) ~= 0 then
+    return false -- still moving toward it
+  end
+  -- AT the final station, not merely released toward it. `current` flips to the
+  -- final record the instant the PREVIOUS stop's wait clears, while the platform is
+  -- still sitting there at speed 0 for the first ticks of acceleration -- so
+  -- `current >= #records and speed == 0` also matched a ship that had just departed,
+  -- and freeing it there cleared the route with the cargo still aboard (a two-way
+  -- trip's return load, or a one-way load leaving the source). Compare the planet the
+  -- platform is actually at against the final record's station; nil (in transit)
+  -- never matches.
+  local at = platform.space_location
+  return at ~= nil and at.name == records[#records].station
 end
 
 -- [provisional] Is the platform idle with no active mod schedule? Used to recover
@@ -582,6 +623,19 @@ end
 function watchdog.note_progress(a, platform, tick)
   local sched = platform and platform.valid and platform.schedule
   local current = sched and sched.current
+  -- MOVING IS PROGRESS. `schedule.current` only advances at a stop boundary, so a
+  -- healthy ship shows no INDEX progress for the whole of an inter-planet leg; any
+  -- leg (plus the stop wait that follows it) longer than the no-progress window was
+  -- therefore freed MID-FLIGHT -- which cut the engines, left the route cleared and
+  -- the cargo stranded aboard, and flagged the ship "stuck" until the next dispatch
+  -- picked it up again. Sizing the window bigger only moves the cliff; the real test
+  -- is whether the ship is physically getting anywhere. A genuinely stuck ship (no
+  -- thruster fuel, no path, held at a stop) sits at speed 0 and still times out.
+  -- Checked BEFORE the interrupt guard below: a ship flying a refuel interrupt is
+  -- making progress too.
+  if (platform.speed or 0) ~= 0 then
+    a.deadline_tick = tick + (a.deadline_window or watchdog.DEADLINE_WINDOW)
+  end
   -- Interrupt guard: only act on a stop that is one of OUR route stations. A
   -- refuel/rearm INTERRUPT can splice in its own record(s) (the simplified schedule
   -- the mod wrote excludes interrupts), shifting `current` onto a station we never
@@ -873,8 +927,8 @@ function watchdog.run(tick)
         -- It was just released to idle, but it made no progress for a full deadline
         -- (no fuel / no rockets / blocked / held by its ready signal), so it is stuck,
         -- not merely idle. Cleared once it next reaches a load/unload stop (below) or
-        -- completes a delivery.
-        fleet.set_stranded(a.ship, true)
+        -- completes a delivery. The reason rides along so the roster can name it.
+        fleet.set_stranded(a.ship, true, watchdog.strand_reason(platform, ready_held))
       else
         -- Continuous flight calibration (v1.1): fold this tick's travel into the
         -- ship's learned eta_factor (no-op when parked/loading -- it clears the

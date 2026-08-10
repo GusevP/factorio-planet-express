@@ -288,10 +288,14 @@ end
 -- reads it); it drives the Monitor's "stuck" count so a broken ship is visible at
 -- a glance instead of hiding in the idle bucket. Additive optional field, so
 -- pre-existing fleet entries (nil) read as not-stranded with no migration.
-function fleet.set_stranded(platform_id, stranded)
+-- `reason` is the short key `watchdog.strand_reason` derived from the engine's
+-- platform state (nil when clearing), which the Monitor resolves to a localised
+-- "why" on the stuck label -- a bare "stuck" gives the player nothing to act on.
+function fleet.set_stranded(platform_id, stranded, reason)
   local entry = fleet.get(platform_id)
   if entry then
     entry.stranded = stranded == true
+    entry.stranded_reason = entry.stranded and reason or nil
   end
   return entry
 end

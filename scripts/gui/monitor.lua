@@ -92,6 +92,10 @@ local DEMAND_COLOR = {
   delivering = { r = 0.6, g = 1.0, b = 0.6 },
   loading = { r = 1.0, g = 0.85, b = 0.45 },
   waiting = { r = 1.0, g = 0.6, b = 0.6 },
+  -- Outbound side: cool hues, so the inbound (warm) and outbound halves of a planet's
+  -- detail read apart at a glance.
+  exporting = { r = 0.6, g = 0.85, b = 1.0 },
+  surplus = { r = 0.7, g = 0.7, b = 0.75 },
 }
 
 -- The collapsed Demand summary: "N delivering · N loading · N waiting", omitting
@@ -107,6 +111,10 @@ local function demand_summary_caption(counts)
   add(counts.delivering, "monitor-demand-delivering")
   add(counts.loading, "monitor-demand-loading")
   add(counts.waiting, "monitor-demand-waiting")
+  -- Outbound side (group_network): what is leaving this planet and what it could
+  -- still spare. Last, so the inbound picture keeps reading first.
+  add(counts.exporting, "monitor-demand-exporting")
+  add(counts.surplus, "monitor-demand-surplus")
   local cap = { "" }
   for i, p in ipairs(parts) do
     if i > 1 then
@@ -211,6 +219,21 @@ local function render_body(body, view)
         common.planet_box(info, r.from)
         info.add({ type = "label", caption = " → " })
         common.planet_box(info, r.to)
+        -- What it is carrying on THIS leg, next to the route it is flying -- so the
+        -- roster answers "which ship has my foundation?" without opening every
+        -- platform in turn. Icon + count only (name on hover): a row carrying six
+        -- items would otherwise stretch the whole fixed-column table.
+        for _, c in ipairs(r.cargo or {}) do
+          info.add({ type = "label", caption = "  " })
+          common.item_chip(info, c.key, c.qty)
+        end
+        if (r.cargo_more or 0) > 0 then
+          info.add({
+            type = "label",
+            caption = "  +" .. tostring(r.cargo_more),
+            tooltip = { "planet-express.monitor-cargo-more", tostring(r.cargo_more) },
+          })
+        end
         info.add({ type = "label", caption = "  ·  " })
       end
       -- A stranded ship reads "idle"/"enroute" in `r.state` (the watchdog freed or
@@ -223,7 +246,13 @@ local function render_body(body, view)
         or (r.held and { "planet-express.state-held" })
         or (r.state and { "planet-express.state-" .. r.state })
         or { "planet-express.state-unknown" }
-      info.add({ type = "label", caption = status_caption })
+      -- Name WHY it is stuck (out of thruster fuel, no path, wait never cleared, held
+      -- by the ready signal) instead of leaving the player to guess. Falls back to the
+      -- generic tooltip for a pre-existing stuck flag carrying no reason.
+      local status = info.add({ type = "label", caption = status_caption })
+      if r.stranded then
+        status.tooltip = { "planet-express.strand-" .. (r.stranded_reason or "unknown") }
+      end
       -- "on <planet>" only when the ship is actually parked somewhere (in transit
       -- has no current planet). ONE localised label with the planet as a __1__ param
       -- (planet_caption carries the planet's own icon + localised name), so each
@@ -254,8 +283,14 @@ local function render_body(body, view)
   -- shows a line per item (status · icon+name · ×qty · reason-if-waiting). The
   -- expand state is per-player and persisted (expanded_set), so it survives this
   -- full-rebuild refresh.
-  add_section_header(body, { "planet-express.monitor-waiting" })
-  local groups = viewmodel.group_demand(view.shipments, view.waiting)
+  -- "Planets", NOT "Network": the base game already means circuit / logistic networks
+  -- by that word, and a mod panel borrowing it reads like it is about those.
+  add_section_header(body, { "planet-express.monitor-planets" })
+  -- The per-planet network picture: group_demand's inbound view with the outbound
+  -- side (exports in flight + spare stock) folded on, so one row per planet covers
+  -- everything moving to, from, and sitting on it.
+  local groups = viewmodel.group_network(
+    viewmodel.group_demand(view.shipments, view.waiting), view.shipments, view.surplus)
   if #groups == 0 then
     body.add({ type = "label", caption = { "planet-express.monitor-empty" } })
   else
@@ -319,6 +354,41 @@ local function render_body(body, view)
             line.add({ type = "label", caption = "  ·  " })
             line.add({ type = "label", caption = reason_caption(it.reason) })
           end
+        end
+
+        -- Outbound: cargo the fleet has already picked up HERE, and where it is going.
+        for _, ex in ipairs(g.exports) do
+          local line = detail.add({ type = "flow", direction = "horizontal" })
+          line.style.vertical_align = "center"
+          local tag = line.add({ type = "label", caption = { "planet-express.monitor-demand-exporting" } })
+          tag.style.font_color = DEMAND_COLOR.exporting
+          tag.style.minimal_width = 72
+          common.item_box(line, ex.item)
+          line.add({ type = "label", caption = "  ×" .. tostring(ex.qty) })
+          -- ONE localised label with the planet as a __1__ param (not a standalone "to"
+          -- word next to a planet box): the destination word order differs per language
+          -- -- ja/ko put the particle AFTER the planet -- and only a parameterised
+          -- string lets each locale place it. Same rule as `state-located`.
+          if ex.to then
+            line.add({ type = "label", caption = "  " })
+            line.add({
+              type = "label",
+              caption = { "planet-express.monitor-export-to", common.planet_caption(ex.to) },
+            })
+          end
+        end
+
+        -- Spare: what this planet could ship but nothing has claimed yet. Same
+        -- thrash-guarded figure the dispatcher would draw from, so a planet showing
+        -- spare stock really can supply it.
+        for _, sp in ipairs(g.surplus) do
+          local line = detail.add({ type = "flow", direction = "horizontal" })
+          line.style.vertical_align = "center"
+          local tag = line.add({ type = "label", caption = { "planet-express.monitor-demand-surplus" } })
+          tag.style.font_color = DEMAND_COLOR.surplus
+          tag.style.minimal_width = 72
+          common.item_box(line, sp.item)
+          line.add({ type = "label", caption = "  ×" .. tostring(sp.qty) })
         end
       end
     end

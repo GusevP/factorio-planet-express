@@ -1,3 +1,21 @@
+Version: 2.1.6
+Date: 2026-08-05
+  Features:
+    - The fleet monitor's Demand section is now a full Planets overview. Alongside what each planet is receiving, every planet row shows what the fleet is currently carrying away from it and where that cargo is headed, plus the stock it could still spare — the same figure the fleet itself would draw from, so anything listed as spare really can be shipped. Planets that only export or only hold spare stock now appear as well, instead of being listed only when they were waiting on something.
+---------------------------------------------------------------------------------------------------
+Version: 2.1.5
+Date: 2026-08-05
+  Features:
+    - The fleet monitor now shows what each ship is carrying. Every roster row lists the cargo for the leg it is currently flying, right next to its route, so you can see which platform has your foundation without opening each one in turn. Hover an icon for the item's full name and quality. Ships on a two-way trip show the return load once they are heading home, and a row carrying more item types than fit collapses the remainder into a "+N" count.
+---------------------------------------------------------------------------------------------------
+Version: 2.1.4
+Date: 2026-08-05
+  Bugfixes:
+    - Platforms no longer cut their engines part-way through a long flight. The watchdog that frees genuinely stuck ships only counted progress when a ship reached a new stop — and a ship crossing between planets does not reach one for the whole leg, so any flight longer than the watchdog's window was mistaken for a stall: its orders were cancelled mid-space, it drifted to a halt with the cargo still aboard, and it was marked "stuck" until the next dispatch picked it up again. Movement now counts as progress, so a flight of any length is left alone while a ship that is truly going nowhere still times out.
+    - A ship is no longer cancelled at the instant it departs its second-to-last stop. Its schedule advances to the final stop the moment the loading condition clears, while the platform is still at rest building up speed, and the fleet read that as "arrived, job done" — clearing the route and stranding the load it had just taken on. Arrival is now confirmed against the planet the platform is actually at.
+  Features:
+    - The fleet monitor now says WHY a ship is stuck. Hover the "stuck" label on any roster row for the cause read straight from the platform: out of thruster fuel, no route to its destination, paused, a wait condition that never cleared, or held by the ready signal.
+---------------------------------------------------------------------------------------------------
 Version: 2.1.3
 Date: 2026-07-10
   Bugfixes:

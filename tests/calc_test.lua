@@ -2544,6 +2544,144 @@ describe("watchdog.current_is_ours -- index-keyed interrupt guard (note_progress
   assert_eq(watchdog.current_is_ours(a, records, 9), false, "out-of-range index -> NOT ours")
 end)
 
+describe("viewmodel.group_network -- the outbound side folded onto the planet groups", function()
+  local viewmodel = require("scripts.viewmodel")
+  -- One two-way ship in transit: forward cargo nauvis -> vulcanus.
+  local shipments = {
+    {
+      from = "nauvis", to = "vulcanus", phase = "enroute", progress_index = 2,
+      manifest = { ["foundation@normal"] = 400 },
+      return_manifest = { ["tungsten-plate@normal"] = 50 },
+    },
+  }
+  local surplus = {
+    { planet = "nauvis", item = "iron-plate@normal", qty = 900 },
+    { planet = "fulgora", item = "holmium-plate@normal", qty = 120 },
+  }
+  local groups = viewmodel.group_demand(shipments, {})
+  local net = viewmodel.group_network(groups, shipments, surplus)
+
+  local by = {}
+  for _, g in ipairs(net) do
+    by[g.planet] = g
+  end
+  -- The receiving planet keeps its inbound view...
+  assert_eq(by["vulcanus"].counts.delivering, 1, "vulcanus still shows the inbound delivery")
+  -- ...and the SOURCE planet now shows the same cargo leaving.
+  assert_eq(#by["nauvis"].exports, 1, "nauvis exports the cargo it was loaded with")
+  assert_eq(by["nauvis"].exports[1].item, "foundation@normal", "the export names the item")
+  assert_eq(by["nauvis"].exports[1].qty, 400, "with its quantity")
+  assert_eq(by["nauvis"].exports[1].to, "vulcanus", "and where it is headed")
+  assert_eq(by["nauvis"].counts.exporting, 1, "export count reaches the collapsed header")
+  -- Spare stock rides on the same row.
+  assert_eq(by["nauvis"].surplus[1].item, "iron-plate@normal", "nauvis lists its spare stock")
+  assert_eq(by["nauvis"].counts.surplus, 1, "spare count reaches the collapsed header")
+
+  -- THE UNION: fulgora has no demand and no shipment, so group_demand emits no row
+  -- for it at all -- leaving it out would hide half the network from the view.
+  assert_true(by["fulgora"] ~= nil, "a planet with only spare stock still gets a row")
+  assert_eq(by["fulgora"].surplus[1].qty, 120, "and its spare stock is listed")
+  assert_eq(#by["fulgora"].items, 0, "with an empty inbound list")
+
+  -- planet order is total, so every client draws the same panel
+  local order = {}
+  for _, g in ipairs(net) do
+    order[#order + 1] = g.planet
+  end
+  assert_eq(table.concat(order, ","), "fulgora,nauvis,vulcanus", "planets are emitted sorted")
+
+  -- Two pads of one force on one planet sum rather than overwrite.
+  local doubled = viewmodel.group_network({}, {}, {
+    { planet = "gleba", item = "bioflux@normal", qty = 10 },
+    { planet = "gleba", item = "bioflux@normal", qty = 5 },
+  })
+  assert_eq(doubled[1].surplus[1].qty, 15, "two pads on one planet sum their spare stock")
+end)
+
+describe("viewmodel.cargo_for_leg -- what the roster row draws", function()
+  local viewmodel = require("scripts.viewmodel") -- required later in the file; cached
+  local fwd = { ["iron-plate@normal"] = 500, ["copper-plate@normal"] = 200 }
+  local ret = { ["biter-egg@normal"] = 40 }
+
+  local c = viewmodel.cargo_for_leg(fwd, ret, 1)
+  assert_eq(#c, 2, "loading at the source -> the forward manifest")
+  -- sorted by qkey, so two clients draw the row identically
+  assert_eq(c[1].key, "copper-plate@normal", "cargo is emitted in sorted qkey order")
+  assert_eq(c[1].qty, 200, "quantity rides with the key")
+  assert_eq(viewmodel.cargo_for_leg(fwd, ret, 2)[1].key, "copper-plate@normal",
+    "delivering the forward load -> still the forward manifest")
+  local r = viewmodel.cargo_for_leg(fwd, ret, 3)
+  assert_eq(#r, 1, "on the return drop -> the return manifest")
+  assert_eq(r[1].key, "biter-egg@normal", "return leg shows what it is bringing home")
+  assert_eq(viewmodel.cargo_for_leg(fwd, ret, nil)[1].key, "copper-plate@normal",
+    "no progress_index yet -> reads as the forward leg")
+  assert_eq(viewmodel.cargo_for_leg(nil, nil, 1), nil, "no manifest -> no cargo section")
+  assert_eq(viewmodel.cargo_for_leg({}, nil, 1), nil, "empty manifest -> no cargo section")
+  assert_eq(viewmodel.cargo_for_leg(fwd, nil, 3), nil,
+    "one-way trip on the drop stop has no return cargo -> nothing to draw")
+
+  -- display cap: a pad can request dozens of items; the row shows MAX_CARGO and
+  -- counts the rest rather than stretching the whole table.
+  local big = {}
+  for i = 1, viewmodel.MAX_CARGO + 3 do
+    big["item-" .. string.format("%02d", i) .. "@normal"] = i
+  end
+  local capped, more = viewmodel.cargo_for_leg(big, nil, 1)
+  assert_eq(#capped, viewmodel.MAX_CARGO, "cargo list is capped at MAX_CARGO")
+  assert_eq(more, 3, "the overflow is counted for the +N tail")
+end)
+
+describe("watchdog.parked_at_last_stop -- roundtrip done, NOT just-departed", function()
+  -- Duck-typed platform: the check only reads plain fields, so a plain table stands
+  -- in for the engine object. Two-way route nauvis -> vulcanus -> nauvis.
+  local records = {
+    { station = "nauvis" }, { station = "vulcanus" }, { station = "nauvis" },
+  }
+  local function platform(current, speed, at)
+    return {
+      valid = true,
+      schedule = { current = current, records = records },
+      speed = speed,
+      space_location = at and { name = at } or nil,
+    }
+  end
+  assert_true(watchdog.parked_at_last_stop(platform(3, 0, "nauvis")),
+    "parked at the final stop's own planet -> done")
+  -- THE REGRESSION: `current` flips to the final record the instant the previous
+  -- stop's wait clears, while the platform is still at speed 0 accelerating away from
+  -- vulcanus. Freeing there cleared the route with the return cargo still aboard.
+  assert_eq(watchdog.parked_at_last_stop(platform(3, 0, "vulcanus")), false,
+    "just released from the turnaround, still at rest on vulcanus -> NOT done")
+  assert_eq(watchdog.parked_at_last_stop(platform(3, 0.1, nil)), false, "in transit -> NOT done")
+  assert_eq(watchdog.parked_at_last_stop(platform(2, 0, "vulcanus")), false,
+    "parked at the turnaround, final stop still ahead -> NOT done")
+  assert_eq(watchdog.parked_at_last_stop({ valid = true, schedule = { current = 1, records = {} } }),
+    false, "empty route -> NOT done")
+end)
+
+describe("watchdog.note_progress -- movement resets the no-progress deadline", function()
+  -- A leg is longer than the no-progress window, and `schedule.current` does not
+  -- advance mid-leg, so before this the watchdog freed healthy ships MID-FLIGHT.
+  local a = {
+    source_planet = "nauvis", dest_planet = "vulcanus",
+    progress_index = 2, deadline_tick = 100, deadline_window = 36000,
+  }
+  local moving = {
+    valid = true, speed = 0.09,
+    schedule = { current = 2, records = { { station = "nauvis" }, { station = "vulcanus" } } },
+  }
+  watchdog.note_progress(a, moving, 5000)
+  assert_eq(a.deadline_tick, 41000, "moving ship -> deadline pushed out a full window")
+  -- A ship that is genuinely stopped must still time out.
+  a.deadline_tick = 100
+  local stalled = {
+    valid = true, speed = 0,
+    schedule = { current = 2, records = { { station = "nauvis" }, { station = "vulcanus" } } },
+  }
+  watchdog.note_progress(a, stalled, 5000)
+  assert_eq(a.deadline_tick, 100, "speed 0 on a steady stop -> deadline untouched")
+end)
+
 describe("watchdog.phase_for -- live loading/unloading/enroute lifecycle", function()
   local two_way = {
     source_planet = "nauvis", dest_planet = "vulcanus",
