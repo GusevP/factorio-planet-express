@@ -1,3 +1,13 @@
+<p align="center">
+  <img src="graphics/thumbnail.png" alt="Planet Express" width="144">
+</p>
+
+<p align="center">
+  <a href="https://mods.factorio.com/mod/planet-express"><img src="https://img.shields.io/factorio-mod-portal/dt/planet-express?label=mod%20portal%20downloads&color=orange" alt="Mod portal downloads"></a>
+  <img src="https://img.shields.io/badge/Factorio-2.0%20%7C%202.1-orange" alt="Factorio 2.0 and 2.1">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a>
+</p>
+
 # Planet Express — Interplanetary Merchant Fleet
 
 A **Factorio: Space Age** mod that turns your own cargo space platforms into a
@@ -23,6 +33,21 @@ Vanilla rockets launch the goods up at the source; vanilla landing-pad requests
 pull them down at the destination. The mod adds **no new entities or recipes** —
 just a reserve config, a dispatcher, two GUIs, a technology, and settings.
 
+```mermaid
+flowchart LR
+  DEST["Destination planet<br/>Cargo Landing Pad<br/>request slots = demand"]
+  SRC["Source planet<br/>Cargo Landing Pad<br/>stock minus reserve = surplus"]
+  DISP{{"Dispatcher<br/>every N ticks"}}
+  SHIP["Enrolled platform<br/>schedule + hub request<br/>written by the mod"]
+
+  DEST -- "unmet demand" --> DISP
+  SRC -- "exportable surplus" --> DISP
+  DISP -- "picks an idle ship,<br/>sizes the load" --> SHIP
+  SHIP -- "1. loads at source<br/>vanilla rockets" --> SRC
+  SHIP -- "2. unloads at destination<br/>vanilla pad request" --> DEST
+  DEST -. "3. optional return leg<br/>with the destination's own surplus" .-> SRC
+```
+
 **Two-way trade** emerges automatically: if the destination has surplus the
 source needs, a return leg is added on the same two planets (toggleable).
 
@@ -34,7 +59,8 @@ and exporting the same item at once.
 
 ## Getting started
 
-1. **Research "Interplanetary Trade Logistics."** A mid-game technology
+1. <img src="graphics/tech.png" alt="" width="20" align="top"> **Research
+   "Interplanetary Trade Logistics."** A mid-game technology
    (requires space platforms and produces in orbit). It gates the Trade tab and
    ship enrollment.
 2. **Enroll ships.** Open a space platform's hub and, in the **Fleet** panel that
@@ -69,22 +95,26 @@ the **minimum-trip threshold** so trivially small amounts don't dispatch ships.
 
 ## The Monitoring panel
 
-Opened from the top-bar shortcut, the Monitor shows the whole fleet at a glance:
+Opened from the <img src="graphics/top-bar-icon.png" alt="" width="18" align="top">
+top-bar shortcut — which itself always shows live working / idle / stuck counts, and
+turns red when something is stuck. Clicking it opens the full panel:
 
-- **Fleet roster** — each ship's live state (idle / enroute / loading /
-  unloading / withdrawn), current job `From → To`, manifest, a live **ETA** for
-  in-flight ships, and the timeout countdown. Loading/unloading are derived from
-  where the ship is parked, so the roster tracks a trip in real time.
-- **Active shipments** — manifests and the live per-shipment phase.
-- **Waiting demand** — items wanting transport, with a live **ETA** on each item
-  already on the way (soonest among the ships bringing it); items not yet
-  dispatched carry a reason instead: `no source`, `source busy importing`,
-  `no ship`, or `below min-trip`.
-- **Alerts** — stranded / destroyed / conflict events.
-- **Network summary** — one-line fleet overview.
+- **Fleet roster** — one row per ship: live state (idle / in transit / loading /
+  unloading / withdrawn / stuck), the job as `From → To`, **the cargo it is
+  carrying on that leg** as item icons, and a live **ETA** for in-flight ships.
+  Loading and unloading are derived from where the ship is actually parked, so a
+  trip is tracked in real time. A **stuck** ship's label carries a tooltip naming
+  the cause — out of thruster fuel, no route, paused, a wait condition that never
+  cleared, or held by the ready signal.
+- **Planets** — one collapsible row per planet, covering both directions:
+  what is `delivering` / `loading` / `waiting` inbound (a waiting item names its
+  blocker: `no source`, `source busy importing`, `no ship`, `below min-trip`),
+  what is `exporting` out and where to, and the `spare` stock the planet could
+  still ship. Planets that only export, or only hold spare stock, appear too.
+- **Alerts** — stranded / destroyed / player-edit events.
 
 Click a ship to recenter the view on its platform. The panel refreshes on the
-dispatcher timer, not every tick.
+dispatcher timer, not every tick; in-flight ETAs tick down once a second.
 
 ## Settings (runtime-global, all synced in multiplayer)
 
