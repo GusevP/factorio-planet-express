@@ -161,3 +161,17 @@ Everything engine-touching (event wiring, GUIs, the tech gate, the dispatcher
 loop end-to-end, the watchdog) is verified by manual in-game playtesting with the
 debug decision-log on. See `CLAUDE.md` for the full conventions and `docs/` for
 the design plan and API notes.
+
+`docs/gui-notes.md` records what Factorio's GUI system can and cannot draw,
+verified against the runtime API — read it before proposing interface changes.
+
+## Feedback
+
+Bug reports and feature requests are welcome either on the
+[mod portal](https://mods.factorio.com/mod/planet-express) discussion page or as
+a GitHub issue. For a bug, the most useful report says what the ships were doing
+and what you expected — a save file is rarely needed.
+
+## License
+
+[MIT](LICENSE).
