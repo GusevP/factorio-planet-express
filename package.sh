@@ -13,7 +13,7 @@ cd "$(dirname "$0")"
 #   COMPAT  (2.0) line -> same tree, those two fields overridden to the values below.
 #
 # Bump the 2.1 line by editing info.json as usual; bump the 2.0 line here.
-COMPAT_MOD_VERSION="1.10.7"
+COMPAT_MOD_VERSION="1.10.8"
 COMPAT_FACTORIO_VERSION="2.0"
 # ----------------------------------------------------------------------------
 

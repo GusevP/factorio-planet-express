@@ -89,6 +89,12 @@ watchdog.ALERT_PLAYER_EDIT = "player_edit"
 -- because `planet-express-ready <= 0` the whole no-progress window. Distinct from a
 -- fuel/path strand so the Monitor names WHY it is stuck.
 watchdog.ALERT_READY_HELD = "ready_held"
+-- The player (or another mod) paused the platform's thrust. Per the 2.0 API,
+-- `LuaSpacePlatform.paused` means the platform "has paused thrust and does not
+-- advance its schedule" -- so the ship can NEVER reach its next stop, however fast it
+-- is still coasting. Distinct from a timeout: nothing is broken, the ship has simply
+-- been taken out of service by hand.
+watchdog.ALERT_THRUST_PAUSED = "thrust_paused"
 
 -- How many alerts to retain in `storage.alerts`. The Monitor only ever displays
 -- the newest handful (viewmodel.MAX_ALERTS = 20); we keep a bounded backlog so a
@@ -872,9 +878,27 @@ function watchdog.recover_withdrawn()
     return
   end
   for id, entry in state.sorted_pairs(storage.fleet) do
-    if entry.state == fleet.WITHDRAWN and watchdog.platform_idle(entry.platform) then
-      fleet.set_state(id, fleet.IDLE)
-      state.debug_log("watchdog recovered withdrawn ship#" .. tostring(id))
+    if entry.state == fleet.WITHDRAWN then
+      -- Two different withdrawals, two different recovery tests:
+      --   * thrust-paused -> recover as soon as thrust resumes. Its route was left
+      --     intact on purpose (clearing it mid-flight is the 2.1.4 bug), so the
+      --     platform_idle test below would never fire and it would stay withdrawn
+      --     forever.
+      --   * player edit -> recover once the player's schedule is idle again.
+      local platform = entry.platform
+      local recovered
+      if entry.thrust_paused == true then
+        recovered = not (platform and platform.valid and platform.paused == true)
+        if recovered then
+          fleet.set_paused(id, false)
+        end
+      else
+        recovered = watchdog.platform_idle(platform)
+      end
+      if recovered then
+        fleet.set_state(id, fleet.IDLE)
+        state.debug_log("watchdog recovered withdrawn ship#" .. tostring(id))
+      end
     end
   end
 end
@@ -910,6 +934,25 @@ function watchdog.run(tick)
       -- Delivered: a previously-stranded ship has recovered, so clear the flag
       -- (it just completed a roundtrip -- it is demonstrably not stuck).
       fleet.set_stranded(a.ship, false)
+    elseif platform.paused == true then
+      -- THRUST PAUSED (checked after completion, so a trip that already finished still
+      -- completes). `paused` means the engine will not advance the schedule, so this
+      -- ship cannot reach its next stop no matter how fast it is still coasting -- and
+      -- because it IS still moving, the speed-based progress reset below would keep the
+      -- no-progress deadline alive forever, leaving it "en route" indefinitely with its
+      -- manifest committed and the destination starving (playtest 2026-08-11).
+      --
+      -- WITHDRAWN, not IDLE: pausing thrust is a deliberate player action, and the mod's
+      -- rule is that the player wins -- withdrawing releases the manifest so another ship
+      -- can cover the demand, while `free_assignment` deliberately skips `clear_route`
+      -- for WITHDRAWN, so the route survives and the ship resumes it when un-paused.
+      -- Clearing it here would cut the engines mid-flight, which is the very bug 2.1.4
+      -- fixed.
+      watchdog.free_assignment(id, watchdog.ALERT_THRUST_PAUSED, fleet.WITHDRAWN, tick)
+      -- Flags the ship so the Monitor says "thrust paused" instead of a bare
+      -- "withdrawn", and so `recover_withdrawn` knows to return it on un-pause (its
+      -- route is intact, so the platform_idle rule would never fire for it).
+      fleet.set_paused(a.ship, true)
     else
       -- Reset the no-progress clock on stop advances BEFORE testing the deadline,
       -- so a ship that just progressed is never falsely timed out.

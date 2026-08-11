@@ -241,8 +241,11 @@ local function render_body(body, view)
       -- here too so the expanded roster agrees with the dock's "N stuck". A "held"
       -- ship (idle + ready-signal gate reading 0) shows "held" so it isn't mistaken
       -- for a missing ship -- ROW-only label (it still counts as idle in the dock).
+      -- `thrust_paused` outranks the others: the ship is withdrawn for a reason the
+      -- player can act on in one click, and "withdrawn" alone doesn't say which.
       local status_caption =
-        (r.stranded and { "planet-express.state-stuck" })
+        (r.thrust_paused and { "planet-express.state-thrust-paused" })
+        or (r.stranded and { "planet-express.state-stuck" })
         or (r.held and { "planet-express.state-held" })
         or (r.state and { "planet-express.state-" .. r.state })
         or { "planet-express.state-unknown" }
@@ -250,7 +253,9 @@ local function render_body(body, view)
       -- by the ready signal) instead of leaving the player to guess. Falls back to the
       -- generic tooltip for a pre-existing stuck flag carrying no reason.
       local status = info.add({ type = "label", caption = status_caption })
-      if r.stranded then
+      if r.thrust_paused then
+        status.tooltip = { "planet-express.strand-paused" } -- says how to release it
+      elseif r.stranded then
         status.tooltip = { "planet-express.strand-" .. (r.stranded_reason or "unknown") }
       end
       -- "on <planet>" only when the ship is actually parked somewhere (in transit

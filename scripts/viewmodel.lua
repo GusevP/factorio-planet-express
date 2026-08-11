@@ -284,6 +284,7 @@ function viewmodel.build(world)
         state = e.state,
         stranded = e.stranded == true,
         stranded_reason = e.stranded_reason, -- why it is stuck; ROW-only tooltip
+        thrust_paused = e.thrust_paused == true, -- ROW-only label: withdrawn, thrust paused
         held = e.held == true, -- ready-signal "held"; ROW-only display label
         location = e.location, -- planet the ship is currently AT (nil in transit)
         from = a and a.source_planet or nil,
@@ -1063,6 +1064,7 @@ function viewmodel.gather(tick)
       enrolled = entry.enrolled,
       stranded = entry.stranded, -- watchdog's stuck flag -> summary.ships_stuck
       stranded_reason = entry.stranded_reason, -- why (engine platform state) -> row tooltip
+      thrust_paused = entry.thrust_paused, -- withdrawn because thrust is paused -> row label
       -- Ready-signal "held": an idle, gated ship whose hub reads
       -- `planet-express-ready <= 0` is held back from dispatch -- a distinct roster
       -- label so it isn't mistaken for a missing ship. Reuses the snapshot's

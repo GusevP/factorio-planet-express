@@ -1,3 +1,10 @@
+Version: 2.1.7
+Date: 2026-08-11
+  Bugfixes:
+    - A platform whose thrust you have paused is no longer reported as flying its delivery forever. A paused platform keeps coasting on momentum but never advances its schedule, so it can never reach its next stop — yet because it was still moving, the fleet read that as progress and left it "in transit" indefinitely, holding its cargo reserved while the destination waited. The fleet now recognises paused thrust immediately.
+  Changes:
+    - A ship with paused thrust is handed back to you instead of being fought over. Its delivery is released so another ship can pick the demand up, its route is left exactly as it is, and the fleet monitor shows "thrust paused" with a note on how to release it. Un-pause the platform and it resumes its route and rejoins the fleet on its own — the mod never cancels a route mid-flight to do this.
+---------------------------------------------------------------------------------------------------
 Version: 2.1.6
 Date: 2026-08-05
   Features:

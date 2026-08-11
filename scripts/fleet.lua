@@ -300,6 +300,20 @@ function fleet.set_stranded(platform_id, stranded, reason)
   return entry
 end
 
+-- Mark / clear a ship as withdrawn because its THRUST is paused. Two jobs: the
+-- Monitor labels the row "thrust paused" rather than a bare "withdrawn", and
+-- `watchdog.recover_withdrawn` uses it to pick the right recovery test -- a
+-- thrust-paused ship keeps its route (clearing it mid-flight is the bug 2.1.4 fixed),
+-- so the platform-idle test that recovers a player-edit withdrawal never fires for it.
+-- Additive optional field, so pre-existing entries read as not-paused with no migration.
+function fleet.set_paused(platform_id, paused)
+  local entry = fleet.get(platform_id)
+  if entry then
+    entry.thrust_paused = paused == true or nil
+  end
+  return entry
+end
+
 -- Store a ship's learned ETA calibration factor (v1.1). The continuous flight
 -- sampler (watchdog) computes the EMA-updated value via `watchdog.ema_factor`
 -- and writes it back here; `build_snapshot` reads `entry.eta_factor or 1.0`, so
