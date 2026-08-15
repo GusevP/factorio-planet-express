@@ -1,10 +1,7 @@
-Version: 2.1.9
+Version: 2.1.8
 Date: 2026-08-15
   Bugfixes:
     - Ships no longer turn around in mid-flight and shuttle back and forth without ever delivering. While a ship was flying a two-way trade, the fleet re-checks how much the destination can still spare and lowers the load if it has dropped — and rewriting the ship's orders to match silently reset which stop it was heading for, sending it back to where it came from. It then re-requested the outbound cargo and set off again, looping indefinitely while appearing to be in transit. The active stop is now preserved, and the ship keeps flying without so much as a change in speed.
----------------------------------------------------------------------------------------------------
-Version: 2.1.8
-Date: 2026-08-15
   Changes:
     - The /pe-status console command now also reports, for every ship currently on a delivery, exactly what the fleet sees: the platform's own state, whether its thrust is paused, its speed, where it is, its schedule and which stop is active, whether its schedule still matches what the fleet wrote — and the decision the fleet is about to make about it. If a ship ever gets stuck, run /pe-status and send the output; it is written to factorio-current.log as well as the console, so it can be copied out.
 ---------------------------------------------------------------------------------------------------
