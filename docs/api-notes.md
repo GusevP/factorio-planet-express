@@ -43,7 +43,20 @@ read/modify/write table. The relevant pieces:
   `go_to_station` — which is the `LuaSchedule` returned by `platform.get_schedule()`,
   a DIFFERENT object. Using it on `platform.schedule` silently returned false and
   blocked every dispatch. Fixed 2026-06.) The watchdog reads the live schedule the
-  same way: `platform.schedule.records` / `.current`. The pure builder
+  same way: `platform.schedule.records` / `.current`.
+- **`LuaSchedule.set_records` RESETS the active stop to `1`. [confirmed in-engine,
+  2.0.77, 2026-08-15]** Measured on a platform in flight: `current` 2 → 1, while
+  `space_connection` and `speed` were untouched. Any caller that must keep the
+  active stop has to save `current` and restore it with `go_to_station(saved)` —
+  which is safe mid-flight (same connection, same speed, verified in the same run);
+  it only re-aims the schedule at the stop the ship was already travelling to.
+  `schedule.resync_conditions` does this; `schedule.write` does not need to (it
+  wants stop 1 and calls `go_to_station(1)` itself). **This entry exists because the
+  opposite was recorded here as fact and shipped:** a mid-flight re-clamp silently
+  turned two-way ships around, the watchdog re-pointed the hub at the forward
+  manifest (`stop_request` keys off `current`), and the trip shuttled forever while
+  reporting "in transit". Fixed in 2.1.9 / 1.10.10.
+  The pure builder
   (`scripts/schedule.lua`) produces a **plain agnostic table** (`{station,
   wait_conditions, requests}`); the thin wrapper strips `requests` (not a record
   field — see below) and assigns the cleaned records; cargo is realized via the

@@ -627,8 +627,9 @@ end
 -- timeout. Writes the rebuilt records through the full `LuaSchedule`
 -- (`set_records`) so the player's interrupts survive (the simplified
 -- `platform.schedule` assignment would wipe them); `set_records` replaces only the
--- records and leaves `current` (the active stop) where it is. Falls back to the
--- simplified assignment only if get_schedule is unavailable. No-op on a dead platform.
+-- records, but it RESETS the active stop to 1, so this restores it (see below).
+-- Falls back to the simplified assignment only if get_schedule is unavailable.
+-- No-op on a dead platform.
 function schedule.resync_conditions(platform, source, dest, manifest, ret, timeout, ready_signal)
   if not (platform and platform.valid) then
     return
