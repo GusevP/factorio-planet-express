@@ -306,6 +306,14 @@ commands.add_command("pe-status", "Planet Express: print dispatcher diagnostics"
   for _, line in ipairs(dispatcher.diagnose()) do
     out("[planet-express] " .. line)
   end
+  -- Per-ship watchdog view: the raw engine reads behind every free/withdraw/complete
+  -- decision, plus the branch they currently resolve to. Appended here rather than
+  -- given its own command so a bug report is one paste, and so a save that already
+  -- contains a stuck ship can be diagnosed without reproducing it.
+  out("[planet-express] === watchdog ===")
+  for _, line in ipairs(watchdog.diagnose(game and game.tick)) do
+    out("[planet-express] " .. line)
+  end
 end)
 
 -- In-engine test hook (factorio-test) -- a PERMANENT STUB SEAM, not a live

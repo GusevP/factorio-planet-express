@@ -1,3 +1,8 @@
+Version: 2.1.8
+Date: 2026-08-15
+  Changes:
+    - The /pe-status console command now also reports, for every ship currently on a delivery, exactly what the fleet sees: the platform's own state, whether its thrust is paused, its speed, where it is, its schedule and which stop is active, whether its schedule still matches what the fleet wrote — and the decision the fleet is about to make about it. If a ship ever gets stuck, run /pe-status and send the output; it is written to factorio-current.log as well as the console, so it can be copied out.
+---------------------------------------------------------------------------------------------------
 Version: 2.1.7
 Date: 2026-08-11
   Bugfixes:

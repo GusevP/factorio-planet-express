@@ -867,6 +867,109 @@ function watchdog.maybe_reclamp(a, platform, id)
 end
 
 -- ---------------------------------------------------------------------------
+-- on-demand diagnostics (read-only; /pe-status)
+-- ---------------------------------------------------------------------------
+
+-- Reverse `defines.space_platform_state` (value -> name), built on first use. The
+-- numeric state alone is useless in a bug report; the name is the whole point.
+local state_names
+local function platform_state_name(s)
+  if s == nil then
+    return "nil"
+  end
+  if not state_names then
+    state_names = {}
+    for name, value in pairs((defines and defines.space_platform_state) or {}) do
+      state_names[value] = name
+    end
+  end
+  return state_names[s] or ("?" .. tostring(s))
+end
+
+-- Which `run` branch would fire for this assignment RIGHT NOW, evaluated in the
+-- same order as the tick loop. This is the single most useful line in a bug report:
+-- it says what the watchdog is about to do, rather than leaving it to be inferred
+-- from the raw fields. Read-only -- it decides nothing and writes nothing.
+local function pending_branch(a, platform, tick)
+  if not (platform and platform.valid) then
+    return "FREE (destroyed/invalid platform)"
+  elseif watchdog.player_edited(a, platform) then
+    return "WITHDRAW (schedule signature differs -- player edit)"
+  elseif watchdog.parked_at_last_stop(platform) then
+    return "COMPLETE (parked at final stop)"
+  elseif platform.paused == true then
+    return "WITHDRAW (thrust paused)"
+  elseif watchdog.expired(a.deadline_tick, tick) then
+    return "FREE (no-progress deadline expired)"
+  elseif watchdog.load_impossible(a, platform) then
+    return "ABORT (source cannot supply the forward manifest)"
+  end
+  return "keep (in transit / working a stop)"
+end
+
+-- Dump everything the watchdog reads, per in-flight assignment, as plain lines.
+-- Written for a bug report from a save that already contains the fault: it prints
+-- the raw engine reads AND the branch they resolve to, so a stuck ship can be
+-- diagnosed without reproducing it. Strictly read-only.
+function watchdog.diagnose(tick)
+  local out = {}
+  local function add(fmt, ...)
+    out[#out + 1] = string.format(fmt, ...)
+  end
+  local assignments = storage and storage.assignments or {}
+  if next(assignments) == nil then
+    add("watchdog: no in-flight assignments")
+  end
+  for id, a in state.sorted_pairs(assignments) do
+    local platform = watchdog.platform_of(a)
+    local entry = a.ship and fleet.get(a.ship) or nil
+    add("a#%s ship=%s %s -> %s  phase=%s progress_index=%s",
+      tostring(id), tostring(a.ship), tostring(a.source_planet), tostring(a.dest_planet),
+      tostring(a.phase), tostring(a.progress_index))
+    add("  deadline: tick=%s now=%s remaining=%s window=%s",
+      tostring(a.deadline_tick), tostring(tick),
+      tostring(a.deadline_tick and tick and (a.deadline_tick - tick)), tostring(a.deadline_window))
+    if entry then
+      add("  fleet: state=%s stranded=%s reason=%s thrust_paused=%s enrolled=%s require_ready=%s",
+        tostring(entry.state), tostring(entry.stranded), tostring(entry.stranded_reason),
+        tostring(entry.thrust_paused), tostring(entry.enrolled), tostring(entry.require_ready))
+    else
+      add("  fleet: NO ENTRY for ship key %s", tostring(a.ship))
+    end
+    if platform and platform.valid then
+      local sched = platform.schedule
+      local records = sched and sched.records or {}
+      local stations = {}
+      for i, rec in ipairs(records) do
+        stations[#stations + 1] = string.format("%d:%s%s%s", i, tostring(rec.station),
+          rec.temporary == true and "(temp)" or "",
+          rec.created_by_interrupt == true and "(interrupt)" or "")
+      end
+      add("  platform: state=%s paused=%s speed=%s distance=%s",
+        platform_state_name(platform.state), tostring(platform.paused),
+        tostring(platform.speed), tostring(platform.distance))
+      add("  where: location=%s connection=%s",
+        tostring(platform.space_location and platform.space_location.name),
+        tostring(platform.space_connection and platform.space_connection.name))
+      add("  schedule: current=%s of %d [%s]",
+        tostring(sched and sched.current), #records, table.concat(stations, " "))
+      -- The player-edit test is the likeliest silent misfire, so show BOTH sides
+      -- rather than just the verdict.
+      local live = watchdog.read_signature(platform)
+      add("  signature match=%s", tostring(live == a.schedule_signature))
+      if live ~= a.schedule_signature then
+        add("    stored=%s", tostring(a.schedule_signature))
+        add("    live  =%s", tostring(live))
+      end
+    else
+      add("  platform: INVALID / destroyed")
+    end
+    add("  => would %s", pending_branch(a, platform, tick))
+  end
+  return out
+end
+
+-- ---------------------------------------------------------------------------
 -- the watchdog tick (IO; verified by playtest)
 -- ---------------------------------------------------------------------------
 
