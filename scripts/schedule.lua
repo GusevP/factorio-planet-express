@@ -636,7 +636,21 @@ function schedule.resync_conditions(platform, source, dest, manifest, ret, timeo
   local eng = schedule.engine_records(schedule.records_for(source, dest, manifest, ret, timeout, ready_signal))
   local sched = platform.get_schedule and platform.get_schedule()
   if sched and sched.set_records then
-    sched.set_records(eng)                                  -- records only: interrupts preserved, current kept
+    -- `set_records` RESETS the active stop to 1. api-notes.md claimed it was kept;
+    -- that was [provisional] and it is WRONG (verified in-engine 2026-08-15:
+    -- current 2 -> 1 on a platform in flight). Unrestored, a mid-flight re-clamp
+    -- flipped the ship's destination back to the SOURCE, it turned around, the
+    -- watchdog re-pointed the hub to the forward manifest because `stop_request`
+    -- keys off `current`, and the trip shuttled forever -- never completing, and
+    -- never tripping the no-progress deadline because the ship was still moving.
+    -- Restoring it via `go_to_station` leaves the flight untouched (same connection,
+    -- same speed -- also verified); it only re-aims the schedule at the stop the ship
+    -- was already travelling to.
+    local keep = sched.current
+    sched.set_records(eng)
+    if keep and keep > 1 and keep <= #eng and sched.current ~= keep and sched.go_to_station then
+      sched.go_to_station(keep)
+    end
   elseif platform.schedule then
     platform.schedule = { current = platform.schedule.current or 1, records = eng } -- fallback (drops interrupts)
   end

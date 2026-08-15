@@ -1,3 +1,8 @@
+Version: 2.1.9
+Date: 2026-08-15
+  Bugfixes:
+    - Ships no longer turn around in mid-flight and shuttle back and forth without ever delivering. While a ship was flying a two-way trade, the fleet re-checks how much the destination can still spare and lowers the load if it has dropped — and rewriting the ship's orders to match silently reset which stop it was heading for, sending it back to where it came from. It then re-requested the outbound cargo and set off again, looping indefinitely while appearing to be in transit. The active stop is now preserved, and the ship keeps flying without so much as a change in speed.
+---------------------------------------------------------------------------------------------------
 Version: 2.1.8
 Date: 2026-08-15
   Changes:
