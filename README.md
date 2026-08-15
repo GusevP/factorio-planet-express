@@ -199,8 +199,51 @@ verified against the runtime API — read it before proposing interface changes.
 
 Bug reports and feature requests are welcome either on the
 [mod portal](https://mods.factorio.com/mod/planet-express) discussion page or as
-a GitHub issue. For a bug, the most useful report says what the ships were doing
-and what you expected — a save file is rarely needed.
+a GitHub issue.
+
+### Reporting a stuck or misbehaving ship
+
+**While the ship is still stuck**, run this in the console (`~` or `/`):
+
+```
+/pe-status
+```
+
+Timing matters — once the ship frees itself or you intervene by hand, the evidence
+is gone.
+
+It prints to the console *and* to the log file, and the console can't be
+copy-pasted, so take the text from there:
+
+| | |
+| --- | --- |
+| Windows | `%APPDATA%\Factorio\factorio-current.log` |
+| macOS | `~/Library/Application Support/factorio/factorio-current.log` |
+| Linux | `~/.factorio/factorio-current.log` |
+
+Send everything from `=== watchdog ===` onward. Each ship on a delivery gets a
+block like this:
+
+```
+a#815 ship=1/2 nauvis -> gleba  phase=enroute progress_index=2
+  deadline: tick=16594800 now=16558980 remaining=35820 window=36000
+  fleet: state=enroute stranded=false reason=nil thrust_paused=nil
+  platform: state=on_the_path paused=false speed=1.37 distance=0.17
+  where: location=nil connection=nauvis-gleba
+  schedule: current=1 of 3 [1:nauvis 2:gleba 3:nauvis]
+  signature match=true
+  => would keep (in transit / working a stop)
+```
+
+The last line is the important one: it says what the fleet is about to do with that
+ship. The block above is a real fault — `current=1` while the ship is flying leg 2 —
+and it is how the mid-flight turnaround bug was found.
+
+The command is read-only, and it is a mod command rather than the Lua console
+(`/c`), so it does not disable achievements. It is safe on a multiplayer server.
+
+If the ship recovers before you can catch it, the report is still worth sending: the
+fleet monitor's Alerts section keeps a backlog of recent timeouts and withdrawals.
 
 ## License
 
