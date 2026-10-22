@@ -212,11 +212,11 @@ dispatcher.DISTANCE_FALLBACK = 1e9
 -- serialized into the save). nil until the first build.
 local distance_map = nil
 
--- A SpaceLocationID is recorded as a name string, but stay robust if the runtime
--- hands back the prototype object instead (provisional seam) -- pull `.name` off a
--- table, pass a string through.
+-- LuaSpaceConnectionPrototype.from / .to are LuaSpaceLocationPrototype objects
+-- (userdata at runtime), so pull `.name` off them; a plain table (the pure-Lua
+-- test runner) works the same way, and a string passes through.
 local function loc_name(x)
-  if type(x) == "table" then
+  if type(x) == "userdata" or type(x) == "table" then
     return x.name
   end
   return x

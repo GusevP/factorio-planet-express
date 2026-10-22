@@ -678,12 +678,12 @@ function watchdog.note_progress(a, platform, tick)
   end
 end
 
--- A SpaceLocationID is recorded as a name string, but stay robust if the runtime
--- hands back the prototype object instead (provisional seam) -- pull `.name` off a
--- table, pass a string through. Mirrors dispatcher.loc_name (kept local to each
+-- LuaSpaceConnectionPrototype.from / .to are LuaSpaceLocationPrototype objects
+-- (userdata at runtime), so pull `.name` off them; a plain table (the pure-Lua
+-- test runner) works the same way, and a string passes through. Mirrors dispatcher.loc_name (kept local to each
 -- module rather than exported, to avoid widening the seam).
 local function loc_name(x)
-  if type(x) == "table" then
+  if type(x) == "userdata" or type(x) == "table" then
     return x.name
   end
   return x
