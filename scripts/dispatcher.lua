@@ -242,7 +242,50 @@ function dispatcher.build_distances()
       end
     end
   end
+  dispatcher.fill_missing_distances(map)
   distance_map = map
+  return map
+end
+
+-- PURE: fills every pair that has no direct connection with the length of the
+-- shortest chain of connections (Floyd-Warshall over the sorted location list,
+-- so every peer gets the same sums). Direct lengths are kept as they are: the
+-- watchdog calibrates ship speed against the length of the connection a ship is
+-- on. Pairs with no path stay missing (-> DISTANCE_FALLBACK). Returns the map.
+function dispatcher.fill_missing_distances(map)
+  local names = state.sorted_keys(map)
+  local dist = {}
+  for _, a in ipairs(names) do
+    dist[a] = {}
+    for b, length in pairs(map[a]) do
+      dist[a][b] = length
+    end
+  end
+  for _, k in ipairs(names) do
+    local via = dist[k]
+    for _, a in ipairs(names) do
+      local ak = dist[a][k]
+      if ak and a ~= k then
+        local row = dist[a]
+        for _, b in ipairs(names) do
+          local kb = via[b]
+          if kb and b ~= a and b ~= k then
+            local d = ak + kb
+            if row[b] == nil or d < row[b] then
+              row[b] = d
+            end
+          end
+        end
+      end
+    end
+  end
+  for _, a in ipairs(names) do
+    for b, d in pairs(dist[a]) do
+      if map[a][b] == nil then
+        map[a][b] = d
+      end
+    end
+  end
   return map
 end
 
