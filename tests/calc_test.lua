@@ -2719,22 +2719,17 @@ describe("watchdog.phase_for -- live loading/unloading/enroute lifecycle", funct
     "nil current -> ENROUTE")
 end)
 
-describe("watchdog.load_impossible -- abort a trip whose source ran dry", function()
-  local function plat(current)
-    return { valid = true, schedule = { current = current } }
-  end
-  -- at the forward load stop with an emptied manifest -> the source can supply
-  -- nothing, so the trip is impossible (abort instead of waiting out the timeout)
-  assert_true(watchdog.load_impossible({ manifest = {} }, plat(1)),
-    "current=1 + empty manifest -> impossible")
-  -- still has something loadable -> not impossible (ships the partial)
-  assert_eq(watchdog.load_impossible({ manifest = { ["iron-plate"] = 5 } }, plat(1)), false,
-    "non-empty manifest -> loadable")
-  -- past the load stop (return leg / drop) -> never aborted here
-  assert_eq(watchdog.load_impossible({ manifest = {} }, plat(2)), false,
-    "current!=1 -> not the forward load stop")
-  -- no platform -> false (never abort blindly)
-  assert_eq(watchdog.load_impossible({ manifest = {} }, nil), false, "no platform -> false")
+describe("watchdog.return_reclamp_due -- one-shot return re-clamp, never the forward leg", function()
+  local ret = { manifest = { ["iron-plate"] = 50 }, return_manifest = { ["coal"] = 283 } }
+  -- the forward load stop is never re-clamped: bots moving stock into a silo for
+  -- this ship read as a surplus drop, and a per-tick re-clamp looped on it
+  assert_eq(watchdog.return_reclamp_due(ret, 1), false, "forward load stop -> never")
+  assert_true(watchdog.return_reclamp_due(ret, 2), "return request just went live -> due")
+  ret.return_clamped = true
+  assert_eq(watchdog.return_reclamp_due(ret, 2), false, "latched -> not again, even after a bounce")
+  assert_eq(watchdog.return_reclamp_due({ manifest = {} }, 2), false, "one-way trip -> nothing to clamp")
+  assert_eq(watchdog.return_reclamp_due({ return_manifest = {} }, 2), false, "empty return -> nothing to clamp")
+  assert_eq(watchdog.return_reclamp_due(ret, 3), false, "drop stop -> never")
 end)
 
 -- ---------------------------------------------------------------------------

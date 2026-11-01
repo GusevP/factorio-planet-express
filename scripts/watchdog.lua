@@ -20,10 +20,10 @@
 --   * ship destroyed / platform invalid (asteroid loss) -> free + alert.
 --   * no-progress timeout (fuel starvation / stranded)  -> free + alert.
 --   * player edited the schedule mid-flight             -> withdraw + free.
---   * re-clamp on the load stop: while the ship sits on a LOAD stop (the source
---     for the forward leg, the destination for the two-way return leg), lower its
---     per-stop request to the CURRENT surplus so a stock drop since dispatch
---     can't strip-mine that planet below its reserve.
+--   * one-shot return re-clamp: when the two-way return request goes live, lower
+--     it once to the destination's CURRENT surplus (it was sized at dispatch, a
+--     whole forward leg earlier). The forward leg is never re-clamped -- its
+--     dispatch-time reservation is fresh.
 --   * partial fill: the ship leaves with whatever loaded (its source stop waits
 --     on "cargo FULL or timeout"); on delivery the assignment completes
 --     and clears its inbound_commit, so any remaining shortfall re-opens and is
@@ -212,7 +212,7 @@ function watchdog.flight_sample(prev, cur, length)
   return ratio
 end
 
--- Re-clamp amount on arrival: never request MORE than originally committed, and
+-- Re-clamp amount: never request MORE than originally committed, and
 -- never more than the current surplus. `new = clamp0(min(old, current_surplus))`.
 -- Lowering-only (it can't raise a request the player/dispatcher didn't size).
 function watchdog.reclamp_amount(old, current_surplus)
@@ -599,17 +599,6 @@ function watchdog.platform_idle(platform)
   return records == nil or #records == 0
 end
 
--- Is the ship at the forward LOAD stop (current == 1) with an EMPTY forward
--- manifest? Happens when a re-clamp drains the manifest (the source can't supply
--- any of it anymore). The trip can never load anything, so the run loop aborts it
--- rather than wait out the per-stop timeout. Read of `schedule.current` + the
--- (re-clamped) `a.manifest`.
-function watchdog.load_impossible(a, platform)
-  local sched = platform and platform.valid and platform.schedule
-  return sched ~= nil and sched.current == 1
-    and a.manifest ~= nil and next(a.manifest) == nil
-end
-
 -- [provisional] Re-issue the active stop's cargo request as `manifest` (scoped to
 -- the `import_from` planet). Cargo is the hub's requester logistic request
 -- (api-notes.md §1), NOT a schedule-record field, so the re-clamp lowers it and
@@ -665,17 +654,18 @@ function watchdog.note_progress(a, platform, tick)
   -- every tick self-heals it; the write is idempotent when the request already matches.
   local manifest, import_from = watchdog.stop_request(a, current)
   if watchdog.rewrite_source_request(platform, manifest, import_from) == false then
-    return -- hub unreachable; retry next tick (the no-progress deadline still trips)
+    return false -- hub unreachable; retry next tick (the no-progress deadline still trips)
   end
   -- Reset the no-progress deadline ONLY on a genuine ADVANCE to a new stop. The
   -- deadline is a NO-PROGRESS watchdog (a stuck ship is freed); re-pointing the
   -- request on a steady `current` must not keep resetting it, or a stuck ship would
-  -- never time out. At the source (stop 1) the request is then refined by
+  -- never time out. The return request is then re-clamped once by
   -- `maybe_reclamp`, which runs after note_progress in the tick loop.
   if watchdog.advanced(a.progress_index, current) then
     a.progress_index = current
     a.deadline_tick = tick + (a.deadline_window or watchdog.DEADLINE_WINDOW)
   end
+  return true
 end
 
 -- A SpaceLocationID is recorded as a name string, but stay robust if the runtime
@@ -782,29 +772,22 @@ end
 -- re-clamp on the load stop (pure amount tested; stop/rewrite provisional)
 -- ---------------------------------------------------------------------------
 
--- Re-clamp ONE leg's `manifest` down to the live surplus at node `node_id` (net
--- of what OTHER in-flight assignments already commit from it -- `exclude_id` is
--- self), rewrite the hub request scoped to `import_from`, commit the lowered
--- bookkeeping via `commit`, and re-stamp the signature -- but ONLY when the hub
--- rewrite succeeds. A failed rewrite records NOTHING: the larger request +
--- bookkeeping stay intact and are retried next tick, so we never claim to have
--- lowered a request the hub did not actually accept. Lower-only
--- (`reclamp_amount`); a no-op when surplus is steady. Re-stamping keeps our own
--- edit from being mistaken for a player edit next tick.
-local function reclamp_leg(a, platform, exclude_id, node_id, import_from, manifest, commit)
-  local node = storage.nodes and storage.nodes[node_id]
+-- Lower the return manifest to the destination's live surplus (net of what OTHER
+-- in-flight assignments commit from it -- `id` is self), rewriting the hub request,
+-- wait conditions and signature to match. Returns false only on a failed hub write
+-- (NOTHING recorded, retried next tick). Lower-only (`reclamp_amount`).
+local function reclamp_return(a, platform, id)
+  local node = storage.nodes and storage.nodes[a.dest]
   if not node then
-    return
+    return true
   end
-  local other = watchdog.other_committed(node_id, exclude_id)
+  local other = watchdog.other_committed(a.dest, id)
   local new_manifest = {}
   local changed = false
-  for item, qty in state.sorted_pairs(manifest or {}) do
+  for item, qty in state.sorted_pairs(a.return_manifest) do
     local available = stock.surplus(node, item) - (other[item] or 0)
     local clamped = watchdog.reclamp_amount(qty, available)
-    -- OMIT items that clamp to zero (source can no longer spare any) rather than
-    -- keep a min=0 request / item>=0 condition. The manifest may then go EMPTY,
-    -- which the abort check (load_impossible) uses to free a pointless trip.
+    -- OMIT items that clamp to zero rather than keep a min=0 request / item>=0 condition.
     if clamped > 0 then
       new_manifest[item] = clamped
     end
@@ -813,56 +796,42 @@ local function reclamp_leg(a, platform, exclude_id, node_id, import_from, manife
     end
   end
   if not changed then
-    return
+    return true
   end
-  if watchdog.rewrite_source_request(platform, new_manifest, import_from) == false then
-    return -- leave the larger request + bookkeeping intact; retry next tick
+  if watchdog.rewrite_source_request(platform, new_manifest, a.dest_planet) == false then
+    return false
   end
-  commit(new_manifest)
-  -- Lower the schedule's wait conditions to match the lowered request, else the
-  -- load condition (item >= old qty) strands above the new request and the ship
-  -- waits out the timeout. `commit` already updated a.manifest/a.return_manifest,
-  -- so rebuild from the current pair.
+  a.return_manifest = new_manifest
+  -- Without the resync the load condition (item >= old qty) strands above the new
+  -- request and the ship waits out the timeout.
   schedule.resync_conditions(platform, a.source_planet, a.dest_planet,
     a.manifest, a.return_manifest, a.wait_timeout, a.gate_ready)
   a.schedule_signature = watchdog.read_signature(platform) -- our edit, not the player's
   state.debug_log("watchdog reclamp a#" .. tostring(a.ship))
+  return true
 end
 
--- Keep each LOAD stop clamped to its planet's CURRENT surplus while the ship sits
--- on that stop, so a stock drop since dispatch can't strip-mine below the
--- reserve. `schedule.current` is only the index of the current DESTINATION -- it
--- covers BOTH the transit toward a stop AND parking on it, NOT the instant of
--- arrival -- so rather than re-clamp once "on arrival" we re-clamp EVERY tick the
--- ship is on a load stop: the forward load at the source (stop 1) and the two-way
--- return load at the destination TURNAROUND (stop 2). Lower-only and idempotent
--- when surplus is steady; an over-correction on a transient dip simply under-loads
--- and re-opens next dispatcher tick. Runs after note_progress in the tick loop.
+-- Pure: is the one-shot return re-clamp still due at stop `current`? Only on the
+-- return-load stop (2), only while a return manifest exists, and only until it has
+-- run once (`a.return_clamped`, persisted). Never on the forward leg.
+function watchdog.return_reclamp_due(a, current)
+  return current == 2 and not a.return_clamped
+    and a.return_manifest ~= nil and next(a.return_manifest) ~= nil
+end
+
+-- Called only after note_progress has written the return request. Never repeated:
+-- the surplus read counts only stock still on logistic networks, so cargo bots move
+-- into a silo for THIS ship reads as a drop -- a per-tick re-clamp shrank its own
+-- request and looped. The latch survives interrupt bounces; an old save upgraded
+-- mid-load clamps once more because its latch is nil.
 function watchdog.maybe_reclamp(a, platform, id)
   local sched = platform and platform.valid and platform.schedule
   local current = sched and sched.current
-  -- Interrupt guard (same as note_progress): re-clamp only when `current` is one of
-  -- OUR route stops. A refuel/rearm interrupt can splice in its own record(s) and
-  -- shift `current` onto a station the mod never wrote; the `current == 1`/`== 2`
-  -- branches below key the re-clamp off that numeric index, so acting on a foreign
-  -- stop would re-clamp the WRONG leg's cargo against the wrong reserve.
   if not watchdog.current_is_ours(a, sched and sched.records, current) then
     return
   end
-  if current == 1 then
-    -- forward leg: source surplus honors the SOURCE reserve
-    reclamp_leg(a, platform, id, a.source, a.source_planet, a.manifest, function(m)
-      a.manifest = m
-      a.inbound_commit = m
-      a.surplus_commit = m
-    end)
-  elseif current == 2 and a.return_manifest and next(a.return_manifest) ~= nil then
-    -- return leg: the destination turnaround stop loads the return cargo,
-    -- so honor the DESTINATION reserve here -- a stock drop at the destination
-    -- before the ship loads could otherwise export it below its own reserve.
-    reclamp_leg(a, platform, id, a.dest, a.dest_planet, a.return_manifest, function(m)
-      a.return_manifest = m
-    end)
+  if watchdog.return_reclamp_due(a, current) and reclamp_return(a, platform, id) then
+    a.return_clamped = true
   end
 end
 
@@ -901,8 +870,6 @@ local function pending_branch(a, platform, tick)
     return "WITHDRAW (thrust paused)"
   elseif watchdog.expired(a.deadline_tick, tick) then
     return "FREE (no-progress deadline expired)"
-  elseif watchdog.load_impossible(a, platform) then
-    return "ABORT (source cannot supply the forward manifest)"
   end
   return "keep (in transit / working a stop)"
 end
@@ -1009,7 +976,7 @@ end
 -- The on_nth_tick entry. Iterates assignments in stable id order (determinism)
 -- and, for each, applies the first matching rule:
 --   destroyed -> free+alert; player-edited -> withdraw+free; completed -> free
---   (silent); timed out -> free+alert; otherwise -> re-clamp at the source.
+--   (silent); timed out -> free+alert; otherwise -> one-shot return re-clamp.
 -- Safe to call before any assignments exist.
 function watchdog.run(tick)
   if not (storage and storage.assignments) then
@@ -1059,7 +1026,7 @@ function watchdog.run(tick)
     else
       -- Reset the no-progress clock on stop advances BEFORE testing the deadline,
       -- so a ship that just progressed is never falsely timed out.
-      watchdog.note_progress(a, platform, tick)
+      local request_written = watchdog.note_progress(a, platform, tick)
       if watchdog.expired(a.deadline_tick, tick) then
         -- Name the cause: a ship gated by its ready signal that held for the whole
         -- window (require_ready on AND `planet-express-ready <= 0` now) is stuck
@@ -1080,35 +1047,26 @@ function watchdog.run(tick)
         -- ship's learned eta_factor (no-op when parked/loading -- it clears the
         -- cursor then). Runs after the completion/timeout checks, before reclamp.
         watchdog.sample_flight(a, platform, tick)
-        watchdog.maybe_reclamp(a, platform, id)
-        if watchdog.load_impossible(a, platform) then
-          -- The source can no longer supply ANY of the forward manifest (drained
-          -- since dispatch -- another ship, manual use, or production consumed it),
-          -- so the re-clamp emptied it. Don't sit out the timeout for cargo that
-          -- will never arrive: abort, free the ship to idle, and re-open the demand
-          -- so the next dispatch re-evaluates (and won't re-dispatch while dry).
-          state.debug_log("watchdog abort a#" .. tostring(id)
-            .. ": source can't supply the forward manifest -- nothing to load")
-          watchdog.free_assignment(id, nil, fleet.IDLE, tick)
-        else
-          -- The assignment SURVIVES this iteration (in transit, or loading at a
-          -- source / turnaround stop): publish the live loading/unloading phase.
-          -- `parked` is `speed == 0` AND `current_is_ours` (a foreign / unreadable
-          -- stop reads as not-parked so phase_for yields ENROUTE).
-          local sched = platform.schedule
-          local current = sched and sched.current
-          local parked = (platform.speed or 0) == 0
-            and watchdog.current_is_ours(a, sched and sched.records, current)
-          local phase = watchdog.phase_for(a, current, parked)
-          fleet.set_state(a.ship, phase)
-          a.phase = phase
-          if phase ~= fleet.ENROUTE then
-            -- Parked at one of OUR stops loading/unloading -> real progress, so a
-            -- previously-stranded ship is no longer stuck. ENROUTE alone does NOT
-            -- clear it: a stranded ship re-dispatched reads ENROUTE but still can't
-            -- fly, so it must stay stuck until it physically works a stop.
-            fleet.set_stranded(a.ship, false)
-          end
+        if request_written then
+          watchdog.maybe_reclamp(a, platform, id)
+        end
+        -- The assignment SURVIVES this iteration (in transit, or loading at a
+        -- source / turnaround stop): publish the live loading/unloading phase.
+        -- `parked` is `speed == 0` AND `current_is_ours` (a foreign / unreadable
+        -- stop reads as not-parked so phase_for yields ENROUTE).
+        local sched = platform.schedule
+        local current = sched and sched.current
+        local parked = (platform.speed or 0) == 0
+          and watchdog.current_is_ours(a, sched and sched.records, current)
+        local phase = watchdog.phase_for(a, current, parked)
+        fleet.set_state(a.ship, phase)
+        a.phase = phase
+        if phase ~= fleet.ENROUTE then
+          -- Parked at one of OUR stops loading/unloading -> real progress, so a
+          -- previously-stranded ship is no longer stuck. ENROUTE alone does NOT
+          -- clear it: a stranded ship re-dispatched reads ENROUTE but still can't
+          -- fly, so it must stay stuck until it physically works a stop.
+          fleet.set_stranded(a.ship, false)
         end
       end
     end

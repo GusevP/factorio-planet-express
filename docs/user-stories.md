@@ -192,13 +192,13 @@ and a ship whose destination no longer wants the cargo shouldn't linger at the p
 or loop re-loading.**
 
 Flow (`watchdog`, each tick):
-- **Source dry (load side).** While at a load stop, `maybe_reclamp` re-clamps the
-  manifest to the source's **live** surplus and rewrites BOTH the hub request and
-  the schedule's wait conditions (`schedule.resync_conditions`) so they stay in
-  sync — partial availability ships the partial. If the forward manifest empties
-  entirely, `load_impossible` is true and the run loop **aborts** the trip: frees
-  the ship to idle and re-opens the demand for the next dispatch (which won't
-  re-send while dry, and will once the source recovers).
+- **Source dry (load side).** The forward manifest is the dispatch-time
+  reservation and is never lowered while the ship loads (stock moving into a silo
+  for this very ship would read as a drop). If the source can't fill it, the
+  load-stop timeout ships the partial. The two-way return manifest, sized a whole
+  leg earlier, is re-clamped **once** by `maybe_reclamp` when its request goes
+  live, rewriting BOTH the hub request and the wait conditions
+  (`schedule.resync_conditions`).
 - **Destination stops wanting it (delivery side, symmetric).** While parked at the
   final stop still holding manifest cargo, `delivery_impossible` reads the drop
   planet's **raw** pad request (`requested − on_hand`, NOT the in-flight-netted

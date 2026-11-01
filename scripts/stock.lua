@@ -81,8 +81,8 @@ end
 --     and the union was empty -> total dispatch starvation.
 -- The surface-wide sum sees the stock wherever it is bot-networked, regardless of how
 -- the silos are fed. Its only downside -- over-counting a planet split into DISCONNECTED
--- networks -- is the SAFE direction (an over-promise self-corrects via the re-clamp /
--- load_impossible paths), far better than starving every dispatch. `force.logistic_networks`
+-- networks -- is the SAFE direction (an over-promise ships partial when the load-stop
+-- timeout expires), far better than starving every dispatch. `force.logistic_networks`
 -- is a `dictionary[surface name -> array[LuaLogisticNetwork]]` (confirmed, 2.0). Summing
 -- is a commutative reduction, so plain `pairs` is fine. Degrades to 0 when the
 -- surface/force/networks are absent (the pure-Lua test runner, or a padless ghost).

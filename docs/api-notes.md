@@ -354,8 +354,8 @@ network stock in a running game before flipping §2 to [confirmed].]**
 >
 > The surface-wide sum sees the stock wherever it is bot-networked, regardless of how
 > the silos are fed. Its one downside — over-counting a planet split into DISCONNECTED
-> networks — is the SAFE direction (an over-promise self-corrects via the re-clamp /
-> `load_impossible` paths), far better than starving every dispatch.
+> networks — is the SAFE direction (an over-promise ships partial when the load-stop
+> timeout expires), far better than starving every dispatch.
 
 - **Per-quality stock (Task 9, #4b) [provisional — 2.0
   `LuaLogisticNetwork.get_item_count` takes a SINGLE `ItemWithQualityID`
@@ -887,9 +887,12 @@ What landed as a deliberate seam, ready for the in-engine confirmation:
   `schedule_signature` (decision (b)), stamped at commit and recompared each
   watchdog tick; mismatch ⇒ withdraw, never fight. No dependency on a 2.0
   schedule-changed event existing.
-- **Re-clamp on arrival** (§2 in-flight caveat) — `watchdog.reclamp_amount`
-  (`new = min(old, current surplus)`) is pure and tested; the arrival
-  trigger + request rewrite are the provisional IO around it.
+- **Return-leg re-clamp** (§2 in-flight caveat) — `watchdog.reclamp_amount`
+  (`new = min(old, current surplus)`) and the one-shot `return_reclamp_due`
+  latch are pure and tested; the request rewrite is the provisional IO around
+  them. Runs once, when the return request goes live; never on the forward leg
+  (a per-tick re-clamp read the ship's own silo loading as a stock drop and
+  looped — playtest report 2026-11).
 - **Distance metric** (Task 5 tie-break) — a provisional swappable seam;
   `best_source` tie-breaks nearest then lowest node id, so it stays
   deterministic regardless of the metric chosen in-engine.
