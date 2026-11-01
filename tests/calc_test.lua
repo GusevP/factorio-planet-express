@@ -2680,6 +2680,21 @@ describe("watchdog.note_progress -- movement resets the no-progress deadline", f
   }
   watchdog.note_progress(a, stalled, 5000)
   assert_eq(a.deadline_tick, 100, "speed 0 on a steady stop -> deadline untouched")
+  -- `no_schedule` drifts at speed 1/6 with the engines off: not progress (playtest 2026-11)
+  local saved_defines = defines
+  defines = { space_platform_state = { no_schedule = 1, on_the_path = 2 } }
+  local drifting = {
+    valid = true, speed = 1 / 6, state = 1,
+    schedule = { current = 1, records = { { station = "vulcanus" }, { station = "nauvis" } } },
+  }
+  a.progress_index = 1
+  watchdog.note_progress(a, drifting, 5000)
+  local drift_deadline = a.deadline_tick
+  drifting.state = 2
+  watchdog.note_progress(a, drifting, 5000)
+  defines = saved_defines
+  assert_eq(drift_deadline, 100, "drifting no_schedule platform -> deadline untouched")
+  assert_eq(a.deadline_tick, 41000, "same speed on_the_path -> still progress")
 end)
 
 describe("watchdog.phase_for -- live loading/unloading/enroute lifecycle", function()

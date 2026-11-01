@@ -628,7 +628,11 @@ function watchdog.note_progress(a, platform, tick)
   -- thruster fuel, no path, held at a stop) sits at speed 0 and still times out.
   -- Checked BEFORE the interrupt guard below: a ship flying a refuel interrupt is
   -- making progress too.
-  if (platform.speed or 0) ~= 0 then
+  -- A `no_schedule` platform drifts at a small non-zero speed with its engines off,
+  -- so its movement is not progress.
+  local d = defines and defines.space_platform_state
+  local drifting = d ~= nil and platform.state == d.no_schedule
+  if (platform.speed or 0) ~= 0 and not drifting then
     a.deadline_tick = tick + (a.deadline_window or watchdog.DEADLINE_WINDOW)
   end
   -- Interrupt guard: only act on a stop that is one of OUR route stations. A

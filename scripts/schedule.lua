@@ -646,10 +646,12 @@ function schedule.resync_conditions(platform, source, dest, manifest, ret, timeo
     -- never tripping the no-progress deadline because the ship was still moving.
     -- Restoring it via `go_to_station` leaves the flight untouched (same connection,
     -- same speed -- also verified); it only re-aims the schedule at the stop the ship
-    -- was already travelling to.
+    -- was already travelling to. Re-aim even when `current` was already 1: an equal
+    -- index can't prove the travel target survived (suspected cause of in-flight
+    -- `no_schedule` drift, playtest 2026-11 -- unverified in-engine).
     local keep = sched.current
     sched.set_records(eng)
-    if keep and keep > 1 and keep <= #eng and sched.current ~= keep and sched.go_to_station then
+    if keep and keep >= 1 and keep <= #eng and sched.go_to_station then
       sched.go_to_station(keep)
     end
   elseif platform.schedule then
