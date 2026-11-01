@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://mods.factorio.com/mod/planet-express"><img src="https://img.shields.io/factorio-mod-portal/dt/planet-express?label=mod%20portal%20downloads&color=orange" alt="Mod portal downloads"></a>
-  <img src="https://img.shields.io/badge/Factorio-2.0%20%7C%202.1-orange" alt="Factorio 2.0 and 2.1">
+  <img src="https://img.shields.io/badge/Factorio-2.1-orange" alt="Factorio 2.1">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a>
 </p>
 

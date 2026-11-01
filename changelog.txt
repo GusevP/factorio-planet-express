@@ -2,6 +2,8 @@ Version: 2.1.10
 Date: 2026-11-01
   Bugfixes:
     - A ship loading a large order no longer gets stuck in a loop of shrinking requests. As bots carried the cargo into the rocket silo, it left the planet's logistic network, so the fleet read the ship's own loading as the planet running low and lowered the request; the bots then pulled the cargo back out of the silo, the stock reappeared, and the cycle repeated. The amount reserved when the ship is dispatched now stays fixed while it loads. A two-way trip's return cargo is still checked against the destination's stock once, when the ship sets off for it.
+  Changes:
+    - Requires Factorio 2.1. Factorio 2.0 is no longer supported; the last 2.0 release is 1.10.10.
 ---------------------------------------------------------------------------------------------------
 Version: 2.1.9
 Date: 2026-08-15
