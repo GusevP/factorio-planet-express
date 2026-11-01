@@ -1,3 +1,9 @@
+Version: 2.1.11
+Date: 2026-11-01
+  Bugfixes:
+    - A ship that loses its active stop in mid-flight is no longer reported as in transit forever. With no stop to fly to, a platform switches its engines off and drifts slowly, and the fleet counted that drift as progress, so the ship never timed out and its delivery stayed reserved. A drifting ship is now flagged as stuck after the usual no-progress window and picked up by the next dispatch.
+    - When the fleet rewrites a ship's orders in mid-flight, it now always points the ship back at the stop it was flying to, including its first stop. This was the suspected cause of ships dropping their active stop.
+---------------------------------------------------------------------------------------------------
 Version: 2.1.10
 Date: 2026-11-01
   Bugfixes:
