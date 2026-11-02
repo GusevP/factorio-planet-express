@@ -1133,6 +1133,25 @@ describe("dispatcher.distance -- pure nil-guarded map lookup (v1.1)", function()
   assert_eq(dispatcher.distance(nil, nil, nil), FB, "all nil -> fallback (no crash)")
 end)
 
+describe("dispatcher.fill_missing_distances -- multi-hop pairs (pure)", function()
+  -- nauvis - vulcanus 600, nauvis - gleba 1000, gleba - aquilo 500, vulcanus - gleba 2000 (longer than via nauvis)
+  local map = {
+    ["nauvis"] = { ["vulcanus"] = 600, ["gleba"] = 1000 },
+    ["vulcanus"] = { ["nauvis"] = 600, ["gleba"] = 2000 },
+    ["gleba"] = { ["nauvis"] = 1000, ["aquilo"] = 500, ["vulcanus"] = 2000 },
+    ["aquilo"] = { ["gleba"] = 500 },
+    ["island"] = {},
+  }
+  assert_eq(dispatcher.fill_missing_distances(map), map, "fills in place and returns the map")
+  assert_eq(dispatcher.distance(map, "nauvis", "aquilo"), 1500, "two hops: nauvis -> gleba -> aquilo")
+  assert_eq(dispatcher.distance(map, "aquilo", "nauvis"), 1500, "multi-hop stays symmetric")
+  assert_eq(dispatcher.distance(map, "vulcanus", "aquilo"), 2100, "three hops beat the longer direct leg")
+  assert_eq(dispatcher.distance(map, "vulcanus", "gleba"), 2000,
+    "a direct connection keeps its own length (the watchdog calibrates against it)")
+  assert_eq(dispatcher.distance(map, "nauvis", "island"), dispatcher.DISTANCE_FALLBACK, "unreachable -> fallback")
+  assert_eq(map["nauvis"]["nauvis"], nil, "no self entries are added")
+end)
+
 describe("dispatcher.eta -- pure ETA scorer (v1.1)", function()
   local NS = dispatcher.NOMINAL_SPEED
   local function approx(a, b)
